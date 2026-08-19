@@ -1,0 +1,27 @@
+[dry-run] would create output dir: /home/dan/Projects/bft/aspen-bft/runs/experiment_aspen_TIMESTAMP
+
+### Bringing up cluster: gcloud-aspen-main.yaml ###
+[dry-run] $ python3 /home/dan/Projects/bft/aspen-bft/scripts/benchmarks/bench.py vm-start --config /home/dan/Projects/bft/aspen-bft/scripts/benchmarks/configs/gcloud-aspen-main.yaml
+[dry-run] (skipping 15s VM boot wait, sync-clocks, keep-alive)
+
+############################################################
+# aspen  ->  /home/dan/Projects/bft/aspen-bft/runs/experiment_aspen_TIMESTAMP/aspen
+############################################################
+[dry-run estimate] aspen: payload-sizes=2 × gamma=1 × max-in-flight=1 × 5 trials = 110 trials ≈ 4h39m (≤18 VMs × $0.726/hr [n4-standard-16] ≈ $60.82)
+[dry-run] $ python3 /home/dan/Projects/bft/aspen-bft/scripts/benchmarks/sweep.py --trials 5 --output-dir /home/dan/Projects/bft/aspen-bft/runs/experiment_aspen_TIMESTAMP/aspen --upload --no-netmon --commit-log-sample 100 --config /home/dan/Projects/bft/aspen-bft/scripts/benchmarks/configs/gcloud-aspen-main.yaml --protocol aspen --rate-search --payload-sizes 16 1024 --gamma 1.2 --max-in-flight 0 --duration-secs 70
+[dry-run] $ python3 /home/dan/Projects/bft/aspen-bft/scripts/benchmarks/bench.py vm-stop --config /home/dan/Projects/bft/aspen-bft/scripts/benchmarks/configs/gcloud-aspen-main.yaml
+
+====================================================================================
+  DRY-RUN COST ESTIMATE  (per-trial overhead ~50s + 1.8s/VM, n4-standard-16 @ $0.726/hr)
+====================================================================================
+  aspen                               110 trials      4h39m   ≤ 18 VMs   $   60.82
+------------------------------------------------------------------------------------
+  GRAND TOTAL                         110 trials      4h39m            $  60.82
+====================================================================================
+  1 sweep(s) search for the knee, so their point count is estimated, assuming
+  a knee near 100,000 req/s (8 climb points from 1k, plus refine). A protocol that
+  saturates earlier runs fewer points; one that never saturates runs more. Treat
+  the total as a planning figure.
+====================================================================================
+
+Done. Results under: /home/dan/Projects/bft/aspen-bft/runs/experiment_aspen_TIMESTAMP

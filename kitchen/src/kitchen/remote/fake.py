@@ -43,6 +43,13 @@ class FakeRemote(Remote):
         self.rules: list[_Rule] = []
         self.files: dict[tuple[str, str], str] = {}  # (host, remote_path) -> local source
         self._hosts_seen: list[str] = []
+        # Simulated VM lifecycle for cluster tests. Unknown VMs report absent
+        # (no entry), matching gcloud's behaviour for nonexistent names.
+        self.vm_states: dict[str, str] = {}
+        # Optional scripted sequence of vm_status() results; once exhausted,
+        # falls back to vm_states. Lets tests model external transitions
+        # (e.g. STOPPING -> TERMINATED while wait_drained polls).
+        self.status_sequence: list[dict[str, str]] = []
 
     def script(self, cmd_pattern, *, host=None, stdout="", returncode=0,
                raises=None, times=None):
@@ -94,6 +101,26 @@ class FakeRemote(Remote):
     def vm_to_vm_scp(self, src_host, remote_path, dst_host):
         super().vm_to_vm_scp(src_host, remote_path, dst_host)
         self.files[(dst_host, remote_path)] = f"(copied from {src_host})"
+
+    # --- simulated VM lifecycle ---
+
+    def vm_status(self, vm_names):
+        self.calls.append(Call("vm_status", "*", ",".join(vm_names)))
+        if self.status_sequence:
+            snapshot = self.status_sequence.pop(0)
+        else:
+            snapshot = self.vm_states
+        return {v: snapshot[v] for v in vm_names if v in snapshot}
+
+    def vm_start(self, vm_names):
+        self.calls.append(Call("vm_start", "*", ",".join(vm_names)))
+        for v in vm_names:
+            self.vm_states[v] = "RUNNING"
+
+    def vm_stop(self, vm_names):
+        self.calls.append(Call("vm_stop", "*", ",".join(vm_names)))
+        for v in vm_names:
+            self.vm_states[v] = "TERMINATED"
 
     # --- assertions ---
 
