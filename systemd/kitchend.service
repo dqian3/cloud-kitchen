@@ -1,0 +1,19 @@
+# User unit: install with
+#   mkdir -p ~/.config/systemd/user
+#   ln -s ~/Projects/cloud-kitchen/systemd/kitchend.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now kitchend
+#   loginctl enable-linger dan     # keep it running without a login session
+#
+# Expose over the tailnet with:  tailscale serve --bg 8321
+
+[Unit]
+Description=cloud-kitchen experiment daemon
+
+[Service]
+WorkingDirectory=%h/Projects/cloud-kitchen
+ExecStart=%h/.local/bin/uv run --project kitchend kitchend serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

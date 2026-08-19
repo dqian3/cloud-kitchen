@@ -1,0 +1,5 @@
+[tool.uv.workspace]
+members = ["kitchen", "kitchend"]
+
+[tool.uv.sources]
+kitchen = { workspace = true }
