@@ -22,6 +22,20 @@ from kitchen.cluster import ClusterState, KeepAlive, start_vms, stop_vms
 from kitchen.remote import GCloudRemote, RemoteSettings
 
 
+def _group_vms(group: dict) -> list[str]:
+    """VMs of one role group: an explicit `vms` list, a single `vm`, or the
+    generative `vm_prefix` + `count` naming (vsac corfu's client pool)."""
+    if not isinstance(group, dict):
+        return []
+    if "vms" in group:
+        return list(group["vms"])
+    if "vm" in group and group["vm"]:
+        return [group["vm"]]
+    if "vm_prefix" in group and "count" in group:
+        return [f"{group['vm_prefix']}{i}" for i in range(int(group["count"]))]
+    return []
+
+
 def vms_from_yaml(path: Path) -> list[str]:
     """Extract the VM list from a cluster YAML of any known shape."""
     with open(path) as f:
@@ -29,25 +43,14 @@ def vms_from_yaml(path: Path) -> list[str]:
     if "vms" in d:
         return list(d["vms"])
     vms = []
-    if "replica" in d:  # aspen shape
-        vms += list(d["replica"].get("vms", []))
-        vms += list(d.get("client", {}).get("vms", []))
-        return vms
-    if "durlog" in d:  # vsac lazylog shape
-        vms += list(d["durlog"].get("vms", []))
-        if d.get("conslog", {}).get("vm"):
-            vms.append(d["conslog"]["vm"])
+    if "replica" in d or "durlog" in d:
+        for role in ("replica", "sequencer", "durlog", "conslog"):
+            vms += _group_vms(d.get(role, {}))
         for shard in d.get("shards", []):
             for k in ("primary_vm", "backup_vm"):
                 if shard.get(k):
                     vms.append(shard[k])
-        vms += list(d.get("client", {}).get("vms", []))
-        return vms
-    if "replica_vms" in d or "sequencer" in d:  # vsac corfu shape
-        vms += list(d.get("replica", {}).get("vms", []))
-        if d.get("sequencer", {}).get("vm"):
-            vms.append(d["sequencer"]["vm"])
-        vms += list(d.get("client", {}).get("vms", []))
+        vms += _group_vms(d.get("client", {}))
         return vms
     raise ValueError(f"unrecognized cluster config shape: {path}")
 

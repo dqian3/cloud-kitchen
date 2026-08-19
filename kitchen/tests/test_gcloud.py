@@ -95,3 +95,23 @@ def test_get_all_ips_empty_and_cached(runner):
     r._ip_cache = {"vm1": "10.0.0.1"}
     assert r.get_all_ips(["vm1"]) == {"vm1": "10.0.0.1"}
     assert runner.calls == []
+
+
+def test_ssh_retries_transient_connection_errors(runner, capsys):
+    r = _remote()
+    r._zone_cache["vm1"] = "us-central1-a"
+    runner.add("compute ssh",
+               (255, "", "kex_exchange_identification: Connection closed by remote host"),
+               (0, "ok", ""))
+    result = r.ssh("vm1", "true")
+    assert result.stdout == "ok"
+    assert "retrying" in capsys.readouterr().out
+
+
+def test_ssh_does_not_retry_command_failures(runner):
+    r = _remote()
+    r._zone_cache["vm1"] = "us-central1-a"
+    runner.add("compute ssh", (1, "", "some command error"), (0, "", ""))
+    with pytest.raises(subprocess.CalledProcessError):
+        r.ssh("vm1", "false")
+    assert len([c for c in runner.calls if "compute" in c and "ssh" in c]) == 1

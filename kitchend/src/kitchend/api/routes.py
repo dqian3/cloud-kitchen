@@ -7,9 +7,19 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from kitchend.core import jobs
+from kitchend.core import adapters, jobs
 
 router = APIRouter(prefix="/api")
+
+
+@router.get("/experiments")
+def list_experiments(project: str, request: Request):
+    """The project's real experiment catalog, from its kitchen_adapter.py."""
+    try:
+        project_cfg = request.app.state.config.project(project)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return adapters.catalog(project_cfg)
 
 
 # --- jobs ---
@@ -37,6 +47,18 @@ def submit_job(body: JobSubmit, request: Request):
     spec = body.model_dump(exclude_none=True)
     if not spec.get("experiments") and not spec.get("command"):
         raise HTTPException(422, "spec needs experiments or an explicit command")
+    # Resolve against the project's catalog: expand aggregates, reject unknown
+    # names and cross-cluster mixes, and route onto the cluster's queue.
+    if spec.get("experiments"):
+        try:
+            expanded, queue, driver_args = adapters.resolve_submission(
+                project_cfg, spec["experiments"])
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        spec["experiments"] = expanded
+        spec["driver_args"] = driver_args
+        if queue and not spec.get("queue"):
+            spec["queue"] = f"{body.project}/{queue}"
     # Validate now so a bad spec fails at submit, not at dispatch.
     try:
         jobs.build_command(project_cfg, spec)

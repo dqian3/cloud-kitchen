@@ -36,6 +36,21 @@ DEFAULT_VM_START_RETRY_MARKERS = (
     "Internal error",
 )
 
+# A single ssh that dies on connection setup (VM still booting, IAP hiccup,
+# sshd not yet up) is usually fine seconds later. Only connection-layer
+# failures are retried — a command that ran and exited nonzero is not.
+DEFAULT_SSH_TRANSIENT_MARKERS = (
+    "Connection closed by",
+    "Connection refused",
+    "Connection reset by peer",
+    "Connection timed out",
+    "failed to connect to backend",
+    "kex_exchange_identification",
+    "Error while connecting [4003",
+    "Could not establish connection",
+    "ssh_exchange_identification",
+)
+
 _FALSY = ("0", "false", "False", "no", "")
 
 
@@ -47,6 +62,11 @@ class RemoteSettings:
     vm_start_retry_delay_s: int = 20
     vm_start_retry_markers: tuple[str, ...] = field(
         default=DEFAULT_VM_START_RETRY_MARKERS
+    )
+    ssh_attempts: int = 3
+    ssh_retry_delay_s: int = 5
+    ssh_transient_markers: tuple[str, ...] = field(
+        default=DEFAULT_SSH_TRANSIENT_MARKERS
     )
 
     @classmethod
@@ -83,6 +103,14 @@ class RemoteSettings:
         delay = _lookup("VM_START_RETRY_DELAY_S")
         if delay:
             kwargs["vm_start_retry_delay_s"] = int(delay)
+
+        ssh_attempts = _lookup("SSH_ATTEMPTS")
+        if ssh_attempts:
+            kwargs["ssh_attempts"] = int(ssh_attempts)
+
+        ssh_delay = _lookup("SSH_RETRY_DELAY_S")
+        if ssh_delay:
+            kwargs["ssh_retry_delay_s"] = int(ssh_delay)
 
         return cls(**kwargs)
 

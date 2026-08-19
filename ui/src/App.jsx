@@ -77,9 +77,10 @@ function ClusterCard({ c, onAction }) {
 
 function SubmitForm({ projects, onSubmitted }) {
   const [project, setProject] = useState('')
-  const [experiments, setExperiments] = useState('')
+  const [catalog, setCatalog] = useState(null)   // {experiments, aggregates, error}
+  const [selected, setSelected] = useState([])
+  const [freeText, setFreeText] = useState('')
   const [flags, setFlags] = useState('')
-  const [queue, setQueue] = useState('')
   const [priority, setPriority] = useState(0)
   const [retries, setRetries] = useState(2)
   const [err, setErr] = useState(null)
@@ -88,40 +89,112 @@ function SubmitForm({ projects, onSubmitted }) {
     if (!project && projects.length) setProject(projects[0].name)
   }, [projects])
 
+  useEffect(() => {
+    if (!project) return
+    setCatalog(null); setSelected([])
+    api.experiments(project).then(setCatalog)
+      .catch(() => setCatalog({ experiments: [], aggregates: {}, error: 'unreachable' }))
+  }, [project])
+
+  const hasCatalog = catalog && !catalog.error && catalog.experiments.length > 0
+  // One cluster per job: selecting an experiment greys out other clusters.
+  const selectedQueues = new Set(
+    (catalog?.experiments || [])
+      .filter(e => selected.includes(e.name) && e.queue)
+      .map(e => e.queue))
+
+  const byQueue = {}
+  for (const e of catalog?.experiments || []) {
+    (byQueue[e.queue || 'other'] ||= []).push(e)
+  }
+
+  function toggle(name) {
+    setSelected(s => s.includes(name) ? s.filter(x => x !== name) : [...s, name])
+  }
+
   async function submit(e) {
     e.preventDefault()
     setErr(null)
+    const experiments = hasCatalog
+      ? selected
+      : freeText.split(/\s+/).filter(Boolean)
+    if (!experiments.length) { setErr('pick at least one experiment'); return }
     try {
       await api.submit({
         project,
-        experiments: experiments.split(/\s+/).filter(Boolean),
+        experiments,
         extra_flags: flags.split(/\s+/).filter(Boolean),
-        queue: queue || undefined,
         priority: +priority,
         max_retries: +retries,
       })
-      setExperiments('')
+      setSelected([]); setFreeText('')
       onSubmitted()
     } catch (e2) { setErr(String(e2.message || e2)) }
   }
 
   return (
-    <form className="submit-form" onSubmit={submit}>
-      <select value={project} onChange={e => setProject(e.target.value)}>
-        {projects.map(p => <option key={p.name}>{p.name}</option>)}
-      </select>
-      <input placeholder="experiments (space-separated)" value={experiments}
-             onChange={e => setExperiments(e.target.value)} required />
-      <input placeholder="extra flags" value={flags}
-             onChange={e => setFlags(e.target.value)} />
-      <input placeholder="queue (default: project)" value={queue}
-             onChange={e => setQueue(e.target.value)} size="12" />
-      <label>prio <input type="number" value={priority}
-             onChange={e => setPriority(e.target.value)} /></label>
-      <label>retries <input type="number" value={retries} min="0"
-             onChange={e => setRetries(e.target.value)} /></label>
-      <button type="submit">queue job</button>
-      {err && <span className="error">{err}</span>}
+    <form className="submit-form-block" onSubmit={submit}>
+      <div className="submit-form">
+        <select value={project} onChange={e => setProject(e.target.value)}>
+          {projects.map(p => <option key={p.name}>{p.name}</option>)}
+        </select>
+        {!hasCatalog && (
+          <input placeholder={catalog?.error
+                   ? `no catalog (${catalog.error}) — raw driver args`
+                   : 'experiments (space-separated)'}
+                 value={freeText} onChange={e => setFreeText(e.target.value)} />
+        )}
+        <input placeholder="extra flags" value={flags}
+               onChange={e => setFlags(e.target.value)} />
+        <label>prio <input type="number" value={priority}
+               onChange={e => setPriority(e.target.value)} /></label>
+        <label>retries <input type="number" value={retries} min="0"
+               onChange={e => setRetries(e.target.value)} /></label>
+        <button type="submit">
+          queue job{selected.length > 1 ? ` (${selected.length})` : ''}
+        </button>
+        {err && <span className="error">{err}</span>}
+      </div>
+
+      {hasCatalog && (
+        <div className="catalog">
+          {Object.keys(catalog.aggregates).length > 0 && (
+            <div className="agg-row">
+              {Object.entries(catalog.aggregates).map(([name, members]) => (
+                <button key={name} type="button" className="agg"
+                        title={members.join(', ')}
+                        onClick={() => setSelected(members)}>
+                  {name} ({members.length})
+                </button>
+              ))}
+              <button type="button" className="agg" onClick={() => setSelected([])}>
+                clear
+              </button>
+            </div>
+          )}
+          {Object.entries(byQueue).map(([queue, exps]) => (
+            <div key={queue} className="queue-group">
+              <div className="queue-name">{queue}</div>
+              <div className="exp-grid">
+                {exps.map(e => {
+                  const disabled = selectedQueues.size > 0 && e.queue &&
+                    !selectedQueues.has(e.queue)
+                  return (
+                    <label key={e.name}
+                           className={`exp ${disabled ? 'exp-disabled' : ''}`}
+                           title={e.description}>
+                      <input type="checkbox" disabled={disabled}
+                             checked={selected.includes(e.name)}
+                             onChange={() => toggle(e.name)} />
+                      {e.name}
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </form>
   )
 }

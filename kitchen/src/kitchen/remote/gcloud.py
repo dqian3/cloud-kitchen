@@ -167,13 +167,28 @@ class GCloudRemote(Remote):
         # `timeout` is a hard wall-clock cap. Without it a single hung VM
         # (network drop, IAP token glitch) makes run_on_all() block forever
         # — that's how the autobahn pkill stuck for 20+ min.
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        if result.returncode != 0:
-            raise subprocess.CalledProcessError(
-                result.returncode, cmd,
-                output=result.stdout, stderr=result.stderr,
-            )
-        return result
+        #
+        # Connection-layer failures (VM still booting, IAP hiccup) are
+        # retried a few times; a command that ran and exited nonzero is not.
+        attempts = self.settings.ssh_attempts
+        result = None
+        for attempt in range(1, attempts + 1):
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if result.returncode == 0:
+                return result
+            stderr = (result.stderr or "").strip()
+            if attempt < attempts and any(
+                    m in stderr for m in self.settings.ssh_transient_markers):
+                print(f"  [{vm_name}] ssh connection failed "
+                      f"(attempt {attempt}/{attempts}), retrying in "
+                      f"{self.settings.ssh_retry_delay_s}s: {stderr[:120]}")
+                time.sleep(self.settings.ssh_retry_delay_s)
+                continue
+            break
+        raise subprocess.CalledProcessError(
+            result.returncode, cmd,
+            output=result.stdout, stderr=result.stderr,
+        )
 
     def scp_upload(self, local_path, vm_name, remote_path):
         cmd = [

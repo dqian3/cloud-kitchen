@@ -112,3 +112,13 @@ def test_lease_expiry_auto_stops(manager, monkeypatch):
         assert mc.task is None or mc.task.done()
 
     asyncio.run(main())
+
+
+def test_vms_from_yaml_corfu_prefix_shape(tmp_path):
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.dump({
+        "replica": {"vms": ["r0", "r1", "r2"]},
+        "sequencer": {"vm": "seq0"},
+        "client": {"vm_prefix": "cl-", "count": 3},
+    }))
+    assert vms_from_yaml(p) == ["r0", "r1", "r2", "seq0", "cl-0", "cl-1", "cl-2"]

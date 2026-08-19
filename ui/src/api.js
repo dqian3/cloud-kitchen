@@ -14,6 +14,7 @@ async function req(path, opts = {}) {
 export const api = {
   health: () => req('/api/health'),
   projects: () => req('/api/projects'),
+  experiments: (project) => req(`/api/experiments?project=${encodeURIComponent(project)}`),
   jobs: () => req('/api/jobs?limit=100'),
   job: (id) => req(`/api/jobs/${id}`),
   jobLog: (id, tail = 200) => req(`/api/jobs/${id}/log?tail=${tail}`),

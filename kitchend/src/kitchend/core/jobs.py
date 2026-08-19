@@ -141,7 +141,10 @@ def build_command(project_cfg, spec: dict):
             raise ValueError(
                 f"project '{project_cfg.name}' has no driver configured and "
                 "the job spec has no explicit command")
-        argv = list(project_cfg.driver) + list(spec.get("experiments", []))
+        # driver_args (resolved from the experiment catalog at submit time)
+        # wins over raw experiment names.
+        args = spec.get("driver_args") or spec.get("experiments", [])
+        argv = list(project_cfg.driver) + list(args)
     argv += [str(f) for f in spec.get("extra_flags", [])]
     if spec.get("run_dir"):
         argv += [project_cfg.output_dir_flag, str(spec["run_dir"])]
