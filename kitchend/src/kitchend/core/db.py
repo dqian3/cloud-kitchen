@@ -139,9 +139,48 @@ MIGRATIONS = [
 ]
 
 
+class Db:
+    """Thread-safe wrapper around the single daemon SQLite connection.
+
+    FastAPI runs sync endpoints in a thread pool, so every access goes through
+    one lock; queries are short and the DB is WAL, so contention is trivial.
+    """
+
+    def __init__(self, path: Path):
+        import threading
+        self._conn = open_db(path)
+        self._lock = threading.Lock()
+
+    def execute(self, sql, params=()):
+        with self._lock, self._conn:
+            return self._conn.execute(sql, params)
+
+    def executemany(self, sql, rows):
+        with self._lock, self._conn:
+            return self._conn.executemany(sql, rows)
+
+    def query(self, sql, params=()):
+        with self._lock:
+            return self._conn.execute(sql, params).fetchall()
+
+    def query_one(self, sql, params=()):
+        with self._lock:
+            return self._conn.execute(sql, params).fetchone()
+
+    def insert(self, sql, params=()):
+        with self._lock, self._conn:
+            return self._conn.execute(sql, params).lastrowid
+
+    def close(self):
+        with self._lock:
+            self._conn.close()
+
+
 def open_db(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    # check_same_thread=False: the Db wrapper serializes all access with its
+    # own lock, and FastAPI's threadpool means callers arrive on many threads.
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")

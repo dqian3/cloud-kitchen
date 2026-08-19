@@ -1,16 +1,16 @@
 import subprocess
 
-from kitchen.remote import FakeRemote
+from kitchen.remote import MockRemote
 
 
 def test_run_on_all_empty_hosts_is_noop():
-    r = FakeRemote()
+    r = MockRemote()
     assert r.run_on_all([], "echo hi") == {}
     assert r.calls == []
 
 
 def test_run_on_all_passes_timeout_and_collects_errors():
-    r = FakeRemote()
+    r = MockRemote()
     r.script("boom", host="h2", returncode=1)
     results = r.run_on_all(["h1", "h2"], "boom", quiet=True, timeout=42)
     assert results["h1"].returncode == 0
@@ -19,7 +19,7 @@ def test_run_on_all_passes_timeout_and_collects_errors():
 
 
 def test_kill_process_is_quiet_and_bounded():
-    r = FakeRemote()
+    r = MockRemote()
     r.script("pkill", returncode=1)  # pkill failure must not raise
     r.kill_process(["a", "b"], "myproc")
     calls = r.ssh_calls("pkill -9 -f myproc")
@@ -30,7 +30,7 @@ def test_kill_process_is_quiet_and_bounded():
 def test_seed_broadcast_delivers_to_all(tmp_path):
     payload = tmp_path / "bin"
     payload.write_text("x")
-    r = FakeRemote()
+    r = MockRemote()
     hosts = [f"h{i}" for i in range(5)]
     r.setup_inter_vm_ssh(hosts)
     r.seed_broadcast(str(payload), hosts, "~/bin")
@@ -45,7 +45,7 @@ def test_seed_broadcast_delivers_to_all(tmp_path):
 def test_tree_broadcast_delivers_to_all_in_rounds(tmp_path):
     payload = tmp_path / "bin"
     payload.write_text("x")
-    r = FakeRemote()
+    r = MockRemote()
     hosts = [f"h{i}" for i in range(7)]
     r.setup_inter_vm_ssh(hosts)
     r.tree_broadcast(str(payload), hosts, "~/bin", fanout=2)
@@ -62,7 +62,7 @@ def test_tree_broadcast_delivers_to_all_in_rounds(tmp_path):
 def test_broadcast_empty_hosts_is_noop(tmp_path):
     payload = tmp_path / "bin"
     payload.write_text("x")
-    r = FakeRemote()
+    r = MockRemote()
     r.seed_broadcast(str(payload), [], "~/bin")
     r.tree_broadcast(str(payload), [], "~/bin")
     assert r.calls == []

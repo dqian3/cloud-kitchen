@@ -7,7 +7,7 @@ theirs with set_default_settings() or pass them to load_remote().
 """
 
 from .base import Remote
-from .fake import FakeRemote
+from .mock import MockRemote
 from .gcloud import GCloudRemote
 from .local import LocalRemote
 from .settings import (
@@ -18,7 +18,7 @@ from .settings import (
 from .sshremote import SSHRemote
 
 __all__ = [
-    "Remote", "GCloudRemote", "SSHRemote", "LocalRemote", "FakeRemote",
+    "Remote", "GCloudRemote", "SSHRemote", "LocalRemote", "MockRemote",
     "RemoteSettings", "get_default_settings", "set_default_settings",
     "load_remote",
 ]

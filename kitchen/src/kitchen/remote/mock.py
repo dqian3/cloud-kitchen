@@ -37,7 +37,7 @@ class Call:
     timeout: float | None = None
 
 
-class FakeRemote(Remote):
+class MockRemote(Remote):
     def __init__(self):
         self.calls: list[Call] = []
         self.rules: list[_Rule] = []

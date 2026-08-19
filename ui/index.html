@@ -1,11 +1,12 @@
 <!doctype html>
-<meta charset="utf-8">
-<title>cloud-kitchen</title>
-<style>
-  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 4rem auto; color: #333; }
-  code { background: #f2f2f2; padding: 0.1em 0.3em; border-radius: 3px; }
-</style>
-<h1>cloud-kitchen</h1>
-<p>The daemon is up. The React UI is not built yet — this page is served until
-<code>ui/dist</code> exists.</p>
-<p>API: <a href="/api/health">/api/health</a> · <a href="/api/projects">/api/projects</a></p>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>cloud-kitchen</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

@@ -2,7 +2,7 @@ import pytest
 
 import kitchen.cluster.lifecycle as lifecycle
 from kitchen.cluster import ClusterState, start_vms, stop_vms, wait_drained
-from kitchen.remote import FakeRemote
+from kitchen.remote import MockRemote
 
 
 @pytest.fixture(autouse=True)
@@ -11,7 +11,7 @@ def fast_sleep(monkeypatch):
 
 
 def test_start_arms_deadman():
-    r = FakeRemote()
+    r = MockRemote()
     r.vm_states = {"a": "TERMINATED", "b": "TERMINATED"}
     start_vms(r, ["a", "b"], deadman_minutes=60)
     assert r.vm_states == {"a": "RUNNING", "b": "RUNNING"}
@@ -20,7 +20,7 @@ def test_start_arms_deadman():
 
 
 def test_start_skips_already_running():
-    r = FakeRemote()
+    r = MockRemote()
     r.vm_states = {"a": "RUNNING", "b": "TERMINATED"}
     start_vms(r, ["a", "b"])
     starts = [c for c in r.calls if c.kind == "vm_start"]
@@ -30,7 +30,7 @@ def test_start_skips_already_running():
 
 
 def test_start_drains_stopping_vms_first(capsys):
-    r = FakeRemote()
+    r = MockRemote()
     # Two polls see a STOPPING vm; the third sees TERMINATED.
     r.status_sequence = [
         {"a": "STOPPING", "b": "TERMINATED"},
@@ -44,7 +44,7 @@ def test_start_drains_stopping_vms_first(capsys):
 
 
 def test_wait_drained_times_out(monkeypatch):
-    r = FakeRemote()
+    r = MockRemote()
     r.vm_states = {"a": "STOPPING"}
     clock = iter(range(0, 10000, 100))
     monkeypatch.setattr(lifecycle.time, "monotonic", lambda: next(clock))
@@ -53,7 +53,7 @@ def test_wait_drained_times_out(monkeypatch):
 
 
 def test_stop_refuses_with_live_lease(tmp_path):
-    r = FakeRemote()
+    r = MockRemote()
     r.vm_states = {"a": "RUNNING"}
     state = ClusterState("c1", root=tmp_path)
     with state.acquire_lease("test-sweep"):
@@ -65,7 +65,7 @@ def test_stop_refuses_with_live_lease(tmp_path):
 
 
 def test_stop_proceeds_after_release(tmp_path):
-    r = FakeRemote()
+    r = MockRemote()
     r.vm_states = {"a": "RUNNING"}
     state = ClusterState("c1", root=tmp_path)
     lease = state.acquire_lease("test-sweep")

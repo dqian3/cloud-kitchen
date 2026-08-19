@@ -53,7 +53,7 @@ class KeepAlive:
 
     # --- single-actor lock ---
 
-    def _acquire_lock(self):
+    def acquire_lock(self):
         if self.state is None:
             return
         path = self.state.keepalive_lock_path
@@ -76,7 +76,7 @@ class KeepAlive:
         os.write(fd, f"pid {os.getpid()}\n".encode())
         self._lock_fd = fd
 
-    def _release_lock(self):
+    def release_lock(self):
         if self._lock_fd is not None:
             try:
                 fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
@@ -98,7 +98,7 @@ class KeepAlive:
         (start_vms does both); the first re-arm happens after the first
         interval.
         """
-        self._acquire_lock()
+        self.acquire_lock()
 
         # SIGTERM behaves like Ctrl-C rather than killing without cleanup:
         # a supervisor's default kill used to leave the VMs to the dead-man
@@ -133,4 +133,4 @@ class KeepAlive:
                       f"(off within {self.deadman_minutes} min).")
         finally:
             signal.signal(signal.SIGTERM, prev_term)
-            self._release_lock()
+            self.release_lock()

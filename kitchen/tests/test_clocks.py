@@ -1,5 +1,5 @@
 from kitchen.cluster import parse_chronyc_offset, sync_clocks
-from kitchen.remote import FakeRemote
+from kitchen.remote import MockRemote
 
 SELECTED_US = "^* ntp.example.com  2   6   377   23  +1234us[ +1234us] +/-   12ms"
 SELECTED_MS = "^* ntp.example.com  2   6   377   23  -3ms[   -3ms] +/-   12ms"
@@ -23,7 +23,7 @@ def test_parse_requires_selected_source():
 
 
 def test_sync_clocks_happy_path(capsys):
-    r = FakeRemote()
+    r = MockRemote()
     r.script("chronyc", stdout=SELECTED_US)
     sync_clocks(r, ["a", "b"], threshold_ms=2.0, max_retries=3)
     out = capsys.readouterr().out
@@ -33,7 +33,7 @@ def test_sync_clocks_happy_path(capsys):
 
 
 def test_sync_clocks_retries_on_divergence(capsys):
-    r = FakeRemote()
+    r = MockRemote()
     diverged = "^* x  2 6 377 23  +9ms[ +9ms] +/- 12ms"
     r.script("chronyc", host="b", stdout=diverged, times=1)   # first round: b diverged
     r.script("chronyc", stdout=SELECTED_US)                   # everything else fine
@@ -45,7 +45,7 @@ def test_sync_clocks_retries_on_divergence(capsys):
 
 
 def test_sync_clocks_gives_up(capsys):
-    r = FakeRemote()
+    r = MockRemote()
     r.script("chronyc", stdout="no sources here")
     sync_clocks(r, ["a"], max_retries=2)
     out = capsys.readouterr().out
