@@ -126,6 +126,18 @@ class ClusterManager:
             mc.vms = vms_from_yaml(mc.config_path)
         return mc.vms
 
+    def estimate_hourly(self, key) -> float | None:
+        """Whole-cluster burn rate in $/hr, or None when no cost is
+        configured. Reads the VM list if it hasn't been loaded yet, so the
+        estimate exists before the cluster's first bring-up."""
+        mc = self._get(key)
+        if mc.hourly_usd is None:
+            return None
+        try:
+            return mc.hourly_usd * len(self._vms(mc))
+        except OSError:
+            return None
+
     def _set_db_state(self, mc, state):
         self.db.execute(
             "UPDATE clusters SET state = ?, state_updated_at = datetime('now'), "

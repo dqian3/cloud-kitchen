@@ -18,6 +18,7 @@ from kitchend.core.ingest import Ingester
 from kitchend.core.runner import JobRunner
 from kitchend.core.scheduler import Scheduler
 
+from .mcp import build_mcp, mcp_http_app
 from .routes import router
 
 UI_DIST = Path(__file__).resolve().parents[4] / "ui" / "dist"
@@ -38,7 +39,10 @@ def create_app(config: Config) -> FastAPI:
             app.state.ingester.loop())
         app.state.hub.emit("daemon.started", version=__version__)
         try:
-            yield
+            # Mounted sub-app lifespans don't run under Starlette, so the
+            # MCP session manager is driven from here.
+            async with app.state.mcp.session_manager.run():
+                yield
         finally:
             app.state.scheduler.stop()
             scheduler_task.cancel()
@@ -75,6 +79,17 @@ def create_app(config: Config) -> FastAPI:
         ]
 
     app.include_router(router)
+
+    # MCP endpoint at /mcp, registered before the static UI's catch-all "/".
+    # Both an exact Route and a Mount: a Starlette Mount alone only matches
+    # the bare path via a GET slash-redirect, so a POST to /mcp (the
+    # canonical client URL) would fall through to the static mount's 405.
+    from starlette.routing import Route
+    app.state.mcp = build_mcp(app.state)
+    mcp_asgi = mcp_http_app(app.state.mcp)
+    app.router.routes.append(
+        Route("/mcp", endpoint=mcp_asgi, methods=["GET", "POST", "DELETE"]))
+    app.mount("/mcp", mcp_asgi)
 
     if UI_DIST.is_dir():
         app.mount("/", StaticFiles(directory=UI_DIST, html=True), name="ui")

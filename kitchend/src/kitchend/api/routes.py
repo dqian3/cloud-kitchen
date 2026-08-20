@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from kitchend.core import adapters, jobs, ledger
+from kitchend.core import adapters, jobs, ledger, submission
 
 router = APIRouter(prefix="/api")
 
@@ -46,43 +46,12 @@ def submit_job(body: JobSubmit, request: Request):
     except KeyError as e:
         raise HTTPException(404, str(e))
     spec = body.model_dump(exclude_none=True)
-    if not spec.get("experiments") and not spec.get("command") \
-            and not spec.get("sweep"):
-        raise HTTPException(422, "spec needs experiments, a sweep, or an "
-                                 "explicit command")
-    # An ad-hoc sweep resolves to an explicit command at submit time, so a
-    # later adapter edit can't silently change what a queued job will run.
-    if spec.get("sweep"):
-        if spec.get("experiments") or spec.get("command"):
-            raise HTTPException(422, "sweep excludes experiments/command")
-        try:
-            argv, queue = adapters.oneoff_command(project_cfg, spec["sweep"])
-        except ValueError as e:
-            raise HTTPException(422, str(e))
-        spec["command"] = argv
-        if queue and not spec.get("queue"):
-            spec["queue"] = f"{body.project}/{queue}"
-    # Resolve against the project's catalog: expand aggregates, reject unknown
-    # names and cross-cluster mixes, and route onto the cluster's queue.
-    if spec.get("experiments"):
-        try:
-            expanded, queue, driver_args = adapters.resolve_submission(
-                project_cfg, spec["experiments"])
-        except ValueError as e:
-            raise HTTPException(422, str(e))
-        spec["experiments"] = expanded
-        spec["driver_args"] = driver_args
-        if queue and not spec.get("queue"):
-            spec["queue"] = f"{body.project}/{queue}"
-    # Validate now so a bad spec fails at submit, not at dispatch.
     try:
-        jobs.build_command(project_cfg, spec)
+        submission.prepare_spec(project_cfg, spec)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    project_id = jobs.ensure_project_row(app.state.db, project_cfg)
-    job_id = jobs.submit(app.state.db, project_id, spec)
-    app.state.hub.emit("job.state", job_id=job_id, state=jobs.QUEUED)
-    app.state.scheduler.wake()
+    job_id = submission.enqueue(app.state.db, app.state.hub,
+                                app.state.scheduler, project_cfg, spec)
     return {"id": job_id}
 
 
