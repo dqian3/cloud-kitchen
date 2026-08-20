@@ -251,8 +251,11 @@ class SweepEngine:
             entry = completed_entry(point_dir, tags, required)
             if entry is not None:
                 status = "dead" if self._point_dead(entry) else "ok"
+                # metrics ride along so a consumer (the daemon's ledger) can
+                # record the resumed point without re-reading summary.json.
                 self._emit("point.skipped", experiment=spec.name, dims=dims,
-                           rate=rate, trial=trial, rel_dir=rel, reason="resume")
+                           rate=rate, trial=trial, rel_dir=rel, reason="resume",
+                           metrics=entry)
                 self._record(result, entry, status, skipped=True)
                 return entry
 

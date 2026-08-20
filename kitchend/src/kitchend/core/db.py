@@ -140,6 +140,17 @@ MIGRATIONS = [
     """
     ALTER TABLE jobs ADD COLUMN progress_json TEXT;
     """,
+    # v3 — saved sweeps: one-off experiments promoted to reusable presets
+    """
+    CREATE TABLE saved_sweeps (
+        id INTEGER PRIMARY KEY,
+        project_id INTEGER NOT NULL REFERENCES projects(id),
+        name TEXT NOT NULL,
+        params_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (project_id, name)
+    );
+    """,
 ]
 
 

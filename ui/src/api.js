@@ -23,6 +23,21 @@ export const api = {
   cancel: (id) => req(`/api/jobs/${id}/cancel`, { method: 'POST', body: '{}' }),
   resubmit: (id, resume = true) =>
     req(`/api/jobs/${id}/resubmit`, { method: 'POST', body: JSON.stringify({ resume }) }),
+  sweeps: (project) => req(`/api/sweeps?project=${encodeURIComponent(project)}`),
+  saveSweep: (project, name, params) =>
+    req('/api/sweeps', { method: 'POST', body: JSON.stringify({ project, name, params }) }),
+  deleteSweep: (id) => req(`/api/sweeps/${id}`, { method: 'DELETE' }),
+  runs: (project) =>
+    req(`/api/runs?limit=100${project ? `&project=${encodeURIComponent(project)}` : ''}`),
+  run: (id) => req(`/api/runs/${id}`),
+  addNote: (id, text) =>
+    req(`/api/runs/${id}/notes`, { method: 'POST', body: JSON.stringify({ text }) }),
+  addTag: (id, name) =>
+    req(`/api/runs/${id}/tags`, { method: 'POST', body: JSON.stringify({ name }) }),
+  removeTag: (id, name) =>
+    req(`/api/runs/${id}/tags/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  scanRuns: (project) =>
+    req('/api/runs/scan', { method: 'POST', body: JSON.stringify({ project }) }),
   clusters: () => req('/api/clusters'),
   clusterUp: (key, ttl) =>
     req(`/api/clusters/${key}/up`, { method: 'POST', body: JSON.stringify({ ttl_minutes: ttl }) }),

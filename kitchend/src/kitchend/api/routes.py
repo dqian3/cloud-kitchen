@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from kitchend.core import adapters, jobs
+from kitchend.core import adapters, jobs, ledger
 
 router = APIRouter(prefix="/api")
 
@@ -28,6 +28,7 @@ class JobSubmit(BaseModel):
     project: str
     experiments: list[str] = Field(default_factory=list)
     command: list[str] | None = None
+    sweep: dict | None = None      # ad-hoc sweep params → adapter.oneoff()
     extra_flags: list[str] = Field(default_factory=list)
     queue: str | None = None
     run_dir: str | None = None
@@ -45,8 +46,22 @@ def submit_job(body: JobSubmit, request: Request):
     except KeyError as e:
         raise HTTPException(404, str(e))
     spec = body.model_dump(exclude_none=True)
-    if not spec.get("experiments") and not spec.get("command"):
-        raise HTTPException(422, "spec needs experiments or an explicit command")
+    if not spec.get("experiments") and not spec.get("command") \
+            and not spec.get("sweep"):
+        raise HTTPException(422, "spec needs experiments, a sweep, or an "
+                                 "explicit command")
+    # An ad-hoc sweep resolves to an explicit command at submit time, so a
+    # later adapter edit can't silently change what a queued job will run.
+    if spec.get("sweep"):
+        if spec.get("experiments") or spec.get("command"):
+            raise HTTPException(422, "sweep excludes experiments/command")
+        try:
+            argv, queue = adapters.oneoff_command(project_cfg, spec["sweep"])
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        spec["command"] = argv
+        if queue and not spec.get("queue"):
+            spec["queue"] = f"{body.project}/{queue}"
     # Resolve against the project's catalog: expand aggregates, reject unknown
     # names and cross-cluster mixes, and route onto the cluster's queue.
     if spec.get("experiments"):
@@ -203,6 +218,122 @@ async def cluster_refresh(project: str, name: str, request: Request):
     except KeyError as e:
         raise HTTPException(404, str(e))
     return {"vms": statuses}
+
+
+# --- saved sweeps: one-offs promoted to reusable presets ---
+
+class SweepSave(BaseModel):
+    project: str
+    name: str
+    params: dict
+
+
+@router.get("/sweeps")
+def list_sweeps(project: str, request: Request):
+    app = request.app
+    try:
+        project_cfg = app.state.config.project(project)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    project_id = jobs.ensure_project_row(app.state.db, project_cfg)
+    return [
+        {"id": r["id"], "name": r["name"], "created_at": r["created_at"],
+         "params": json.loads(r["params_json"])}
+        for r in app.state.db.query(
+            "SELECT * FROM saved_sweeps WHERE project_id = ? ORDER BY name",
+            (project_id,))
+    ]
+
+
+@router.post("/sweeps")
+def save_sweep(body: SweepSave, request: Request):
+    """Keep a one-off sweep's params under a name. Validates through the
+    adapter now, so a preset that can't build a command is rejected at save
+    rather than discovered at submit."""
+    app = request.app
+    try:
+        project_cfg = app.state.config.project(body.project)
+        adapters.oneoff_command(project_cfg, body.params)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    project_id = jobs.ensure_project_row(app.state.db, project_cfg)
+    app.state.db.execute(
+        "INSERT INTO saved_sweeps (project_id, name, params_json) "
+        "VALUES (?, ?, ?) ON CONFLICT(project_id, name) "
+        "DO UPDATE SET params_json = excluded.params_json",
+        (project_id, body.name, json.dumps(body.params)))
+    return {"ok": True}
+
+
+@router.delete("/sweeps/{sweep_id}")
+def delete_sweep(sweep_id: int, request: Request):
+    request.app.state.db.execute("DELETE FROM saved_sweeps WHERE id = ?",
+                                 (sweep_id,))
+    return {"ok": True}
+
+
+# --- run ledger ---
+
+@router.get("/runs")
+def list_runs(request: Request, project: str | None = None,
+              experiment: str | None = None, tag: str | None = None,
+              limit: int = 100):
+    return ledger.list_runs(request.app.state.db, project=project,
+                            experiment=experiment, tag=tag, limit=limit)
+
+
+@router.get("/runs/{run_id}")
+def get_run(run_id: int, request: Request):
+    run = ledger.get_run(request.app.state.db, run_id)
+    if run is None:
+        raise HTTPException(404, f"no run {run_id}")
+    return run
+
+
+class NoteAdd(BaseModel):
+    text: str
+
+
+@router.post("/runs/{run_id}/notes")
+def add_note(run_id: int, body: NoteAdd, request: Request):
+    if ledger.get_run(request.app.state.db, run_id) is None:
+        raise HTTPException(404, f"no run {run_id}")
+    note_id = ledger.add_note(request.app.state.db, run_id, body.text)
+    return {"id": note_id}
+
+
+class TagAdd(BaseModel):
+    name: str
+
+
+@router.post("/runs/{run_id}/tags")
+def add_tag(run_id: int, body: TagAdd, request: Request):
+    if ledger.get_run(request.app.state.db, run_id) is None:
+        raise HTTPException(404, f"no run {run_id}")
+    ledger.add_tag(request.app.state.db, run_id, body.name)
+    return {"ok": True}
+
+
+@router.delete("/runs/{run_id}/tags/{name}")
+def remove_tag(run_id: int, name: str, request: Request):
+    ledger.remove_tag(request.app.state.db, run_id, name)
+    return {"ok": True}
+
+
+class ScanRequest(BaseModel):
+    project: str
+
+
+@router.post("/runs/scan")
+def scan_runs(body: ScanRequest, request: Request):
+    """Backfill: index pre-existing run dirs under the project's runs roots."""
+    try:
+        project_cfg = request.app.state.config.project(body.project)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return ledger.scan_project(request.app.state.db, project_cfg)
 
 
 # --- SSE stream ---

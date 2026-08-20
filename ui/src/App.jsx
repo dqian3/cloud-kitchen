@@ -84,6 +84,50 @@ function SubmitForm({ projects, onSubmitted }) {
   const [priority, setPriority] = useState(0)
   const [retries, setRetries] = useState(2)
   const [err, setErr] = useState(null)
+  // One-off sweep mode: generic params the project adapter translates.
+  const [oneoff, setOneoff] = useState(false)
+  const [base, setBase] = useState('')
+  const [dims, setDims] = useState('')           // one NAME=v1,v2 per line
+  const [rates, setRates] = useState('')
+  const [search, setSearch] = useState(false)
+  const [trials, setTrials] = useState('')
+  const [duration, setDuration] = useState('')
+  const [sweeps, setSweeps] = useState([])       // saved presets
+
+  const loadSweeps = useCallback(() => {
+    if (project) api.sweeps(project).then(setSweeps).catch(() => setSweeps([]))
+  }, [project])
+  useEffect(loadSweeps, [loadSweeps])
+
+  function buildSweep() {
+    const sweep = {}
+    if (base) sweep.base = base
+    const dimObj = {}
+    for (const line of dims.split('\n').map(s => s.trim()).filter(Boolean)) {
+      const [name, vals] = line.split('=')
+      if (!name || !vals) { setErr(`bad dim line: ${line}`); return null }
+      dimObj[name.trim()] = vals.split(',').map(s => s.trim()).filter(Boolean)
+    }
+    if (Object.keys(dimObj).length) sweep.dims = dimObj
+    const rateList = rates.split(/[\s,]+/).filter(Boolean).map(Number)
+    if (rateList.length) sweep.rates = rateList
+    if (search) sweep.rate_search = true
+    if (trials) sweep.trials = +trials
+    if (duration) sweep.duration_secs = +duration
+    if (flags.trim()) sweep.extra_flags = flags.split(/\s+/).filter(Boolean)
+    return sweep
+  }
+
+  function applyPreset(params) {
+    setBase(params.base || '')
+    setDims(Object.entries(params.dims || {})
+      .map(([k, v]) => `${k}=${v.join(',')}`).join('\n'))
+    setRates((params.rates || []).join(' '))
+    setSearch(Boolean(params.rate_search))
+    setTrials(params.trials ?? '')
+    setDuration(params.duration_secs ?? '')
+    setFlags((params.extra_flags || []).join(' '))
+  }
 
   useEffect(() => {
     if (!project && projects.length) setProject(projects[0].name)
@@ -115,18 +159,25 @@ function SubmitForm({ projects, onSubmitted }) {
   async function submit(e) {
     e.preventDefault()
     setErr(null)
-    const experiments = hasCatalog
-      ? selected
-      : freeText.split(/\s+/).filter(Boolean)
-    if (!experiments.length) { setErr('pick at least one experiment'); return }
     try {
-      await api.submit({
-        project,
-        experiments,
-        extra_flags: flags.split(/\s+/).filter(Boolean),
-        priority: +priority,
-        max_retries: +retries,
-      })
+      if (oneoff) {
+        const sweep = buildSweep()
+        if (sweep === null) return
+        await api.submit({ project, sweep, priority: +priority,
+                           max_retries: +retries })
+      } else {
+        const experiments = hasCatalog
+          ? selected
+          : freeText.split(/\s+/).filter(Boolean)
+        if (!experiments.length) { setErr('pick at least one experiment'); return }
+        await api.submit({
+          project,
+          experiments,
+          extra_flags: flags.split(/\s+/).filter(Boolean),
+          priority: +priority,
+          max_retries: +retries,
+        })
+      }
       setSelected([]); setFreeText('')
       onSubmitted()
     } catch (e2) { setErr(String(e2.message || e2)) }
@@ -138,7 +189,11 @@ function SubmitForm({ projects, onSubmitted }) {
         <select value={project} onChange={e => setProject(e.target.value)}>
           {projects.map(p => <option key={p.name}>{p.name}</option>)}
         </select>
-        {!hasCatalog && (
+        <label title="ad-hoc sweep: override dims/rates/trials; the project adapter builds the command">
+          <input type="checkbox" checked={oneoff}
+                 onChange={e => setOneoff(e.target.checked)} /> one-off
+        </label>
+        {!oneoff && !hasCatalog && (
           <input placeholder={catalog?.error
                    ? `no catalog (${catalog.error}) — raw driver args`
                    : 'experiments (space-separated)'}
@@ -151,12 +206,75 @@ function SubmitForm({ projects, onSubmitted }) {
         <label>retries <input type="number" value={retries} min="0"
                onChange={e => setRetries(e.target.value)} /></label>
         <button type="submit">
-          queue job{selected.length > 1 ? ` (${selected.length})` : ''}
+          queue job{!oneoff && selected.length > 1 ? ` (${selected.length})` : ''}
         </button>
         {err && <span className="error">{err}</span>}
       </div>
 
-      {hasCatalog && (
+      {oneoff && sweeps.length > 0 && (
+        <div className="agg-row">
+          {sweeps.map(s => (
+            <button key={s.id} type="button" className="agg"
+                    title={JSON.stringify(s.params)}
+                    onClick={() => applyPreset(s.params)}>
+              {s.name}
+            </button>
+          ))}
+          <button type="button" className="agg" title="delete a preset"
+                  onClick={() => {
+                    const n = prompt('delete which preset?',
+                                     sweeps[0]?.name || '')
+                    const hit = sweeps.find(s2 => s2.name === n)
+                    if (hit) api.deleteSweep(hit.id).then(loadSweeps)
+                  }}>✕</button>
+        </div>
+      )}
+      {oneoff && (
+        <div className="oneoff">
+          <button type="button" className="link"
+                  title="save these params as a named preset"
+                  onClick={async () => {
+                    const sweep = buildSweep()
+                    if (sweep === null) return
+                    const n = prompt('preset name:')
+                    if (!n) return
+                    try {
+                      await api.saveSweep(project, n.trim(), sweep)
+                      loadSweeps()
+                    } catch (e2) { setErr(String(e2.message || e2)) }
+                  }}>save preset</button>
+          <label>base
+            <select value={base} onChange={e => setBase(e.target.value)}>
+              <option value="">(none)</option>
+              {(catalog?.experiments || []).map(e2 => (
+                <option key={e2.name} value={e2.name}>{e2.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>dims
+            <textarea rows="2" placeholder={'payload_size=16,1024\ngamma=1.2'}
+                      value={dims} onChange={e => setDims(e.target.value)} />
+          </label>
+          <label>rates
+            <input placeholder="1000 2000 4000" value={rates}
+                   onChange={e => setRates(e.target.value)} />
+          </label>
+          <label>
+            <input type="checkbox" checked={search}
+                   onChange={e => setSearch(e.target.checked)} /> rate search
+          </label>
+          <label>trials
+            <input type="number" min="1" placeholder="1" value={trials}
+                   onChange={e => setTrials(e.target.value)} />
+          </label>
+          <label>duration s
+            <input type="number" step="any" placeholder="(default)" value={duration}
+                   onChange={e => setDuration(e.target.value)} />
+          </label>
+        </div>
+      )}
+
+      {!oneoff && hasCatalog && (
         <div className="catalog">
           {Object.keys(catalog.aggregates).length > 0 && (
             <div className="agg-row">
@@ -311,6 +429,13 @@ function JobRow({ job, onChanged }) {
             <button className="link" title="resubmit, resuming into the same run dir"
                     onClick={() => act(() => api.resubmit(job.id))}>resume</button>
           )}
+          {spec.sweep && (
+            <button className="link" title="save this one-off's params as a reusable preset"
+                    onClick={() => {
+                      const n = prompt('preset name:')
+                      if (n) act(() => api.saveSweep(job.project, n.trim(), spec.sweep))
+                    }}>save</button>
+          )}
         </td>
       </tr>
       {open && (
@@ -324,6 +449,159 @@ function JobRow({ job, onChanged }) {
   )
 }
 
+// ---------- runs ledger ----------
+
+const POINT_METRIC_COLS = [
+  ['throughput_msgs_per_sec', 'delivered/s'],
+  ['offered_rate', 'offered/s'],
+  ['e2e_p50', 'e2e p50'],
+  ['e2e_p99', 'e2e p99'],
+]
+
+function fmtNum(v) {
+  if (v == null || typeof v !== 'number') return v ?? '—'
+  return Math.abs(v) >= 1000 ? Math.round(v).toLocaleString()
+    : Math.round(v * 100) / 100
+}
+
+function RunRow({ run, onChanged }) {
+  const [open, setOpen] = useState(false)
+  const [detail, setDetail] = useState(null)
+  const [note, setNote] = useState('')
+
+  useEffect(() => {
+    if (open) api.run(run.id).then(setDetail).catch(() => {})
+  }, [open, run.id])
+
+  async function act(fn) {
+    try {
+      await fn()
+      setDetail(await api.run(run.id))
+      onChanged()
+    } catch (e) { alert(e.message || e) }
+  }
+
+  const cols = detail
+    ? POINT_METRIC_COLS.filter(([k]) => detail.points.some(p => k in p.metrics))
+    : []
+
+  return (
+    <>
+      <tr className="job-row" onClick={() => setOpen(!open)}>
+        <td>{run.id}</td>
+        <td>{run.project}</td>
+        <td className="mono">{run.experiment}</td>
+        <td><Chip text={run.status || '?'} color={{
+          ok: 'green', degraded: 'orange', failed: 'red',
+          running: 'blue', interrupted: 'purple',
+        }[run.status] || 'gray'} /></td>
+        <td>{run.n_points ?? ''}</td>
+        <td className="muted">{fmtTs(run.started_at)}</td>
+        <td>{(run.tags || []).map(t => <Chip key={t} text={t} color="blue" />)}</td>
+        <td className="muted">{run.job_id ? `#${run.job_id}` : ''}
+          {!run.dir_exists && <span title="run dir deleted; metrics preserved"> 🗑</span>}
+        </td>
+      </tr>
+      {open && (
+        <tr><td colSpan="8" className="log-cell">
+          <div className="muted">dir: <code>{run.run_dir}</code>
+            {run.git_commit && <> · commit <code>{run.git_commit.slice(0, 10)}</code></>}
+          </div>
+          {detail === null ? <p className="muted">loading…</p> : (
+            <>
+              <div className="run-actions" onClick={e => e.stopPropagation()}>
+                <input placeholder="add note (why it ran, what it showed)"
+                       value={note} onChange={e => setNote(e.target.value)} />
+                <button className="link" onClick={() => {
+                  if (note.trim()) act(() => api.addNote(run.id, note.trim()).then(() => setNote('')))
+                }}>note</button>
+                <button className="link" onClick={() => {
+                  const t = prompt('tag:')
+                  if (t) act(() => api.addTag(run.id, t.trim()))
+                }}>tag</button>
+                {(detail.tags || []).map(t => (
+                  <button key={t} className="link" title="remove tag"
+                          onClick={() => act(() => api.removeTag(run.id, t))}>
+                    {t} ✕</button>
+                ))}
+              </div>
+              {detail.notes.length > 0 && (
+                <ul className="notes">
+                  {detail.notes.map(n => (
+                    <li key={n.id}><span className="muted">{fmtTs(n.ts)}</span> {n.text}</li>
+                  ))}
+                </ul>
+              )}
+              <table className="points">
+                <thead><tr>
+                  <th>dims</th><th>rate</th><th>trial</th>
+                  {cols.map(([k, label]) => <th key={k}>{label}</th>)}
+                  <th></th>
+                </tr></thead>
+                <tbody>
+                  {detail.points.map(p => (
+                    <tr key={p.id}>
+                      <td className="mono">{Object.entries(p.dims)
+                        .map(([k, v]) => `${k}=${v}`).join(' ') || '—'}</td>
+                      <td>{fmtNum(p.rate)}</td>
+                      <td>{p.trial ?? ''}</td>
+                      {cols.map(([k]) => <td key={k}>{fmtNum(p.metrics[k])}</td>)}
+                      <td>
+                        {p.metrics.status && <Chip text={p.metrics.status}
+                          color={p.metrics.status === 'dead' ? 'orange' : 'red'} />}
+                        <details className="raw"><summary>raw</summary>
+                          <pre>{JSON.stringify(p.metrics, null, 1)}</pre>
+                        </details>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </>
+          )}
+        </td></tr>
+      )}
+    </>
+  )
+}
+
+function RunsSection({ projects, runs, onChanged }) {
+  const [scanBusy, setScanBusy] = useState(false)
+
+  async function scan(name) {
+    setScanBusy(true)
+    try {
+      const r = await api.scanRuns(name)
+      onChanged()
+      alert(`${name}: ${r.added} added, ${r.updated} refreshed`)
+    } catch (e) { alert(e.message || e) } finally { setScanBusy(false) }
+  }
+
+  return (
+    <section>
+      <h2>Runs
+        {projects.map(p => (
+          <button key={p.name} className="link" disabled={scanBusy}
+                  title={`index existing run dirs under ${p.name}'s runs roots`}
+                  onClick={() => scan(p.name)}>scan {p.name}</button>
+        ))}
+      </h2>
+      {!runs.length
+        ? <p className="muted">No runs recorded yet — native jobs land here
+            automatically; use scan to backfill old dirs.</p>
+        : <table>
+            <thead><tr>
+              <th>id</th><th>project</th><th>experiment</th><th>status</th>
+              <th>points</th><th>started</th><th>tags</th><th>job</th>
+            </tr></thead>
+            <tbody>
+              {runs.map(r => <RunRow key={r.id} run={r} onChanged={onChanged} />)}
+            </tbody>
+          </table>}
+    </section>
+  )
+}
+
 // ---------- app ----------
 
 export default function App() {
@@ -331,12 +609,13 @@ export default function App() {
   const [projects, setProjects] = useState([])
   const [jobs, setJobs] = useState([])
   const [clusters, setClusters] = useState([])
+  const [runs, setRuns] = useState([])
   const [connected, setConnected] = useState(false)
 
   const reload = useCallback(async () => {
     try {
-      const [j, c] = await Promise.all([api.jobs(), api.clusters()])
-      setJobs(j); setClusters(c)
+      const [j, c, r] = await Promise.all([api.jobs(), api.clusters(), api.runs()])
+      setJobs(j); setClusters(c); setRuns(r)
     } catch { /* daemon down; the SSE handler flips the dot */ }
   }, [])
 
@@ -402,6 +681,8 @@ export default function App() {
         <h2>History</h2>
         <JobTable jobs={done} onChanged={reload} empty="No finished jobs yet." />
       </section>
+
+      <RunsSection projects={projects} runs={runs} onChanged={reload} />
     </div>
   )
 }

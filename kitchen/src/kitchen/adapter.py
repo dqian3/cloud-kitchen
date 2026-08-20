@@ -27,6 +27,16 @@ class ExperimentInfo:
 
 @runtime_checkable
 class ProjectAdapter(Protocol):
+    """Required surface. Adapters may additionally implement
+
+        def oneoff(self, params: dict) -> list[str]
+
+    returning a full argv for an ad-hoc sweep: params carries generic sweep
+    fields (base experiment, dims {name: [values]}, rates, rate_search,
+    trials, duration_secs, extra_flags) and the adapter translates them to
+    its driver's flags. Not part of the Protocol so isinstance checks keep
+    passing for catalog-only adapters; the daemon probes with getattr.
+    """
     name: str
 
     def experiments(self) -> list[ExperimentInfo]: ...

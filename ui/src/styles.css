@@ -80,3 +80,21 @@ td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); }
   overflow: hidden; max-width: 28rem; }
 .bar-fill { height: 100%; background: var(--blue);
   transition: width 0.5s ease; }
+
+.oneoff { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem;
+  align-items: flex-start; margin: 0.4rem 0; font-size: 0.85rem; }
+.oneoff label { display: inline-flex; gap: 0.3rem; align-items: center; }
+.oneoff textarea { font-family: ui-monospace, monospace; font-size: 0.8rem; }
+.oneoff input[type="number"] { width: 5rem; }
+.run-actions { display: flex; gap: 0.4rem; align-items: center;
+  margin: 0.3rem 0; }
+.run-actions input { min-width: 22rem; }
+.notes { margin: 0.2rem 0 0.4rem; padding-left: 1.2rem; font-size: 0.85rem; }
+table.points { font-size: 0.82rem; margin: 0.3rem 0; }
+table.points td, table.points th { padding: 0.15rem 0.5rem; }
+details.raw { display: inline-block; margin-left: 0.4rem; }
+details.raw summary { cursor: pointer; color: var(--muted);
+  font-size: 0.75rem; }
+details.raw pre { max-height: 14rem; overflow: auto; font-size: 0.72rem;
+  background: var(--card); padding: 0.4rem; border-radius: 4px; }
+h2 button.link { margin-left: 0.6rem; font-size: 0.75rem; }

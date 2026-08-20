@@ -18,6 +18,8 @@ from pathlib import Path
 
 from kitchen.events import read_all
 
+from . import ledger
+
 
 def new_progress() -> dict:
     return {
@@ -146,8 +148,8 @@ class Ingester:
         """Read new events for one job; returns the updated progress, or None
         if there was nothing new."""
         row = self.db.query_one(
-            "SELECT run_dir, events_offset, progress_json FROM jobs "
-            "WHERE id = ?", (job_id,))
+            "SELECT run_dir, events_offset, progress_json, project_id "
+            "FROM jobs WHERE id = ?", (job_id,))
         if row is None or not row["run_dir"]:
             return None
         path = Path(row["run_dir"]) / "events.jsonl"
@@ -162,5 +164,10 @@ class Ingester:
         self.db.execute(
             "UPDATE jobs SET events_offset = ?, progress_json = ? "
             "WHERE id = ?", (offset, json.dumps(progress), job_id))
+        try:
+            ledger.apply_events(self.db, row["project_id"], job_id,
+                                row["run_dir"], events)
+        except Exception as e:  # progress must survive a ledger bug
+            self.hub.emit("ingest.error", job_id=job_id, error=repr(e))
         self.hub.emit("job.progress", job_id=job_id, progress=progress)
         return progress
