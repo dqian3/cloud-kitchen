@@ -70,7 +70,12 @@ class Scheduler:
         job_id = job["id"]
         try:
             project_cfg = self.config.project(job["project"])
-            argv, cwd = jobs.build_command(project_cfg, job["spec"])
+            spec = dict(job["spec"])
+            if not spec.get("run_dir"):
+                spec["run_dir"] = str(jobs.default_run_dir(project_cfg, job_id))
+                self.db.execute("UPDATE jobs SET run_dir = ? WHERE id = ?",
+                                (spec["run_dir"], job_id))
+            argv, cwd = jobs.build_command(project_cfg, spec)
         except (KeyError, ValueError) as e:
             jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
                            finished_at=jobs._now(self.db))
@@ -79,7 +84,8 @@ class Scheduler:
             return
 
         jobs.set_state(self.db, self.hub, job_id, jobs.RUNNING,
-                       started_at=jobs._now(self.db))
+                       started_at=jobs._now(self.db),
+                       run_dir=spec.get("run_dir"))
         self.hub.emit("job.command", job_id=job_id, argv=argv, cwd=str(cwd))
         try:
             rc = await self.runner.run(
@@ -119,8 +125,10 @@ class Scheduler:
                                exit_code=rc, finished_at=now)
                 self.hub.emit("job.retry_scheduled", job_id=job_id,
                               delay_secs=delay, retries_left=retries_left - 1)
+                # `current`, not `job`: the dispatch-time snapshot predates the
+                # daemon-assigned run_dir, and the retry must resume into it.
                 asyncio.get_running_loop().create_task(
-                    self._requeue_after(job, delay, retries_left - 1))
+                    self._requeue_after(current, delay, retries_left - 1))
             else:
                 jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
                                exit_code=rc, finished_at=now)

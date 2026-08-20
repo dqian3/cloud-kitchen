@@ -80,7 +80,26 @@ def _to_dict(row):
     d = dict(row)
     d["spec"] = json.loads(d.pop("spec_json"))
     d.pop("estimate_json", None)
+    raw = d.pop("progress_json", None)
+    d["progress"] = json.loads(raw) if raw else None
     return d
+
+
+def default_run_dir(project_cfg, job_id):
+    """Daemon-assigned output dir for a job whose spec didn't pin one.
+
+    Assigning at dispatch — rather than letting the driver invent a dir — is
+    what makes ingest and retry-resume work for every job: the daemon knows
+    where events.jsonl will appear, and a retry resumes into the same
+    directory instead of starting a fresh one.
+    """
+    import datetime
+    if project_cfg.runs_roots:
+        root = project_cfg.repo_path / project_cfg.runs_roots[0]
+    else:
+        root = project_cfg.repo_path / "runs"
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    return root / f"kitchen-job{job_id}-{stamp}"
 
 
 def queue_key(job: dict) -> str:

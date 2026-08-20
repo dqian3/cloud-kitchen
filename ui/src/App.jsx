@@ -199,6 +199,48 @@ function SubmitForm({ projects, onSubmitted }) {
   )
 }
 
+function fmtEta(s) {
+  if (s >= 3600) return `${(s / 3600).toFixed(1)}h`
+  if (s >= 60) return `${Math.round(s / 60)}m`
+  return `${Math.round(s)}s`
+}
+
+function describePoint(c) {
+  const dims = Object.entries(c.dims || {}).map(([k, v]) => `${k}=${v}`).join(' ')
+  return [c.experiment, dims, c.rate != null ? `rate=${c.rate}` : '',
+          `trial ${c.trial}`].filter(Boolean).join(' · ')
+}
+
+// Progress folded by the daemon from the run's events.jsonl (native runs
+// only; old-driver jobs have no progress and keep the log tail).
+function ProgressPanel({ p }) {
+  const pts = p.points || {}
+  const total = p.totals_final?.points_total ?? p.est_points
+  const done = pts.done || 0
+  const pct = total ? Math.min(100, (100 * done) / total) : null
+  return (
+    <div className="progress">
+      <div>
+        <b>{done}{total ? `/${total}` : ''}</b> points
+        {' '}· ok {pts.ok || 0} · dead {pts.dead || 0} · failed {pts.failed || 0}
+        {pts.skipped > 0 && <> · resumed {pts.skipped}</>}
+        {p.eta_secs != null && <> · ~{fmtEta(p.eta_secs)} left</>}
+        {p.run_state === 'interrupted' && <Chip text="interrupted" color="purple" />}
+      </div>
+      {pct != null && (
+        <div className="bar"><div className="bar-fill" style={{ width: `${pct}%` }} /></div>
+      )}
+      {p.current && <div className="muted">running: {describePoint(p.current)}</div>}
+      {p.last_decision && (
+        <div className="muted">
+          search: {p.last_decision.action} @ {p.last_decision.rate}
+          {p.last_decision.note ? ` — ${p.last_decision.note}` : ''}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function JobRow({ job, onChanged }) {
   const [open, setOpen] = useState(false)
   const [log, setLog] = useState('')
@@ -235,6 +277,11 @@ function JobRow({ job, onChanged }) {
         <td><Chip text={job.state} color={STATE_COLORS[job.state]} />
           {job.exit_code != null && job.exit_code !== 0 &&
             <span className="muted"> rc={job.exit_code}</span>}
+          {job.state === 'running' && job.progress?.points &&
+            <span className="muted"> {job.progress.points.done}
+              {(job.progress.totals_final?.points_total ?? job.progress.est_points)
+                ? `/${job.progress.totals_final?.points_total ?? job.progress.est_points}`
+                : ''} pts</span>}
         </td>
         <td className="muted">{fmtTs(job.created_at)}</td>
         <td className="muted">{fmtTs(job.finished_at)}</td>
@@ -269,6 +316,7 @@ function JobRow({ job, onChanged }) {
       {open && (
         <tr><td colSpan="9" className="log-cell">
           {job.run_dir && <div className="muted">run dir: <code>{job.run_dir}</code></div>}
+          {job.progress && <ProgressPanel p={job.progress} />}
           <pre className="log">{log || '(no output yet)'}</pre>
         </td></tr>
       )}

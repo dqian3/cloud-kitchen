@@ -73,3 +73,10 @@ td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); }
 .log { max-height: 24rem; overflow: auto; font-size: 0.78rem;
   font-family: ui-monospace, monospace; white-space: pre-wrap;
   background: #111; color: #ddd; padding: 0.6rem; border-radius: 6px; }
+
+.progress { margin: 0.4rem 0; font-size: 0.85rem;
+  display: flex; flex-direction: column; gap: 0.25rem; }
+.bar { height: 6px; border-radius: 3px; background: var(--line);
+  overflow: hidden; max-width: 28rem; }
+.bar-fill { height: 100%; background: var(--blue);
+  transition: width 0.5s ease; }

@@ -14,6 +14,7 @@ from kitchend.core import jobs
 from kitchend.core.clusters import ClusterManager
 from kitchend.core.db import Db
 from kitchend.core.hub import EventHub
+from kitchend.core.ingest import Ingester
 from kitchend.core.runner import JobRunner
 from kitchend.core.scheduler import Scheduler
 
@@ -33,12 +34,16 @@ def create_app(config: Config) -> FastAPI:
         jobs.recover_orphans(app.state.db, app.state.hub)
         scheduler_task = asyncio.get_running_loop().create_task(
             app.state.scheduler.loop())
+        ingest_task = asyncio.get_running_loop().create_task(
+            app.state.ingester.loop())
         app.state.hub.emit("daemon.started", version=__version__)
         try:
             yield
         finally:
             app.state.scheduler.stop()
             scheduler_task.cancel()
+            app.state.ingester.stop()
+            ingest_task.cancel()
             await app.state.clusters.shutdown_all()
             app.state.hub.emit("daemon.stopped")
 
@@ -50,6 +55,7 @@ def create_app(config: Config) -> FastAPI:
     app.state.scheduler = Scheduler(config, app.state.db, app.state.hub,
                                     app.state.runner)
     app.state.clusters = ClusterManager(config, app.state.db, app.state.hub)
+    app.state.ingester = Ingester(app.state.db, app.state.hub)
 
     @app.get("/api/health")
     def health():

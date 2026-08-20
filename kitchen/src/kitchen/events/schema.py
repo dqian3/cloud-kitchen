@@ -18,7 +18,8 @@ must tolerate extras and absences):
                       (ok|dead|error), duration_s, metrics
   point.retrying      attempt, max_attempts, reason
   point.skipped       reason (resume)
-  search.decision     dims, rate, action (climb|halve|refine|abandon|replay), note
+  search.decision     dims, rate, action
+                      (start|climb|halve|refine|abandon|replay), note
   cluster.state       cluster, state, vms, reason
   cluster.lease       cluster, action (acquired|released|expired|broken), holder
   cluster.keepalive   cluster, armed_until, interval_s

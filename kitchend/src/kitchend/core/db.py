@@ -136,6 +136,10 @@ MIGRATIONS = [
         text TEXT NOT NULL
     );
     """,
+    # v2 — ingest: progress summary folded from <run_dir>/events.jsonl
+    """
+    ALTER TABLE jobs ADD COLUMN progress_json TEXT;
+    """,
 ]
 
 
