@@ -12,7 +12,7 @@ that knows its driver's flag names — turns them into an argv.
 
 import sys
 
-from kitchen.adapter import ExperimentInfo
+from kitchen.adapter import DimInfo, DisplayInfo, ExperimentInfo, MetricInfo
 
 _BASE_FLAGS = {
     "toy-static": ("--rates", "1000", "2000", "4000", "8000"),
@@ -35,6 +35,30 @@ class ToyProjectAdapter:
 
     def aggregates(self):
         return {}
+
+    def display(self):
+        """Dim/metric display metadata for the dashboard.
+
+        Toy dims are inert labels (the toy clients ignore them), but they
+        exercise the same per-project submit form and result columns the
+        real adapters will drive from their own dim tables.
+        """
+        return DisplayInfo(
+            dims=(
+                DimInfo(name="payload_size", label="payload", unit="bytes",
+                        description="message payload size (label only in toy)",
+                        choices=(16, 1024)),
+                DimInfo(name="gamma", label="gamma",
+                        description="load shape parameter (label only in toy)"),
+            ),
+            metrics=(
+                MetricInfo(name="throughput_msgs_per_sec", label="delivered",
+                           unit="msg/s"),
+                MetricInfo(name="offered_rate", label="offered", unit="msg/s"),
+                MetricInfo(name="total_completed", label="completed"),
+                MetricInfo(name="drop_pct", label="drops", unit="%"),
+            ),
+        )
 
     def oneoff(self, params: dict) -> list:
         """Generic sweep params -> `python -m kitchen.run.toy` argv.

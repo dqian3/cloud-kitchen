@@ -75,8 +75,7 @@ function ClusterCard({ c, onAction }) {
 
 // ---------- jobs ----------
 
-function SubmitForm({ project, clusters, onSubmitted }) {
-  const [catalog, setCatalog] = useState(null)   // {experiments, aggregates, error}
+function SubmitForm({ project, catalog, clusters, onSubmitted }) {
   const [selected, setSelected] = useState([])
   const [freeText, setFreeText] = useState('')
   const [flags, setFlags] = useState('')
@@ -89,6 +88,7 @@ function SubmitForm({ project, clusters, onSubmitted }) {
   const [oneoff, setOneoff] = useState(false)
   const [base, setBase] = useState('')
   const [dims, setDims] = useState('')           // one NAME=v1,v2 per line
+  const [dimVals, setDimVals] = useState({})     // {name: "v1,v2"} for advertised dims
   const [rates, setRates] = useState('')
   const [search, setSearch] = useState(false)
   const [trials, setTrials] = useState('')
@@ -100,14 +100,25 @@ function SubmitForm({ project, clusters, onSubmitted }) {
   }, [project])
   useEffect(loadSweeps, [loadSweeps])
 
+  // Adapter-advertised dims get one labeled input each; projects without
+  // display metadata keep the freeform NAME=v1,v2 textarea.
+  const advDims = catalog?.dims || []
+
   function buildSweep() {
     const sweep = {}
     if (base) sweep.base = base
     const dimObj = {}
-    for (const line of dims.split('\n').map(s => s.trim()).filter(Boolean)) {
-      const [name, vals] = line.split('=')
-      if (!name || !vals) { setErr(`bad dim line: ${line}`); return null }
-      dimObj[name.trim()] = vals.split(',').map(s => s.trim()).filter(Boolean)
+    if (advDims.length) {
+      for (const [name, raw] of Object.entries(dimVals)) {
+        const vals = raw.split(/[\s,]+/).filter(Boolean)
+        if (vals.length) dimObj[name] = vals
+      }
+    } else {
+      for (const line of dims.split('\n').map(s => s.trim()).filter(Boolean)) {
+        const [name, vals] = line.split('=')
+        if (!name || !vals) { setErr(`bad dim line: ${line}`); return null }
+        dimObj[name.trim()] = vals.split(',').map(s => s.trim()).filter(Boolean)
+      }
     }
     if (Object.keys(dimObj).length) sweep.dims = dimObj
     const rateList = rates.split(/[\s,]+/).filter(Boolean).map(Number)
@@ -122,8 +133,9 @@ function SubmitForm({ project, clusters, onSubmitted }) {
 
   function applyPreset(params) {
     setBase(params.base || '')
-    setDims(Object.entries(params.dims || {})
-      .map(([k, v]) => `${k}=${v.join(',')}`).join('\n'))
+    const dimEntries = Object.entries(params.dims || {})
+    setDimVals(Object.fromEntries(dimEntries.map(([k, v]) => [k, v.join(',')])))
+    setDims(dimEntries.map(([k, v]) => `${k}=${v.join(',')}`).join('\n'))
     setRates((params.rates || []).join(' '))
     setSearch(Boolean(params.rate_search))
     setTrials(params.trials ?? '')
@@ -134,9 +146,8 @@ function SubmitForm({ project, clusters, onSubmitted }) {
 
   useEffect(() => {
     if (!project) return
-    setCatalog(null); setSelected([]); setManagedCluster(''); setAfter('')
-    api.experiments(project).then(setCatalog)
-      .catch(() => setCatalog({ experiments: [], aggregates: {}, error: 'unreachable' }))
+    setSelected([]); setManagedCluster(''); setAfter('')
+    setDimVals({}); setDims('')
   }, [project])
 
   const hasCatalog = catalog && !catalog.error && catalog.experiments.length > 0
@@ -261,10 +272,29 @@ function SubmitForm({ project, clusters, onSubmitted }) {
               ))}
             </select>
           </label>
-          <label>dims
-            <textarea rows="2" placeholder={'payload_size=16,1024\ngamma=1.2'}
-                      value={dims} onChange={e => setDims(e.target.value)} />
-          </label>
+          {advDims.length > 0 ? (
+            // Advertised dims plus any preset dims the adapter doesn't list,
+            // so applying an old preset never silently drops a dim.
+            [...advDims,
+             ...Object.keys(dimVals)
+               .filter(n => !advDims.some(d => d.name === n))
+               .map(n => ({ name: n, label: n, unit: '', choices: [] }))]
+              .map(d => (
+                <label key={d.name} title={d.description || d.name}>
+                  {d.label}{d.unit ? ` (${d.unit})` : ''}
+                  <input className="dim-input"
+                         placeholder={d.choices.length ? d.choices.join(',') : 'v1,v2'}
+                         value={dimVals[d.name] || ''}
+                         onChange={e => setDimVals(v =>
+                           ({ ...v, [d.name]: e.target.value }))} />
+                </label>
+              ))
+          ) : (
+            <label>dims
+              <textarea rows="2" placeholder={'payload_size=16,1024\ngamma=1.2'}
+                        value={dims} onChange={e => setDims(e.target.value)} />
+            </label>
+          )}
           <label>rates
             <input placeholder="1000 2000 4000" value={rates}
                    onChange={e => setRates(e.target.value)} />
@@ -466,7 +496,9 @@ function JobRow({ job, onChanged }) {
 
 // ---------- runs ledger ----------
 
-const POINT_METRIC_COLS = [
+// Fallback metric columns for projects whose adapter has no display()
+// metadata; adapters that advertise metrics override this per project.
+const DEFAULT_METRIC_COLS = [
   ['throughput_msgs_per_sec', 'delivered/s'],
   ['offered_rate', 'offered/s'],
   ['e2e_p50', 'e2e p50'],
@@ -479,7 +511,7 @@ function fmtNum(v) {
     : Math.round(v * 100) / 100
 }
 
-function RunRow({ run, onChanged }) {
+function RunRow({ run, metricCols, onChanged }) {
   const [open, setOpen] = useState(false)
   const [detail, setDetail] = useState(null)
   const [note, setNote] = useState('')
@@ -497,7 +529,7 @@ function RunRow({ run, onChanged }) {
   }
 
   const cols = detail
-    ? POINT_METRIC_COLS.filter(([k]) => detail.points.some(p => k in p.metrics))
+    ? metricCols.filter(([k]) => detail.points.some(p => k in p.metrics))
     : []
 
   return (
@@ -580,7 +612,7 @@ function RunRow({ run, onChanged }) {
   )
 }
 
-function RunsSection({ projects, runs, onChanged }) {
+function RunsSection({ projects, runs, metricCols, onChanged }) {
   const [scanBusy, setScanBusy] = useState(false)
 
   async function scan(name) {
@@ -610,7 +642,8 @@ function RunsSection({ projects, runs, onChanged }) {
               <th>points</th><th>started</th><th>tags</th><th>job</th>
             </tr></thead>
             <tbody>
-              {runs.map(r => <RunRow key={r.id} run={r} onChanged={onChanged} />)}
+              {runs.map(r => <RunRow key={r.id} run={r} metricCols={metricCols}
+                                     onChanged={onChanged} />)}
             </tbody>
           </table>}
     </section>
@@ -629,6 +662,16 @@ export default function App() {
   const [selected, setSelected] = useState(() => {
     try { return localStorage.getItem('ck-project') || '' } catch { return '' }
   })
+  // One catalog fetch per selected project; the submit form and the runs
+  // table both read it (experiments + adapter display metadata).
+  const [catalog, setCatalog] = useState(null)
+  useEffect(() => {
+    if (!selected) return
+    setCatalog(null)
+    api.experiments(selected).then(setCatalog)
+      .catch(() => setCatalog({ experiments: [], aggregates: {},
+                                dims: [], metrics: [], error: 'unreachable' }))
+  }, [selected])
 
   useEffect(() => {
     if (projects.length && !projects.some(p => p.name === selected)) {
@@ -683,6 +726,10 @@ export default function App() {
   const projClusters = clusters.filter(c => c.project === selected)
   const projRuns = runs.filter(r => r.project === selected)
   const projInfo = projects.find(p => p.name === selected)
+  const metricCols = catalog?.metrics?.length
+    ? catalog.metrics.map(m =>
+        [m.name, m.unit ? `${m.label} (${m.unit})` : m.label])
+    : DEFAULT_METRIC_COLS
 
   return (
     <div className="app">
@@ -720,7 +767,7 @@ export default function App() {
       <section>
         <h2>Queue</h2>
         {selected && (
-          <SubmitForm project={selected}
+          <SubmitForm project={selected} catalog={catalog}
                       clusters={(projInfo?.clusters) || []}
                       onSubmitted={reload} />
         )}
@@ -734,7 +781,7 @@ export default function App() {
       </section>
 
       <RunsSection projects={projects.filter(p => p.name === selected)}
-                   runs={projRuns} onChanged={reload} />
+                   runs={projRuns} metricCols={metricCols} onChanged={reload} />
     </div>
   )
 }
