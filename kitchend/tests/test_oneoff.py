@@ -43,6 +43,18 @@ def test_oneoff_without_base(toy_project):
     assert queue == "elsewhere"
 
 
+def test_oneoff_queue_from_cluster(toy_project):
+    # A sweep that names its cluster lands on that cluster's queue, so it
+    # serializes with the cluster's other jobs and gets cost-gated over MCP.
+    _, queue = adapters.oneoff_command(
+        toy_project, {"rates": [1000], "cluster": "main"})
+    assert queue == "main"
+    # Explicit queue still wins over cluster.
+    _, queue = adapters.oneoff_command(
+        toy_project, {"rates": [1000], "cluster": "main", "queue": "q"})
+    assert queue == "q"
+
+
 def test_oneoff_rejects_unknown_base(toy_project):
     with pytest.raises(ValueError, match="unknown base"):
         adapters.oneoff_command(toy_project, {"base": "nope"})

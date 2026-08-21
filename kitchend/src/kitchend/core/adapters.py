@@ -132,7 +132,11 @@ def oneoff_command(project_cfg, params: dict):
     argv = build(dict(params))
     if not argv:
         raise ValueError("adapter returned an empty one-off command")
-    queue = params.get("queue")
+    # Queue precedence: explicit queue, then the cluster the sweep names
+    # (one-offs on a costed cluster must land on that cluster's queue so
+    # they serialize with its other jobs and get cost-gated), then the base
+    # experiment's queue.
+    queue = params.get("queue") or params.get("cluster")
     base = params.get("base")
     if not queue and base:
         by_name = {e.name: e for e in handle.adapter.experiments()}
