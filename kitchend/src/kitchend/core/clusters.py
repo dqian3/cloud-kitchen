@@ -72,7 +72,7 @@ class ManagedCluster:
     keepalive: KeepAlive | None = None
     lease_handles: dict[str, object] = field(default_factory=dict)
     session_id: int | None = None
-    last_status: dict = field(default_factory=dict)
+    last_status: dict | None = None     # None until the first gcloud poll
     last_rearm: float = 0.0
     create_task: asyncio.Task | None = None
     create_log: list = field(default_factory=list)   # captured output lines
@@ -355,7 +355,7 @@ class ClusterManager:
                 "state": row["state"] if row else "terminated",
                 "state_updated_at": row["state_updated_at"] if row else None,
                 "vm_count": len(mc.vms) if mc.vms else None,
-                "vms_running": running if mc.last_status else None,
+                "vms_running": running if mc.last_status is not None else None,
                 "vms": mc.last_status or None,
                 "leases": leases,
                 "active": mc.task is not None and not mc.task.done(),
