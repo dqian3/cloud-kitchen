@@ -37,6 +37,8 @@ def create_app(config: Config) -> FastAPI:
             app.state.scheduler.loop())
         ingest_task = asyncio.get_running_loop().create_task(
             app.state.ingester.loop())
+        status_task = asyncio.get_running_loop().create_task(
+            app.state.clusters.status_poll_loop())
         app.state.hub.emit("daemon.started", version=__version__)
         try:
             # Mounted sub-app lifespans don't run under Starlette, so the
@@ -48,6 +50,7 @@ def create_app(config: Config) -> FastAPI:
             scheduler_task.cancel()
             app.state.ingester.stop()
             ingest_task.cancel()
+            status_task.cancel()
             await app.state.clusters.shutdown_all()
             app.state.hub.emit("daemon.stopped")
 

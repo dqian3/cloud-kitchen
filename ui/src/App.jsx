@@ -23,14 +23,17 @@ function ClusterCard({ c, onAction }) {
     <div className="card">
       <div className="card-head">
         <b>{c.key}</b>
-        <Chip text={c.state} color={{
+        <Chip text={c.state === 'unmanaged'
+                ? `unmanaged (${c.vms_running ?? '?'} up)` : c.state}
+              color={{
           running: 'green', starting: 'blue', stopping: 'orange',
-          terminated: 'gray',
+          terminated: 'gray', unmanaged: 'orange',
         }[c.state] || 'gray'} />
       </div>
       <div className="card-body">
         <div>{c.vm_count != null ? `${c.vm_count} VMs` : 'VMs: (unread)'}
-          {c.burn_usd_per_hr != null && c.state === 'running' &&
+          {c.burn_usd_per_hr != null &&
+            (c.state === 'running' || c.state === 'unmanaged') &&
             <span className="burn"> · ${c.burn_usd_per_hr.toFixed(2)}/hr</span>}
           {c.session_cost_usd != null &&
             <span className="muted"> · total ${c.session_cost_usd}</span>}
@@ -63,8 +66,11 @@ function ClusterCard({ c, onAction }) {
             <button onClick={() => onAction('up', c, null, ttl)}>up (TTL {ttl}m)</button>
           </>
         )}
-        {c.state === 'running' && (
-          <button onClick={() => onAction('down', c)}>down</button>
+        {(c.state === 'running' || c.state === 'unmanaged') && (
+          <button title={c.state === 'unmanaged'
+                   ? 'stop the VMs running outside daemon leases'
+                   : undefined}
+                  onClick={() => onAction('down', c)}>down</button>
         )}
         <button onClick={() => onAction('refresh', c)}>refresh VMs</button>
         {c.create && c.state !== 'running' && !busy && !c.create.running && (

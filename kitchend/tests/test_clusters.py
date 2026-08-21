@@ -189,3 +189,39 @@ def test_failed_start_stops_partial_and_releases_lease(manager):
         assert row["released_at"] is not None
 
     asyncio.run(main())
+
+
+def test_poll_status_flags_unmanaged_vms(manager):
+    mgr, mc, db = manager
+    mc.remote.vm_states = {"r0": "RUNNING", "r1": "RUNNING", "c0": "TERMINATED"}
+
+    async def main():
+        await mgr.poll_status(mc)
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["state"] == "unmanaged"
+        assert snap["vms_running"] == 2
+        assert snap["burn_usd_per_hr"] == pytest.approx(1.0)  # 2 up * 0.5
+        types = [r["type"] for r in db.query("SELECT type FROM events")]
+        assert "cluster.unmanaged" in types
+
+        # VMs gone again -> back to terminated.
+        mc.remote.vm_states = {v: "TERMINATED" for v in mc.remote.vm_states}
+        await mgr.poll_status(mc)
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["state"] == "terminated"
+
+    asyncio.run(main())
+
+
+def test_poll_status_leaves_managed_state_alone(manager):
+    mgr, mc, db = manager
+
+    async def main():
+        lease_id = await mgr.up("stub/main", ttl_minutes=60)
+        await mgr.poll_status(mc)
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["state"] == "running"
+        mgr.release("stub/main", lease_id)
+        await mgr.down("stub/main")
+
+    asyncio.run(main())

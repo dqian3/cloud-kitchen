@@ -82,6 +82,7 @@ class ManagedCluster:
 class ClusterManager:
     REARM_INTERVAL_S = 30 * 60
     TICK_S = 60
+    STATUS_POLL_S = 5 * 60
 
     def __init__(self, config, db, hub):
         self.config = config
@@ -291,10 +292,44 @@ class ClusterManager:
 
     async def refresh_status(self, key):
         mc = self._get(key)
+        return await self.poll_status(mc)
+
+    async def poll_status(self, mc: ManagedCluster):
+        """Read VM states from gcloud and reconcile the displayed state.
+
+        gcloud is the truth about VMs; the DB state describes daemon
+        management. VMs running without a daemon lease show as 'unmanaged'
+        (a driver-managed run, or leftovers) — they accrue cost, so they
+        must be visible. The VMs themselves are never touched here.
+        """
         vms = self._vms(mc)
         statuses = await asyncio.to_thread(mc.remote.vm_status, vms)
         mc.last_status = statuses
+        if mc.task is not None and not mc.task.done():
+            return statuses
+        running = sum(1 for s in statuses.values() if s == "RUNNING")
+        row = self.db.query_one(
+            "SELECT state FROM clusters WHERE id = ?", (mc.db_id,))
+        state = row["state"] if row else "terminated"
+        if running and state == "terminated":
+            self._set_db_state(mc, "unmanaged")
+            self.hub.emit(
+                "cluster.unmanaged", cluster_id=mc.db_id, cluster=mc.key,
+                running=running,
+                note="VMs running with no daemon lease are accruing cost")
+        elif not running and state == "unmanaged":
+            self._set_db_state(mc, "terminated")
         return statuses
+
+    async def status_poll_loop(self):
+        while True:
+            for mc in self.clusters.values():
+                try:
+                    await self.poll_status(mc)
+                except Exception as e:
+                    self.hub.emit("cluster.error", cluster_id=mc.db_id,
+                                  cluster=mc.key, error=f"status poll: {e!r}")
+            await asyncio.sleep(self.STATUS_POLL_S)
 
     def snapshot(self):
         out = []
@@ -307,15 +342,20 @@ class ClusterManager:
                  "expires_in_s": max(0, int(l.expires_at - time.time()))}
                 for l in mc.state.live_leases()
             ]
+            running = sum(1 for s in (mc.last_status or {}).values()
+                          if s == "RUNNING")
             burn = None
             if mc.hourly_usd is not None and mc.session_id is not None:
                 burn = mc.hourly_usd * len(mc.vms)
+            elif mc.hourly_usd is not None and running:
+                burn = mc.hourly_usd * running
             creating = mc.create_task is not None and not mc.create_task.done()
             out.append({
                 "key": mc.key, "project": mc.project, "name": mc.name,
                 "state": row["state"] if row else "terminated",
                 "state_updated_at": row["state_updated_at"] if row else None,
                 "vm_count": len(mc.vms) if mc.vms else None,
+                "vms_running": running if mc.last_status else None,
                 "vms": mc.last_status or None,
                 "leases": leases,
                 "active": mc.task is not None and not mc.task.done(),
