@@ -31,6 +31,9 @@ class JobSubmit(BaseModel):
     sweep: dict | None = None      # ad-hoc sweep params → adapter.oneoff()
     extra_flags: list[str] = Field(default_factory=list)
     queue: str | None = None
+    cluster: str | None = None     # daemon-managed lease: up before, down after
+    cluster_ttl_minutes: int = 60
+    after: int | None = None       # wait for this job's retry chain to finish
     run_dir: str | None = None
     resume: bool = False
     priority: int = 0
@@ -73,6 +76,9 @@ class JobEdit(BaseModel):
     command: list[str] | None = None
     extra_flags: list[str] | None = None
     queue: str | None = None
+    cluster: str | None = None
+    cluster_ttl_minutes: int | None = None
+    after: int | None = None
     run_dir: str | None = None
     resume: bool | None = None
     priority: int | None = None

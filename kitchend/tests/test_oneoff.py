@@ -60,6 +60,35 @@ def test_oneoff_rejects_unknown_base(toy_project):
         adapters.oneoff_command(toy_project, {"base": "nope"})
 
 
+def test_prepare_spec_cluster_handling(toy_project, tmp_path):
+    from dataclasses import replace
+
+    from kitchend.config import ClusterConfig
+    from kitchend.core import submission
+
+    proj = replace(toy_project, clusters=(
+        ClusterConfig(name="local", config="x.yaml"),), driver=("bash", "-c"))
+
+    # A sweep naming a configured cluster inherits the managed lease and
+    # the cluster's queue.
+    spec = {"project": "toy", "sweep": {"rates": [1000], "cluster": "local"}}
+    submission.prepare_spec(proj, spec)
+    assert spec["cluster"] == "local"
+    assert spec["queue"] == "toy/local"
+
+    # A cluster name the daemon doesn't manage only routes the queue.
+    spec2 = {"project": "toy", "sweep": {"rates": [1000], "cluster": "alias"}}
+    submission.prepare_spec(proj, spec2)
+    assert "cluster" not in spec2
+    assert spec2["queue"] == "toy/alias"
+
+    # An explicit unknown cluster is a submit-time error.
+    with pytest.raises(ValueError, match="no cluster 'nope'"):
+        submission.prepare_spec(proj, {"project": "toy",
+                                       "experiments": ["x"],
+                                       "cluster": "nope"})
+
+
 def test_oneoff_requires_hook(tmp_path):
     adapters.clear_cache()
     ap = tmp_path / "kitchen_adapter.py"

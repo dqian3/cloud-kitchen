@@ -98,3 +98,13 @@ details.raw summary { cursor: pointer; color: var(--muted);
 details.raw pre { max-height: 14rem; overflow: auto; font-size: 0.72rem;
   background: var(--card); padding: 0.4rem; border-radius: 4px; }
 h2 button.link { margin-left: 0.6rem; font-size: 0.75rem; }
+
+.tabs { display: flex; gap: 0.2rem; margin-left: 1rem; }
+.tab { background: none; border: none; border-bottom: 2px solid transparent;
+  padding: 0.25rem 0.7rem; cursor: pointer; font-size: 0.95rem;
+  color: var(--muted); }
+.tab:hover { color: inherit; }
+.tab-on { color: inherit; border-bottom-color: var(--blue); font-weight: 600; }
+.tab-count { margin-left: 0.35rem; background: var(--blue); color: #fff;
+  border-radius: 999px; padding: 0 0.4rem; font-size: 0.72rem; }
+.after-input { width: 4rem; }

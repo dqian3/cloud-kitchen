@@ -56,9 +56,10 @@ def create_app(config: Config) -> FastAPI:
     app.state.db = Db(config.db_path)
     app.state.hub = EventHub(app.state.db)
     app.state.runner = JobRunner(config.jobs_dir)
-    app.state.scheduler = Scheduler(config, app.state.db, app.state.hub,
-                                    app.state.runner)
     app.state.clusters = ClusterManager(config, app.state.db, app.state.hub)
+    app.state.scheduler = Scheduler(config, app.state.db, app.state.hub,
+                                    app.state.runner,
+                                    clusters=app.state.clusters)
     app.state.ingester = Ingester(app.state.db, app.state.hub)
 
     @app.get("/api/health")

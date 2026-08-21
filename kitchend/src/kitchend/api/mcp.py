@@ -108,6 +108,8 @@ def build_mcp(state) -> MCPServer:
     @mcp.tool()
     def submit_job(project: str, experiments: list[str] | None = None,
                    sweep: dict | None = None, queue: str | None = None,
+                   cluster: str | None = None, cluster_ttl_minutes: int = 60,
+                   after: int | None = None,
                    priority: int = 0, max_retries: int = 0,
                    est_hours: float | None = None,
                    confirm_cost_usd: float | None = None) -> dict:
@@ -115,9 +117,17 @@ def build_mcp(state) -> MCPServer:
         (base, dims {name: [values]}, rates, rate_search, trials,
         duration_secs — translated by the project's adapter). Jobs whose
         queue maps to a costed cluster require est_hours plus
-        confirm_cost_usd >= the returned estimate. The job does not bring
-        clusters up; lease one first with cluster_up if the driver expects
-        it running."""
+        confirm_cost_usd >= the returned estimate.
+
+        `cluster` (a daemon-configured cluster name) makes the lease
+        daemon-managed: VMs come up before the driver spawns, the lease is
+        renewed while the job runs, and released after — a chained job on
+        the same cluster inherits it without a VM cycle. A sweep whose
+        params name a configured cluster gets this automatically. `after`
+        holds the job until that job's retry chain ends with data
+        (succeeded/degraded); a chain that ends failed/canceled cancels
+        this job instead — chain jobs to cycle clusters between phases
+        (e.g. scaling sweeps per committee size, geo runs per deployment)."""
         project_cfg = _project(project)
         spec = {"project": project, "priority": priority,
                 "max_retries": max_retries}
@@ -127,6 +137,11 @@ def build_mcp(state) -> MCPServer:
             spec["sweep"] = sweep
         if queue:
             spec["queue"] = queue
+        if cluster:
+            spec["cluster"] = cluster
+            spec["cluster_ttl_minutes"] = cluster_ttl_minutes
+        if after is not None:
+            spec["after"] = after
         submission.prepare_spec(project_cfg, spec)
         estimate = _job_cost_estimate(state, project_cfg, spec, est_hours)
         require_confirmed_cost(estimate, confirm_cost_usd,

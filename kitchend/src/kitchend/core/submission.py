@@ -23,6 +23,25 @@ def prepare_spec(project_cfg, spec: dict) -> dict:
         spec["command"] = argv
         if queue and not spec.get("queue"):
             spec["queue"] = f"{project_cfg.name}/{queue}"
+        # A sweep that names a daemon-configured cluster gets the managed
+        # lease: the daemon brings the cluster up before the job and releases
+        # it after (one-off drivers like sweep.py assume VMs are running).
+        # Names that don't match a configured cluster (a catalog alias, a
+        # local run) only route the queue.
+        cluster = spec["sweep"].get("cluster")
+        if cluster and not spec.get("cluster") and \
+                any(c.name == cluster for c in project_cfg.clusters):
+            spec["cluster"] = cluster
+    cluster = spec.get("cluster")
+    if cluster:
+        if not any(c.name == cluster for c in project_cfg.clusters):
+            raise ValueError(
+                f"project '{project_cfg.name}' has no cluster '{cluster}' "
+                f"configured; known: {[c.name for c in project_cfg.clusters]}")
+        if not spec.get("queue"):
+            spec["queue"] = f"{project_cfg.name}/{cluster}"
+    if spec.get("after") is not None:
+        spec["after"] = int(spec["after"])
     # Resolve against the project's catalog: expand aggregates, reject unknown
     # names and cross-cluster mixes, and route onto the cluster's queue.
     elif spec.get("experiments"):

@@ -18,12 +18,13 @@ from . import jobs
 
 
 class Scheduler:
-    def __init__(self, config, db, hub, runner):
+    def __init__(self, config, db, hub, runner, clusters=None):
         self.config = config
         self.db = db
         self.hub = hub
         self.runner = runner
-        self._tasks: dict[int, asyncio.Task] = {}     # job_id -> supervisor task
+        self.clusters = clusters                      # ClusterManager, for
+        self._tasks: dict[int, asyncio.Task] = {}     # spec.cluster leases
         self._running_queues: dict[str, int] = {}     # queue key -> job_id
         self._wake = asyncio.Event()
         self._stopped = False
@@ -57,6 +58,15 @@ class Scheduler:
             "ORDER BY j.priority DESC, j.id ASC", (jobs.QUEUED,)
         ):
             job = jobs.get(self.db, row["id"])
+            gate = self._after_gate(job)
+            if gate == "wait":
+                continue
+            if gate == "cancel":
+                jobs.set_state(self.db, self.hub, job["id"], jobs.CANCELED,
+                               finished_at=jobs._now(self.db))
+                self.hub.emit("job.dependency_canceled", job_id=job["id"],
+                              after=job["spec"].get("after"))
+                continue
             key = jobs.queue_key(job)
             if key in self._running_queues:
                 continue
@@ -65,6 +75,42 @@ class Scheduler:
                 self._execute(job, key))
             if len(self._running_queues) >= self.config.max_concurrent_queues:
                 break
+
+    def _after_gate(self, job) -> str:
+        """'ready' | 'wait' | 'cancel' for a job's `after` dependency.
+
+        The dependency is judged at the end of the predecessor's retry chain:
+        a failed job whose auto-retry is still queued means "wait", and a
+        chain that ultimately produced data (succeeded/degraded) satisfies
+        the dependent even though the first attempt failed. A chain that
+        ended failed/canceled/interrupted cancels the dependent — silently
+        burning cluster money after a broken predecessor is the worse
+        default; resubmit the canceled job to run it anyway.
+        """
+        after = job["spec"].get("after")
+        if after is None:
+            return "ready"
+        current = after
+        while True:
+            row = self.db.query_one(
+                "SELECT id FROM jobs WHERE parent_job_id = ? "
+                "ORDER BY id DESC LIMIT 1", (current,))
+            if row is None:
+                break
+            current = row["id"]
+        dep = jobs.get(self.db, current)
+        if dep is None:
+            return "cancel"     # dangling reference
+        if dep["state"] in (jobs.SUCCEEDED, jobs.DEGRADED):
+            return "ready"
+        if dep["state"] in jobs.ACTIVE_STATES:
+            return "wait"
+        # failed / canceled / interrupted — but a scheduled retry may not
+        # have inserted its row yet; retries_left > 0 on a failure means one
+        # is coming, so keep waiting rather than canceling into the gap.
+        if dep["state"] == jobs.FAILED and dep["retries_left"] > 0:
+            return "wait"
+        return "cancel"
 
     async def _execute(self, job, key):
         job_id = job["id"]
@@ -86,6 +132,35 @@ class Scheduler:
         jobs.set_state(self.db, self.hub, job_id, jobs.RUNNING,
                        started_at=jobs._now(self.db),
                        run_dir=spec.get("run_dir"))
+
+        # Daemon-managed cluster: lease it up before the driver spawns (the
+        # driver assumes VMs are running), keep the lease renewed while the
+        # job lives, release it after. The tick loop stops the cluster ~a
+        # minute after the last lease goes, so a chained job on the same
+        # cluster picks the lease up without a VM cycle in between.
+        cluster_key = lease_id = None
+        ttl = int(spec.get("cluster_ttl_minutes", 60))
+        if spec.get("cluster") and self.clusters is not None:
+            cluster_key = f"{job['project']}/{spec['cluster']}"
+            self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
+                          action="acquiring")
+            try:
+                lease_id = await self.clusters.up(cluster_key, ttl,
+                                                  purpose=f"job-{job_id}")
+            except Exception as e:
+                jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
+                               finished_at=jobs._now(self.db))
+                self.hub.emit("job.error", job_id=job_id,
+                              error=f"cluster bring-up failed: {e!r}")
+                self._release(key, job_id)
+                return
+            self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
+                          action="leased", lease=lease_id)
+
+        extender = None
+        if lease_id is not None:
+            extender = asyncio.get_running_loop().create_task(
+                self._keep_lease(cluster_key, lease_id, ttl))
         self.hub.emit("job.command", job_id=job_id, argv=argv, cwd=str(cwd))
         try:
             rc = await self.runner.run(
@@ -101,8 +176,29 @@ class Scheduler:
             self.hub.emit("job.error", job_id=job_id, error=repr(e))
             self._release(key, job_id)
             return
+        finally:
+            if extender is not None:
+                extender.cancel()
+            if lease_id is not None:
+                try:
+                    self.clusters.release(cluster_key, lease_id)
+                except Exception as e:
+                    self.hub.emit("job.error", job_id=job_id,
+                                  error=f"lease release failed: {e!r}")
 
         self._finish(job, key, rc)
+
+    async def _keep_lease(self, cluster_key, lease_id, ttl_minutes):
+        """Renew a job's cluster lease at half-TTL cadence while it runs, so
+        a long job outlives its initial TTL but a dead daemon still lets the
+        lease lapse within one TTL."""
+        interval = max(60, ttl_minutes * 30)   # half the TTL, in seconds
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                self.clusters.extend(cluster_key, lease_id, ttl_minutes)
+            except Exception:
+                return   # lease vanished (cluster forced down); stop renewing
 
     def _finish(self, job, key, rc):
         job_id = job["id"]

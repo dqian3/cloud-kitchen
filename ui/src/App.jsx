@@ -75,14 +75,15 @@ function ClusterCard({ c, onAction }) {
 
 // ---------- jobs ----------
 
-function SubmitForm({ projects, onSubmitted }) {
-  const [project, setProject] = useState('')
+function SubmitForm({ project, clusters, onSubmitted }) {
   const [catalog, setCatalog] = useState(null)   // {experiments, aggregates, error}
   const [selected, setSelected] = useState([])
   const [freeText, setFreeText] = useState('')
   const [flags, setFlags] = useState('')
   const [priority, setPriority] = useState(0)
   const [retries, setRetries] = useState(2)
+  const [after, setAfter] = useState('')          // chain: wait for job #
+  const [managedCluster, setManagedCluster] = useState('')  // daemon lease
   const [err, setErr] = useState(null)
   // One-off sweep mode: generic params the project adapter translates.
   const [oneoff, setOneoff] = useState(false)
@@ -115,6 +116,7 @@ function SubmitForm({ projects, onSubmitted }) {
     if (trials) sweep.trials = +trials
     if (duration) sweep.duration_secs = +duration
     if (flags.trim()) sweep.extra_flags = flags.split(/\s+/).filter(Boolean)
+    if (managedCluster) sweep.cluster = managedCluster
     return sweep
   }
 
@@ -127,15 +129,12 @@ function SubmitForm({ projects, onSubmitted }) {
     setTrials(params.trials ?? '')
     setDuration(params.duration_secs ?? '')
     setFlags((params.extra_flags || []).join(' '))
+    setManagedCluster(params.cluster || '')
   }
 
   useEffect(() => {
-    if (!project && projects.length) setProject(projects[0].name)
-  }, [projects])
-
-  useEffect(() => {
     if (!project) return
-    setCatalog(null); setSelected([])
+    setCatalog(null); setSelected([]); setManagedCluster(''); setAfter('')
     api.experiments(project).then(setCatalog)
       .catch(() => setCatalog({ experiments: [], aggregates: {}, error: 'unreachable' }))
   }, [project])
@@ -160,22 +159,22 @@ function SubmitForm({ projects, onSubmitted }) {
     e.preventDefault()
     setErr(null)
     try {
+      const common = { project, priority: +priority, max_retries: +retries }
+      if (after) common.after = +after
       if (oneoff) {
         const sweep = buildSweep()
         if (sweep === null) return
-        await api.submit({ project, sweep, priority: +priority,
-                           max_retries: +retries })
+        await api.submit({ ...common, sweep })
       } else {
         const experiments = hasCatalog
           ? selected
           : freeText.split(/\s+/).filter(Boolean)
         if (!experiments.length) { setErr('pick at least one experiment'); return }
+        if (managedCluster) common.cluster = managedCluster
         await api.submit({
-          project,
+          ...common,
           experiments,
           extra_flags: flags.split(/\s+/).filter(Boolean),
-          priority: +priority,
-          max_retries: +retries,
         })
       }
       setSelected([]); setFreeText('')
@@ -186,12 +185,23 @@ function SubmitForm({ projects, onSubmitted }) {
   return (
     <form className="submit-form-block" onSubmit={submit}>
       <div className="submit-form">
-        <select value={project} onChange={e => setProject(e.target.value)}>
-          {projects.map(p => <option key={p.name}>{p.name}</option>)}
-        </select>
         <label title="ad-hoc sweep: override dims/rates/trials; the project adapter builds the command">
           <input type="checkbox" checked={oneoff}
                  onChange={e => setOneoff(e.target.checked)} /> one-off
+        </label>
+        {(clusters || []).length > 0 && (
+          <label title="daemon-managed lease: cluster up before the job, released after — a chained job on the same cluster inherits it without a VM cycle">
+            cluster
+            <select value={managedCluster}
+                    onChange={e => setManagedCluster(e.target.value)}>
+              <option value="">(driver-managed)</option>
+              {clusters.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+        )}
+        <label title="chain: run only after this job's retry chain ends with data; a failed chain cancels this job">
+          after #<input type="number" min="1" className="after-input"
+                        value={after} onChange={e => setAfter(e.target.value)} />
         </label>
         {!oneoff && !hasCatalog && (
           <input placeholder={catalog?.error
@@ -390,9 +400,14 @@ function JobRow({ job, onChanged }) {
         <td>{job.project}</td>
         <td className="mono">{(spec.experiments || []).join(' ') ||
           (spec.command || []).join(' ')}</td>
-        <td>{spec.queue || job.project}</td>
+        <td>{spec.queue || job.project}
+          {spec.cluster && <span title={`daemon-managed lease on ${spec.cluster}`}> ⚙</span>}
+        </td>
         <td>{job.priority !== 0 ? job.priority : ''}</td>
         <td><Chip text={job.state} color={STATE_COLORS[job.state]} />
+          {job.state === 'queued' && spec.after &&
+            <span className="muted" title="waits for that job's retry chain">
+              {' '}after #{spec.after}</span>}
           {job.exit_code != null && job.exit_code !== 0 &&
             <span className="muted"> rc={job.exit_code}</span>}
           {job.state === 'running' && job.progress?.points &&
@@ -611,6 +626,20 @@ export default function App() {
   const [clusters, setClusters] = useState([])
   const [runs, setRuns] = useState([])
   const [connected, setConnected] = useState(false)
+  const [selected, setSelected] = useState(() => {
+    try { return localStorage.getItem('ck-project') || '' } catch { return '' }
+  })
+
+  useEffect(() => {
+    if (projects.length && !projects.some(p => p.name === selected)) {
+      setSelected(projects[0].name)
+    }
+  }, [projects, selected])
+
+  function pickProject(name) {
+    setSelected(name)
+    try { localStorage.setItem('ck-project', name) } catch { /* ignore */ }
+  }
 
   const reload = useCallback(async () => {
     try {
@@ -647,32 +676,54 @@ export default function App() {
     } catch (e) { alert(e.message || e) }
   }
 
-  const active = jobs.filter(j => ['queued', 'running'].includes(j.state))
-  const done = jobs.filter(j => !['queued', 'running'].includes(j.state))
+  // Everything below the tabs is scoped to one project.
+  const projJobs = jobs.filter(j => j.project === selected)
+  const active = projJobs.filter(j => ['queued', 'running'].includes(j.state))
+  const done = projJobs.filter(j => !['queued', 'running'].includes(j.state))
+  const projClusters = clusters.filter(c => c.project === selected)
+  const projRuns = runs.filter(r => r.project === selected)
+  const projInfo = projects.find(p => p.name === selected)
 
   return (
     <div className="app">
       <header>
         <h1>cloud-kitchen</h1>
+        <nav className="tabs">
+          {projects.map(p => {
+            const n = jobs.filter(j => j.project === p.name &&
+              ['queued', 'running'].includes(j.state)).length
+            return (
+              <button key={p.name}
+                      className={`tab ${p.name === selected ? 'tab-on' : ''}`}
+                      onClick={() => pickProject(p.name)}>
+                {p.name}{n > 0 && <span className="tab-count">{n}</span>}
+              </button>
+            )
+          })}
+        </nav>
         <span className={`dot ${connected ? 'dot-on' : 'dot-off'}`}
               title={connected ? 'live' : 'disconnected'} />
         {health && <span className="muted">v{health.version}</span>}
       </header>
 
-      <section>
-        <h2>Clusters</h2>
-        {clusters.length === 0 && <p className="muted">
-          No clusters configured — add them to ~/.cloud-kitchen/config.toml.</p>}
-        <div className="cards">
-          {clusters.map(c => (
-            <ClusterCard key={c.key} c={c} onAction={clusterAction} />
-          ))}
-        </div>
-      </section>
+      {projClusters.length > 0 && (
+        <section>
+          <h2>Clusters</h2>
+          <div className="cards">
+            {projClusters.map(c => (
+              <ClusterCard key={c.key} c={c} onAction={clusterAction} />
+            ))}
+          </div>
+        </section>
+      )}
 
       <section>
         <h2>Queue</h2>
-        <SubmitForm projects={projects} onSubmitted={reload} />
+        {selected && (
+          <SubmitForm project={selected}
+                      clusters={(projInfo?.clusters) || []}
+                      onSubmitted={reload} />
+        )}
         <JobTable jobs={active} onChanged={reload}
                   empty="Nothing queued or running." />
       </section>
@@ -682,7 +733,8 @@ export default function App() {
         <JobTable jobs={done} onChanged={reload} empty="No finished jobs yet." />
       </section>
 
-      <RunsSection projects={projects} runs={runs} onChanged={reload} />
+      <RunsSection projects={projects.filter(p => p.name === selected)}
+                   runs={projRuns} onChanged={reload} />
     </div>
   )
 }
