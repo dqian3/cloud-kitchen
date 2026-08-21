@@ -55,14 +55,8 @@ def clear_cache():
 def catalog(project_cfg) -> dict:
     handle = load_adapter(project_cfg)
     if not handle.ok:
-        return {"error": handle.error, "experiments": [], "aggregates": {},
-                "dims": [], "metrics": []}
+        return {"error": handle.error, "experiments": [], "aggregates": {}}
     exps = handle.adapter.experiments()
-    # Optional display() hook: per-project dim/metric labels for the UI.
-    # Adapters without it get empty lists and the UI falls back to generic
-    # forms and its default metric columns.
-    display = getattr(handle.adapter, "display", None)
-    info = display() if display is not None else None
     return {
         "error": None,
         "experiments": [
@@ -71,15 +65,6 @@ def catalog(project_cfg) -> dict:
             for e in exps
         ],
         "aggregates": handle.adapter.aggregates(),
-        "dims": [
-            {"name": d.name, "label": d.label or d.name, "unit": d.unit,
-             "description": d.description, "choices": list(d.choices)}
-            for d in (info.dims if info else ())
-        ],
-        "metrics": [
-            {"name": m.name, "label": m.label or m.name, "unit": m.unit}
-            for m in (info.metrics if info else ())
-        ],
     }
 
 

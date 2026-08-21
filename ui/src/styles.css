@@ -86,8 +86,6 @@ td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); }
 .oneoff label { display: inline-flex; gap: 0.3rem; align-items: center; }
 .oneoff textarea { font-family: ui-monospace, monospace; font-size: 0.8rem; }
 .oneoff input[type="number"] { width: 5rem; }
-.oneoff .dim-input { width: 7rem; font-family: ui-monospace, monospace;
-  font-size: 0.8rem; }
 .run-actions { display: flex; gap: 0.4rem; align-items: center;
   margin: 0.3rem 0; }
 .run-actions input { min-width: 22rem; }

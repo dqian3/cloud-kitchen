@@ -60,14 +60,6 @@ def test_oneoff_rejects_unknown_base(toy_project):
         adapters.oneoff_command(toy_project, {"base": "nope"})
 
 
-def test_toy_adapter_advertises_display_metadata(toy_project):
-    cat = adapters.catalog(toy_project)
-    assert "payload_size" in [d["name"] for d in cat["dims"]]
-    m = {x["name"]: x for x in cat["metrics"]}
-    assert m["throughput_msgs_per_sec"]["label"] == "delivered"
-    assert m["throughput_msgs_per_sec"]["unit"] == "msg/s"
-
-
 def test_prepare_spec_cluster_handling(toy_project, tmp_path):
     from dataclasses import replace
 

@@ -45,47 +45,6 @@ def test_catalog(project):
     assert [e["name"] for e in cat["experiments"]] == \
         ["alpha", "beta", "gamma", "preset"]
     assert cat["aggregates"] == {"pair": ["alpha", "beta"]}
-    # No display() hook -> empty display metadata, UI falls back to defaults.
-    assert cat["dims"] == [] and cat["metrics"] == []
-
-
-DISPLAY_ADAPTER_SRC = '''
-from kitchen.adapter import DimInfo, DisplayInfo, ExperimentInfo, MetricInfo
-
-class A:
-    name = "disp"
-    def experiments(self):
-        return [ExperimentInfo(name="alpha", queue="main", args=("alpha",))]
-    def aggregates(self):
-        return {}
-    def display(self):
-        return DisplayInfo(
-            dims=(DimInfo(name="payload_size", unit="bytes",
-                          choices=(16, 1024)),
-                  DimInfo(name="gamma", label="load shape")),
-            metrics=(MetricInfo(name="e2e_p50", label="e2e p50", unit="ms"),),
-        )
-
-def get_adapter():
-    return A()
-'''
-
-
-def test_catalog_display_metadata(tmp_path):
-    adapters.clear_cache()
-    ap = tmp_path / "kitchen_adapter.py"
-    ap.write_text(DISPLAY_ADAPTER_SRC)
-    p = ProjectConfig(name="disp", repo_path=tmp_path, adapter_path=ap)
-    cat = adapters.catalog(p)
-    assert cat["dims"] == [
-        {"name": "payload_size", "label": "payload_size", "unit": "bytes",
-         "description": "", "choices": [16, 1024]},
-        {"name": "gamma", "label": "load shape", "unit": "",
-         "description": "", "choices": []},
-    ]
-    assert cat["metrics"] == [
-        {"name": "e2e_p50", "label": "e2e p50", "unit": "ms"},
-    ]
 
 
 def test_resolve_aggregate_and_queue(project):
