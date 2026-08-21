@@ -52,10 +52,30 @@ def clear_cache():
     _cache.clear()
 
 
+def _display_info(adapter) -> dict | None:
+    """Serialize the optional display() hook (dim/metric presentation)."""
+    hook = getattr(adapter, "display", None)
+    if hook is None:
+        return None
+    d = hook()
+    return {
+        "dims": [
+            {"name": x.name, "label": x.label or x.name, "unit": x.unit,
+             "description": x.description, "example": x.example}
+            for x in d.dims
+        ],
+        "metrics": [
+            {"name": x.name, "label": x.label or x.name, "unit": x.unit}
+            for x in d.metrics
+        ],
+    }
+
+
 def catalog(project_cfg) -> dict:
     handle = load_adapter(project_cfg)
     if not handle.ok:
-        return {"error": handle.error, "experiments": [], "aggregates": {}}
+        return {"error": handle.error, "experiments": [], "aggregates": {},
+                "display": None}
     exps = handle.adapter.experiments()
     return {
         "error": None,
@@ -65,6 +85,7 @@ def catalog(project_cfg) -> dict:
             for e in exps
         ],
         "aggregates": handle.adapter.aggregates(),
+        "display": _display_info(handle.adapter),
     }
 
 

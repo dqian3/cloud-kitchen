@@ -75,8 +75,7 @@ function ClusterCard({ c, onAction }) {
 
 // ---------- jobs ----------
 
-function SubmitForm({ project, clusters, onSubmitted }) {
-  const [catalog, setCatalog] = useState(null)   // {experiments, aggregates, error}
+function SubmitForm({ project, clusters, catalog, onSubmitted }) {
   const [selected, setSelected] = useState([])
   const [freeText, setFreeText] = useState('')
   const [flags, setFlags] = useState('')
@@ -133,10 +132,7 @@ function SubmitForm({ project, clusters, onSubmitted }) {
   }
 
   useEffect(() => {
-    if (!project) return
-    setCatalog(null); setSelected([]); setManagedCluster(''); setAfter('')
-    api.experiments(project).then(setCatalog)
-      .catch(() => setCatalog({ experiments: [], aggregates: {}, error: 'unreachable' }))
+    setSelected([]); setManagedCluster(''); setAfter('')
   }, [project])
 
   const hasCatalog = catalog && !catalog.error && catalog.experiments.length > 0
@@ -265,6 +261,23 @@ function SubmitForm({ project, clusters, onSubmitted }) {
             <textarea rows="2" placeholder={'payload_size=16,1024\ngamma=1.2'}
                       value={dims} onChange={e => setDims(e.target.value)} />
           </label>
+          {(catalog?.display?.dims || []).length > 0 && (
+            <span className="agg-row">
+              {catalog.display.dims.map(d => (
+                <button key={d.name} type="button" className="agg"
+                        title={[d.description, d.unit && `unit: ${d.unit}`]
+                          .filter(Boolean).join(' — ')}
+                        onClick={() => setDims(v => {
+                          if (v.split('\n').some(l =>
+                            l.trim().startsWith(`${d.name}=`))) return v
+                          const line = `${d.name}=${d.example || ''}`
+                          return v.trim() ? `${v.trimEnd()}\n${line}` : line
+                        })}>
+                  +{d.label}
+                </button>
+              ))}
+            </span>
+          )}
           <label>rates
             <input placeholder="1000 2000 4000" value={rates}
                    onChange={e => setRates(e.target.value)} />
@@ -466,6 +479,8 @@ function JobRow({ job, onChanged }) {
 
 // ---------- runs ledger ----------
 
+// Fallback columns for projects whose adapter advertises no display()
+// metadata; adapters that do own their column set and order.
 const POINT_METRIC_COLS = [
   ['throughput_msgs_per_sec', 'delivered/s'],
   ['offered_rate', 'offered/s'],
@@ -479,7 +494,7 @@ function fmtNum(v) {
     : Math.round(v * 100) / 100
 }
 
-function RunRow({ run, onChanged }) {
+function RunRow({ run, display, onChanged }) {
   const [open, setOpen] = useState(false)
   const [detail, setDetail] = useState(null)
   const [note, setNote] = useState('')
@@ -496,8 +511,11 @@ function RunRow({ run, onChanged }) {
     } catch (e) { alert(e.message || e) }
   }
 
+  const metricCols = display?.metrics?.length
+    ? display.metrics.map(m => [m.name, m.unit ? `${m.label} (${m.unit})` : m.label])
+    : POINT_METRIC_COLS
   const cols = detail
-    ? POINT_METRIC_COLS.filter(([k]) => detail.points.some(p => k in p.metrics))
+    ? metricCols.filter(([k]) => detail.points.some(p => k in p.metrics))
     : []
 
   return (
@@ -580,7 +598,7 @@ function RunRow({ run, onChanged }) {
   )
 }
 
-function RunsSection({ projects, runs, onChanged }) {
+function RunsSection({ projects, runs, display, onChanged }) {
   const [scanBusy, setScanBusy] = useState(false)
 
   async function scan(name) {
@@ -610,7 +628,9 @@ function RunsSection({ projects, runs, onChanged }) {
               <th>points</th><th>started</th><th>tags</th><th>job</th>
             </tr></thead>
             <tbody>
-              {runs.map(r => <RunRow key={r.id} run={r} onChanged={onChanged} />)}
+              {runs.map(r => (
+                <RunRow key={r.id} run={r} display={display} onChanged={onChanged} />
+              ))}
             </tbody>
           </table>}
     </section>
@@ -625,6 +645,7 @@ export default function App() {
   const [jobs, setJobs] = useState([])
   const [clusters, setClusters] = useState([])
   const [runs, setRuns] = useState([])
+  const [catalog, setCatalog] = useState(null)   // {experiments, aggregates, display, error}
   const [connected, setConnected] = useState(false)
   const [selected, setSelected] = useState(() => {
     try { return localStorage.getItem('ck-project') || '' } catch { return '' }
@@ -640,6 +661,15 @@ export default function App() {
     setSelected(name)
     try { localStorage.setItem('ck-project', name) } catch { /* ignore */ }
   }
+
+  // The catalog (experiments + adapter display metadata) feeds both the
+  // submit form and the runs table's metric columns.
+  useEffect(() => {
+    if (!selected) return
+    setCatalog(null)
+    api.experiments(selected).then(setCatalog)
+      .catch(() => setCatalog({ experiments: [], aggregates: {}, error: 'unreachable' }))
+  }, [selected])
 
   const reload = useCallback(async () => {
     try {
@@ -722,6 +752,7 @@ export default function App() {
         {selected && (
           <SubmitForm project={selected}
                       clusters={(projInfo?.clusters) || []}
+                      catalog={catalog}
                       onSubmitted={reload} />
         )}
         <JobTable jobs={active} onChanged={reload}
@@ -734,7 +765,8 @@ export default function App() {
       </section>
 
       <RunsSection projects={projects.filter(p => p.name === selected)}
-                   runs={projRuns} onChanged={reload} />
+                   runs={projRuns} display={catalog?.display}
+                   onChanged={reload} />
     </div>
   )
 }
