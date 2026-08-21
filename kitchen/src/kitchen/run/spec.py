@@ -39,6 +39,12 @@ class SweepSpec:
     keys are present and non-None. None picks a default: the search-critical
     keys when searching (replaying a degenerate point would feed the search
     a lie), nothing extra otherwise.
+
+    coupled: groups of dim names whose value lists step together (zip)
+    instead of crossing — a diagonal sweep like f=p walks (1,1), (2,2)
+    rather than the full grid. Lists within a group must be equal length; a
+    dim may belong to at most one group. Directory naming is unchanged:
+    every dim keeps its own segment.
     """
     name: str
     dims: dict[str, tuple] = field(default_factory=dict)
@@ -52,6 +58,7 @@ class SweepSpec:
     retry_dead: bool = False
     pause_secs: float = 0.0
     resume_required_keys: tuple[str, ...] | None = None
+    coupled: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self):
         if self.rates and self.search is not None:
@@ -60,6 +67,40 @@ class SweepSpec:
             raise ValueError(f"{self.name}: trials must be >= 1")
         if self.max_attempts < 1:
             raise ValueError(f"{self.name}: max_attempts must be >= 1")
+        seen: set[str] = set()
+        for group in self.coupled:
+            if len(group) < 2:
+                raise ValueError(f"{self.name}: coupled group {group} needs "
+                                 "at least two dims")
+            lengths = set()
+            for dim in group:
+                if dim not in self.dims:
+                    raise ValueError(f"{self.name}: coupled dim '{dim}' is "
+                                     "not a sweep dim")
+                if dim in seen:
+                    raise ValueError(f"{self.name}: dim '{dim}' is in more "
+                                     "than one coupled group")
+                seen.add(dim)
+                lengths.add(len(self.dims[dim]))
+            if len(lengths) > 1:
+                raise ValueError(
+                    f"{self.name}: coupled dims {group} need equal-length "
+                    f"value lists, got {sorted(lengths)}")
+
+    def _axes(self):
+        """One axis per independent dim, one per coupled group (placed at
+        its first member's position); each axis is a list of partial dicts."""
+        group_of = {d: g for g in self.coupled for d in g}
+        axes, consumed = [], set()
+        for name in self.dims:
+            group = group_of.get(name)
+            if group is None:
+                axes.append([{name: v} for v in self.dims[name]])
+            elif group not in consumed:
+                consumed.add(group)
+                axes.append([dict(zip(group, vals))
+                             for vals in zip(*(self.dims[d] for d in group))])
+        return axes
 
     def combos(self):
         """Every dims combination as a dict, in declaration order."""
@@ -67,13 +108,16 @@ class SweepSpec:
             yield {}
             return
         names = list(self.dims)
-        for values in itertools.product(*(self.dims[n] for n in names)):
-            yield dict(zip(names, values))
+        for parts in itertools.product(*self._axes()):
+            combo = {}
+            for part in parts:
+                combo.update(part)
+            yield {n: combo[n] for n in names}
 
     def n_combos(self) -> int:
         n = 1
-        for values in self.dims.values():
-            n *= len(values)
+        for axis in self._axes():
+            n *= len(axis)
         return n
 
     def est_points(self) -> int | None:

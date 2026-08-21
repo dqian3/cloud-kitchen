@@ -205,3 +205,39 @@ def test_spec_validation():
     assert SweepSpec(name="x", dims={"a": (1, 2), "b": (3,)},
                      rates=(1, 2)).est_points() == 4
     assert SweepSpec(name="x", search=RateSearchSpec()).est_points() is None
+
+
+def test_coupled_dims_step_together():
+    spec = SweepSpec(name="x",
+                     dims={"f": (1, 2, 3), "p": (1, 2, 3), "gamma": (1.2, 1.5)},
+                     coupled=(("f", "p"),))
+    combos = list(spec.combos())
+    # 3 diagonal (f,p) points x 2 gammas, not 3*3*2.
+    assert len(combos) == spec.n_combos() == 6
+    assert {(c["f"], c["p"]) for c in combos} == {(1, 1), (2, 2), (3, 3)}
+    # Declaration order preserved for the directory-naming contract.
+    assert list(combos[0]) == ["f", "p", "gamma"]
+    assert SweepSpec(name="x", dims={"f": (1, 2)}, rates=(1,),
+                     ).est_points() == 2
+
+
+def test_coupled_dims_validation():
+    with pytest.raises(ValueError, match="equal-length"):
+        SweepSpec(name="x", dims={"f": (1, 2), "p": (1,)},
+                  coupled=(("f", "p"),))
+    with pytest.raises(ValueError, match="not a sweep dim"):
+        SweepSpec(name="x", dims={"f": (1,)}, coupled=(("f", "q"),))
+    with pytest.raises(ValueError, match="more than one coupled group"):
+        SweepSpec(name="x",
+                  dims={"f": (1,), "p": (1,), "c": (1,)},
+                  coupled=(("f", "p"), ("p", "c")))
+    with pytest.raises(ValueError, match="at least two"):
+        SweepSpec(name="x", dims={"f": (1,)}, coupled=(("f",),))
+
+
+def test_coupled_three_way_group():
+    spec = SweepSpec(name="x",
+                     dims={"f": (1, 4), "p": (1, 4), "client_count": (6, 21)},
+                     coupled=(("f", "p", "client_count"),))
+    assert [tuple(c.values()) for c in spec.combos()] == \
+        [(1, 1, 6), (4, 4, 21)]
