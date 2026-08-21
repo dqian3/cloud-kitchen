@@ -41,6 +41,21 @@ def test_toy_dead_rates_degrade(tmp_path):
     assert statuses == ["ok", "dead"]
 
 
+def test_display_metrics_exist_in_analyze_output(tmp_path):
+    # Every metric the project adapter advertises for UI columns must be a
+    # key the toy's analyze() actually emits, or the columns silently vanish.
+    from kitchen.run.kitchen_adapter import get_adapter
+
+    out = tmp_path / "run"
+    assert toy.main([
+        "--output-dir", str(out), "--hosts", "1",
+        "--duration-secs", "0.01", "--rates", "1000",
+    ]) == 0
+    summary = json.loads(next(out.glob("toy/**/summary.json")).read_text())
+    advertised = {m.name for m in get_adapter().display().metrics}
+    assert advertised <= set(summary)
+
+
 def test_toy_rate_search(tmp_path):
     out = tmp_path / "run"
     rc = toy.main([

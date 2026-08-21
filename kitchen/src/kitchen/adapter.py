@@ -25,6 +25,30 @@ class ExperimentInfo:
     default_flags: tuple[str, ...] = ()  # extra flags always passed
 
 
+@dataclass(frozen=True)
+class DimDisplay:
+    """How a sweep dimension should be presented (form hints, table columns)."""
+    name: str                            # the dim's sweep-param name
+    label: str = ""                      # column/axis header; name if empty
+    unit: str = ""
+    description: str = ""
+    example: str = ""                    # example value list, e.g. "16,1024"
+
+
+@dataclass(frozen=True)
+class MetricDisplay:
+    """How a per-point metric should be presented in results tables."""
+    name: str                            # key in the point's metrics dict
+    label: str = ""                      # column header; name if empty
+    unit: str = ""
+
+
+@dataclass(frozen=True)
+class DisplayInfo:
+    dims: tuple[DimDisplay, ...] = ()
+    metrics: tuple[MetricDisplay, ...] = ()
+
+
 @runtime_checkable
 class ProjectAdapter(Protocol):
     """Required surface. Adapters may additionally implement
@@ -36,6 +60,16 @@ class ProjectAdapter(Protocol):
     trials, duration_secs, extra_flags) and the adapter translates them to
     its driver's flags. Not part of the Protocol so isinstance checks keep
     passing for catalog-only adapters; the daemon probes with getattr.
+
+    A second optional hook,
+
+        def display(self) -> DisplayInfo
+
+    advertises how this project's dims and metrics should be shown: the
+    catalog endpoint passes it through so UIs can build parameter forms and
+    result columns per project instead of hardcoding names. Metric order is
+    the column order; unknown dims stay submittable (dims here are hints,
+    not a schema).
     """
     name: str
 

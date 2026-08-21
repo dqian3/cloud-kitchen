@@ -7,10 +7,15 @@ from kitchend.core import adapters
 
 
 ADAPTER_SRC = '''
-from kitchen.adapter import ExperimentInfo
+from kitchen.adapter import (DimDisplay, DisplayInfo, ExperimentInfo,
+                             MetricDisplay)
 
 class A:
     name = "toy"
+    def display(self):
+        return DisplayInfo(
+            dims=(DimDisplay(name="payload", unit="B", example="16,1024"),),
+            metrics=(MetricDisplay(name="tput", label="delivered/s"),))
     def experiments(self):
         return [
             ExperimentInfo(name="alpha", description="a", queue="main",
@@ -45,6 +50,25 @@ def test_catalog(project):
     assert [e["name"] for e in cat["experiments"]] == \
         ["alpha", "beta", "gamma", "preset"]
     assert cat["aggregates"] == {"pair": ["alpha", "beta"]}
+    # display() passes through; empty labels fall back to the name.
+    assert cat["display"]["dims"] == [
+        {"name": "payload", "label": "payload", "unit": "B",
+         "description": "", "example": "16,1024"}]
+    assert cat["display"]["metrics"] == [
+        {"name": "tput", "label": "delivered/s", "unit": ""}]
+
+
+def test_catalog_without_display_hook(tmp_path):
+    adapters.clear_cache()
+    ap = tmp_path / "kitchen_adapter.py"
+    ap.write_text(
+        "class A:\n"
+        "    name = 'bare'\n"
+        "    def experiments(self): return []\n"
+        "    def aggregates(self): return {}\n"
+        "def get_adapter(): return A()\n")
+    p = ProjectConfig(name="bare", repo_path=tmp_path, adapter_path=ap)
+    assert adapters.catalog(p)["display"] is None
 
 
 def test_resolve_aggregate_and_queue(project):

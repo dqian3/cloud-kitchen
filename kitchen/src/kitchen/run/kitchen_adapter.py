@@ -12,7 +12,8 @@ that knows its driver's flag names — turns them into an argv.
 
 import sys
 
-from kitchen.adapter import ExperimentInfo
+from kitchen.adapter import (DimDisplay, DisplayInfo, ExperimentInfo,
+                             MetricDisplay)
 
 _BASE_FLAGS = {
     "toy-static": ("--rates", "1000", "2000", "4000", "8000"),
@@ -35,6 +36,28 @@ class ToyProjectAdapter:
 
     def aggregates(self):
         return {}
+
+    def display(self):
+        """Dim/metric presentation for UIs (catalog passes it through).
+
+        Metric names match what ToyAdapter.analyze() emits; their order here
+        is the results-table column order. Toy dims only label points, so the
+        one advertised dim is just a form hint — any dim name still works.
+        """
+        return DisplayInfo(
+            dims=(
+                DimDisplay(name="payload_size", label="payload", unit="B",
+                           example="16,1024",
+                           description="labels points; the toy ignores values"),
+            ),
+            metrics=(
+                MetricDisplay(name="throughput_msgs_per_sec",
+                              label="delivered/s"),
+                MetricDisplay(name="offered_rate", label="offered/s"),
+                MetricDisplay(name="drop_pct", label="drop", unit="%"),
+                MetricDisplay(name="total_completed", label="completed"),
+            ),
+        )
 
     def oneoff(self, params: dict) -> list:
         """Generic sweep params -> `python -m kitchen.run.toy` argv.
