@@ -49,13 +49,20 @@ function ClusterCard({ c, onAction }) {
             ))}
           </ul>
         )}
-        {c.vms && (
-          <div className="vm-grid">
-            {Object.entries(c.vms).map(([vm, st]) => (
-              <span key={vm} className={`vm vm-${st === 'RUNNING' ? 'up' : 'down'}`}
-                    title={`${vm}: ${st}`}>{vm.split('-').pop()}</span>
-            ))}
-          </div>
+        {c.vms && Object.keys(c.vms).length > 0 && (
+          <ul className="vm-list">
+            {Object.entries(c.vms)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([vm, st]) => (
+                <li key={vm} className={
+                      st === 'RUNNING' ? 'vm-on'
+                        : st === 'TERMINATED' ? 'vm-off' : 'vm-mid'}>
+                  <span className="vm-dot" />
+                  {vm}
+                  <span className="vm-state">{st.toLowerCase()}</span>
+                </li>
+              ))}
+          </ul>
         )}
       </div>
       <div className="card-actions">

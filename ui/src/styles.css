@@ -33,9 +33,17 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
 .card-actions input[type=number] { width: 4.5rem; }
 .burn { color: var(--orange); font-weight: 600; }
 .leases { margin: 0.3rem 0; padding-left: 1.1rem; }
-.vm-grid { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 0.4rem; }
-.vm { font-size: 0.7rem; padding: 0 0.3rem; border-radius: 3px; color: #fff; }
-.vm-up { background: var(--green); } .vm-down { background: var(--gray); }
+.vm-list { margin: 0.4rem 0 0; padding: 0; list-style: none;
+  max-height: 14rem; overflow-y: auto;
+  font-family: ui-monospace, monospace; font-size: 0.76rem; }
+.vm-list li { display: flex; align-items: center; gap: 0.45rem;
+  padding: 0.06rem 0.2rem 0.06rem 0; }
+.vm-dot { width: 7px; height: 7px; border-radius: 50%;
+  background: var(--gray); flex: none; }
+.vm-on .vm-dot { background: var(--green); }
+.vm-mid .vm-dot { background: var(--orange); }
+.vm-off { color: var(--muted); }
+.vm-state { margin-left: auto; color: var(--muted); font-size: 0.7rem; }
 
 .submit-form { display: flex; flex-wrap: wrap; gap: 0.4rem;
   align-items: center; margin-bottom: 0.75rem; }
