@@ -162,6 +162,8 @@ async def cluster_up(project: str, name: str, body: ClusterUp, request: Request)
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
     return {"lease_id": lease_id, "ttl_minutes": body.ttl_minutes}
 
 

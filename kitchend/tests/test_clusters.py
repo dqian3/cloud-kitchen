@@ -163,3 +163,29 @@ def test_create_guards(manager):
         await mgr.down("stub/main")
 
     asyncio.run(main())
+
+
+def test_failed_start_stops_partial_and_releases_lease(manager):
+    mgr, mc, db = manager
+
+    def failing_start(vm_names):
+        mc.remote.vm_states["r0"] = "RUNNING"
+        raise RuntimeError("r1: zone out of capacity")
+
+    mc.remote.vm_start = failing_start
+
+    async def main():
+        with pytest.raises(RuntimeError, match="failed to start"):
+            await mgr.up("stub/main", ttl_minutes=60)
+        # The started VM was stopped again, the lease released, and the
+        # cluster is back to terminated — nothing is held at cost.
+        assert mc.remote.vm_states["r0"] == "TERMINATED"
+        assert mc.state.live_leases() == []
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["state"] == "terminated"
+        assert not snap["active"]
+        row = db.query_one(
+            "SELECT released_at FROM cluster_leases ORDER BY id DESC")
+        assert row["released_at"] is not None
+
+    asyncio.run(main())

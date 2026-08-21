@@ -89,6 +89,13 @@ class ClusterManager:
         self.hub = hub
         self.clusters: dict[str, ManagedCluster] = {}
         self._build_registry()
+        # A daemon killed mid-transition leaves 'starting'/'stopping' rows
+        # behind; this daemon isn't doing either, so say so. The VMs
+        # themselves are deliberately left alone — refresh shows reality,
+        # and a driver-managed run may legitimately own them.
+        self.db.execute(
+            "UPDATE clusters SET state = 'terminated' "
+            "WHERE state IN ('starting', 'stopping')")
 
     def _build_registry(self):
         for p in self.config.projects:
@@ -167,7 +174,24 @@ class ClusterManager:
             (mc.db_id, purpose, lease.info.id, f"+{ttl_minutes * 60} seconds"))
         if mc.task is None or mc.task.done():
             self._set_db_state(mc, "starting")
-            await asyncio.to_thread(start_vms, mc.remote, vms)
+            try:
+                # A cluster that cannot fully start cannot run its job;
+                # stop_on_partial stops the started subset rather than
+                # holding it at cost. Pre-existing running VMs are untouched.
+                await asyncio.to_thread(start_vms, mc.remote, vms,
+                                        stop_on_partial=True)
+            except Exception as e:
+                self.hub.emit("cluster.error", cluster_id=mc.db_id,
+                              cluster=mc.key, error=repr(e))
+                lease.release()
+                mc.lease_handles.pop(lease.info.id, None)
+                self.db.execute(
+                    "UPDATE cluster_leases SET released_at = datetime('now') "
+                    "WHERE holder_id = ?", (lease.info.id,))
+                self._set_db_state(mc, "terminated")
+                raise RuntimeError(
+                    f"cluster {key} failed to start (the VMs that did come "
+                    f"up were stopped again): {e}") from e
             mc.keepalive = KeepAlive(mc.remote, vms, state=mc.state,
                                      stop_on_exit=False)
             mc.keepalive.acquire_lock()

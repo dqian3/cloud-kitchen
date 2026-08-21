@@ -25,7 +25,13 @@ def main(argv=None):
         import uvicorn
 
         from kitchend.api.app import create_app
-        uvicorn.run(create_app(config), host=config.bind_host, port=config.bind_port)
+        # Open SSE streams and MCP sessions never close on their own, and
+        # uvicorn's default graceful shutdown waits for them indefinitely —
+        # a `systemctl restart` then hangs 90s until systemd SIGKILLs the
+        # daemon (and every proxied browser stream sees a non-200 meanwhile).
+        # Five seconds is grace enough for real in-flight requests.
+        uvicorn.run(create_app(config), host=config.bind_host,
+                    port=config.bind_port, timeout_graceful_shutdown=5)
     elif args.cmd == "status":
         url = f"http://{config.bind_host}:{config.bind_port}/api/health"
         try:

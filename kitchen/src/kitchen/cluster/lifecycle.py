@@ -45,26 +45,43 @@ def wait_drained(remote, vms, timeout_s=600, poll_s=10):
 
 
 def start_vms(remote, vms, deadman_minutes=60, drain_first=True,
-              drain_timeout_s=600):
-    """Start VMs and arm the dead-man switch.
+              drain_timeout_s=600, stop_on_partial=False):
+    """Start VMs and arm the dead-man switch. Returns the VMs it started.
 
     With drain_first (default), a start that races a concurrent stop waits for
     the VMs to reach TERMINATED instead of failing on gcloud's fingerprint
     error. Statuses are fetched anyway for the drain check, so already-RUNNING
     VMs are skipped rather than re-started.
+
+    On a partial start (a zone stockout fails one VM after its siblings came
+    up), the started subset must not keep running unattended at cost: it is
+    stopped again when stop_on_partial, and armed with the dead-man switch
+    otherwise, before the error propagates. VMs that were already RUNNING
+    before this call are never touched — they may belong to a driver-managed
+    run.
     """
     if not vms:
-        return
+        return []
     if drain_first:
         statuses = wait_drained(remote, vms, timeout_s=drain_timeout_s)
     else:
         statuses = remote.vm_status(vms)
     to_start = [v for v in vms if statuses.get(v) != "RUNNING"]
-    if to_start:
-        remote.vm_start(to_start)
+    try:
+        if to_start:
+            remote.vm_start(to_start)
+    except Exception:
+        post = remote.vm_status(vms)
+        started = [v for v in to_start if post.get(v) == "RUNNING"]
+        if started and stop_on_partial:
+            remote.vm_stop(started)
+        elif started:
+            arm_shutdown(remote, started, minutes=deadman_minutes)
+        raise
     # Fresh boots have no pending timer, but re-arming unconditionally is
     # harmless and covers the VMs that were already running.
     arm_shutdown(remote, vms, minutes=deadman_minutes)
+    return to_start
 
 
 def stop_vms(remote, vms, state=None, force=False):

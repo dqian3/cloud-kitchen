@@ -72,3 +72,36 @@ def test_stop_proceeds_after_release(tmp_path):
     lease.release()
     stop_vms(r, ["a"], state=state)
     assert r.vm_states["a"] == "TERMINATED"
+
+
+def _partial_failing_remote():
+    """vm_start brings up 'a' then fails ('b' stays down, e.g. a stockout)."""
+    r = MockRemote()
+    r.vm_states = {"a": "TERMINATED", "b": "TERMINATED", "c": "RUNNING"}
+
+    def failing_start(vm_names):
+        r.vm_states["a"] = "RUNNING"
+        raise RuntimeError("b: zone out of capacity")
+
+    r.vm_start = failing_start
+    return r
+
+
+def test_partial_start_stops_started_vms_when_asked():
+    r = _partial_failing_remote()
+    with pytest.raises(RuntimeError, match="capacity"):
+        start_vms(r, ["a", "b", "c"], stop_on_partial=True)
+    # The VM this call started was stopped again; the one that was already
+    # running ('c') was left alone.
+    assert r.vm_states["a"] == "TERMINATED"
+    assert r.vm_states["c"] == "RUNNING"
+
+
+def test_partial_start_arms_deadman_by_default():
+    r = _partial_failing_remote()
+    with pytest.raises(RuntimeError, match="capacity"):
+        start_vms(r, ["a", "b", "c"], deadman_minutes=60)
+    # Not stopped, but not left unattended either: the dead-man switch is
+    # armed on the started subset so it self-stops.
+    assert r.vm_states["a"] == "RUNNING"
+    assert len(r.ssh_calls(r"shutdown -h \+60")) == 1

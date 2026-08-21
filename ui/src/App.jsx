@@ -771,12 +771,32 @@ export default function App() {
     api.health().then(setHealth).catch(() => {})
     api.projects().then(setProjects).catch(() => {})
     reload()
-    const es = new EventSource('/api/stream')
-    es.onopen = () => setConnected(true)
-    es.onerror = () => setConnected(false)
-    es.onmessage = () => reload()   // any state change → refetch (cheap at this scale)
+    let es = null
+    let retry = null
+    let stopped = false
+    const connect = () => {
+      if (stopped) return
+      es = new EventSource('/api/stream')
+      es.onopen = () => { setConnected(true); reload() }
+      es.onmessage = () => reload() // any state change → refetch (cheap at this scale)
+      es.onerror = () => {
+        setConnected(false)
+        // A non-200 (the proxy's 502 while the daemon restarts) closes an
+        // EventSource PERMANENTLY — the built-in retry only covers drops of
+        // an established stream — so recreate it ourselves.
+        if (es.readyState === EventSource.CLOSED) {
+          retry = setTimeout(connect, 5000)
+        }
+      }
+    }
+    connect()
     const poll = setInterval(reload, 30000)
-    return () => { es.close(); clearInterval(poll) }
+    return () => {
+      stopped = true
+      if (es) es.close()
+      clearTimeout(retry)
+      clearInterval(poll)
+    }
   }, [reload])
 
   async function clusterAction(kind, c, lease, ttl) {
