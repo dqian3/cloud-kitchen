@@ -81,7 +81,7 @@ def catalog(project_cfg) -> dict:
         "error": None,
         "experiments": [
             {"name": e.name, "description": e.description, "queue": e.queue,
-             "replicas": e.replicas}
+             "replicas": e.replicas, "native": bool(e.command)}
             for e in exps
         ],
         "aggregates": handle.adapter.aggregates(),
@@ -89,17 +89,23 @@ def catalog(project_cfg) -> dict:
     }
 
 
-def resolve_submission(project_cfg, names: list[str]):
-    """Expand aggregates, validate names, derive the queue and driver args.
+def resolve_jobs(project_cfg, names: list[str]) -> list[dict]:
+    """Expand aggregates, validate names, and plan the jobs a submission is.
 
-    Returns (expanded_names, queue, driver_args). Unknown names raise
-    ValueError with the valid options; mixing experiments from different
-    queues raises too, since one job is one driver invocation on one cluster.
+    Returns a list of job plans, each {"experiments": [...], "queue": str|None}
+    plus either "driver_args" (classic experiments, run in one driver
+    invocation) or "command" (a native experiment's full argv — one job per
+    experiment, so its retries, lease, and progress are its own). Unknown
+    names raise ValueError with the valid options; classic experiments from
+    different queues raise too, since their shared driver invocation runs on
+    one cluster. Native experiments each carry their own queue, so an
+    aggregate spanning clusters fans out fine as long as its classic members
+    agree.
     """
     handle = load_adapter(project_cfg)
     if not handle.ok:
         # No adapter: pass through unvalidated (raw driver args mode).
-        return names, None, list(names)
+        return [{"experiments": names, "queue": None, "driver_args": list(names)}]
     by_name: dict[str, ExperimentInfo] = {e.name: e for e in handle.adapter.experiments()}
     aggregates = handle.adapter.aggregates()
 
@@ -115,24 +121,35 @@ def resolve_submission(project_cfg, names: list[str]):
                 f"unknown experiment '{n}' for project {project_cfg.name}; "
                 f"known: {sorted(by_name)} + aggregates {sorted(aggregates)}")
 
-    queues = {by_name[n].queue for n in expanded if by_name[n].queue}
-    if len(queues) > 1:
-        raise ValueError(
-            f"experiments span multiple clusters ({sorted(queues)}); "
-            "submit one job per cluster")
-
-    # Driver args: concatenation of each experiment's args. Experiments that
-    # carry a full argument preset (rather than just their own name) can't be
-    # combined in one driver invocation.
-    presets = [n for n in expanded if tuple(by_name[n].args) != (n,)]
-    if presets and len(expanded) > 1:
-        raise ValueError(
-            f"{presets[0]} is a preset with its own arguments; "
-            "submit it as its own job")
-    driver_args = [a for n in expanded for a in by_name[n].args]
+    plans: list[dict] = []
+    classic = [n for n in expanded if not by_name[n].command]
     for n in expanded:
-        driver_args += list(by_name[n].default_flags)
-    return expanded, (queues.pop() if queues else None), driver_args
+        if by_name[n].command:
+            plans.append({"experiments": [n],
+                          "queue": by_name[n].queue or None,
+                          "command": [str(a) for a in by_name[n].command]})
+
+    if classic:
+        queues = {by_name[n].queue for n in classic if by_name[n].queue}
+        if len(queues) > 1:
+            raise ValueError(
+                f"experiments span multiple clusters ({sorted(queues)}); "
+                "submit one job per cluster")
+        # Driver args: concatenation of each experiment's args. Experiments
+        # that carry a full argument preset (rather than just their own name)
+        # can't be combined in one driver invocation.
+        presets = [n for n in classic if tuple(by_name[n].args) != (n,)]
+        if presets and len(classic) > 1:
+            raise ValueError(
+                f"{presets[0]} is a preset with its own arguments; "
+                "submit it as its own job")
+        driver_args = [a for n in classic for a in by_name[n].args]
+        for n in classic:
+            driver_args += list(by_name[n].default_flags)
+        plans.append({"experiments": classic,
+                      "queue": (queues.pop() if queues else None),
+                      "driver_args": driver_args})
+    return plans
 
 
 def oneoff_command(project_cfg, params: dict):

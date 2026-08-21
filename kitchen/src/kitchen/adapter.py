@@ -23,6 +23,14 @@ class ExperimentInfo:
     args: tuple[str, ...] = ()           # driver args that run this experiment
     replicas: int | None = None          # VM-count hint, if static
     default_flags: tuple[str, ...] = ()  # extra flags always passed
+    # A native experiment: a full argv (no driver prefix) that runs this
+    # experiment on the SweepEngine. It assumes its cluster is already up —
+    # the daemon leases the queue's cluster around the job when the queue
+    # names one it manages. Command experiments are one job each; submitting
+    # several (or an aggregate containing them) fans out into sibling jobs
+    # that the per-queue FIFO serializes and same-cluster leases hand over
+    # between. Empty () = a classic driver-run experiment.
+    command: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

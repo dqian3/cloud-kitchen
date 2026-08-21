@@ -26,9 +26,11 @@ class A:
                            args=("gamma",)),
             ExperimentInfo(name="preset", description="p", queue="main",
                            args=("--config", "x.yaml", "--n", "3")),
+            ExperimentInfo(name="nat", description="native", queue="main",
+                           command=("python3", "native.py", "--name", "nat")),
         ]
     def aggregates(self):
-        return {"pair": ["alpha", "beta"]}
+        return {"pair": ["alpha", "beta"], "mixed": ["alpha", "nat", "beta"]}
 
 def get_adapter():
     return A()
@@ -48,8 +50,9 @@ def test_catalog(project):
     cat = adapters.catalog(project)
     assert cat["error"] is None
     assert [e["name"] for e in cat["experiments"]] == \
-        ["alpha", "beta", "gamma", "preset"]
-    assert cat["aggregates"] == {"pair": ["alpha", "beta"]}
+        ["alpha", "beta", "gamma", "preset", "nat"]
+    assert cat["aggregates"] == {"pair": ["alpha", "beta"],
+                                 "mixed": ["alpha", "nat", "beta"]}
     # display() passes through; empty labels fall back to the name.
     assert cat["display"]["dims"] == [
         {"name": "payload", "label": "payload", "unit": "B",
@@ -72,33 +75,51 @@ def test_catalog_without_display_hook(tmp_path):
 
 
 def test_resolve_aggregate_and_queue(project):
-    names, queue, args = adapters.resolve_submission(project, ["pair"])
-    assert names == ["alpha", "beta"]
-    assert queue == "main"
-    assert args == ["alpha", "beta"]
+    (plan,) = adapters.resolve_jobs(project, ["pair"])
+    assert plan["experiments"] == ["alpha", "beta"]
+    assert plan["queue"] == "main"
+    assert plan["driver_args"] == ["alpha", "beta"]
 
 
 def test_resolve_rejects_unknown(project):
     with pytest.raises(ValueError, match="unknown experiment 'nope'"):
-        adapters.resolve_submission(project, ["nope"])
+        adapters.resolve_jobs(project, ["nope"])
 
 
 def test_resolve_rejects_cross_cluster(project):
     with pytest.raises(ValueError, match="multiple clusters"):
-        adapters.resolve_submission(project, ["alpha", "gamma"])
+        adapters.resolve_jobs(project, ["alpha", "gamma"])
 
 
 def test_preset_must_be_alone(project):
-    names, queue, args = adapters.resolve_submission(project, ["preset"])
-    assert args == ["--config", "x.yaml", "--n", "3"]
+    (plan,) = adapters.resolve_jobs(project, ["preset"])
+    assert plan["driver_args"] == ["--config", "x.yaml", "--n", "3"]
     with pytest.raises(ValueError, match="own arguments"):
-        adapters.resolve_submission(project, ["alpha", "preset"])
+        adapters.resolve_jobs(project, ["alpha", "preset"])
+
+
+def test_native_experiment_is_its_own_job(project):
+    (plan,) = adapters.resolve_jobs(project, ["nat"])
+    assert plan["command"] == ["python3", "native.py", "--name", "nat"]
+    assert plan["queue"] == "main"
+    assert "driver_args" not in plan
+
+
+def test_mixed_aggregate_fans_out(project):
+    # A native experiment inside an aggregate becomes its own job; the
+    # classic members still share one driver invocation.
+    plans = adapters.resolve_jobs(project, ["mixed"])
+    by_exps = {tuple(p["experiments"]): p for p in plans}
+    assert set(by_exps) == {("nat",), ("alpha", "beta")}
+    assert by_exps[("nat",)]["command"]
+    assert by_exps[("alpha", "beta")]["driver_args"] == ["alpha", "beta"]
 
 
 def test_missing_adapter_passthrough(tmp_path):
     p = ProjectConfig(name="raw", repo_path=tmp_path)
-    names, queue, args = adapters.resolve_submission(p, ["anything"])
-    assert (names, queue, args) == (["anything"], None, ["anything"])
+    (plan,) = adapters.resolve_jobs(p, ["anything"])
+    assert plan == {"experiments": ["anything"], "queue": None,
+                    "driver_args": ["anything"]}
 
 
 def test_broken_adapter_reports_error(tmp_path):

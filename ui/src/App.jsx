@@ -323,11 +323,13 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
                   return (
                     <label key={e.name}
                            className={`exp ${disabled ? 'exp-disabled' : ''}`}
-                           title={e.description}>
+                           title={e.native
+                             ? `${e.description}\n\nnative: runs on the SweepEngine as its own job; the daemon leases ${e.queue} around it`
+                             : e.description}>
                       <input type="checkbox" disabled={disabled}
                              checked={selected.includes(e.name)}
                              onChange={() => toggle(e.name)} />
-                      {e.name}
+                      {e.name}{e.native && <span className="native-mark">⚡</span>}
                     </label>
                   )
                 })}

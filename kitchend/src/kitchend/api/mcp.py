@@ -142,14 +142,20 @@ def build_mcp(state) -> MCPServer:
             spec["cluster_ttl_minutes"] = cluster_ttl_minutes
         if after is not None:
             spec["after"] = after
-        submission.prepare_spec(project_cfg, spec)
-        estimate = _job_cost_estimate(state, project_cfg, spec, est_hours)
-        require_confirmed_cost(estimate, confirm_cost_usd,
-                               f"job on queue '{spec.get('queue')}'")
-        job_id = submission.enqueue(state.db, state.hub, state.scheduler,
-                                    project_cfg, spec)
-        return {"job_id": job_id, "queue": spec.get("queue"),
-                "estimate_usd": estimate}
+        specs = submission.prepare_specs(project_cfg, spec)
+        # One submission = one confirmation: the gate covers the sum over
+        # every job it fans out into (native aggregates are N sibling jobs).
+        estimates = [_job_cost_estimate(state, project_cfg, s, est_hours)
+                     for s in specs]
+        total = (sum(e for e in estimates if e is not None)
+                 if any(e is not None for e in estimates) else None)
+        require_confirmed_cost(total, confirm_cost_usd,
+                               f"{len(specs)} job(s) on queue(s) "
+                               f"{sorted({str(s.get('queue')) for s in specs})}")
+        ids = submission.enqueue_all(state.db, state.hub, state.scheduler,
+                                     project_cfg, specs)
+        return {"job_id": ids[0], "job_ids": ids,
+                "queue": specs[0].get("queue"), "estimate_usd": total}
 
     @mcp.tool()
     def get_job(job_id: int) -> dict:

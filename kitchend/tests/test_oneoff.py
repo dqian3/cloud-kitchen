@@ -71,22 +71,94 @@ def test_prepare_spec_cluster_handling(toy_project, tmp_path):
 
     # A sweep naming a configured cluster inherits the managed lease and
     # the cluster's queue.
-    spec = {"project": "toy", "sweep": {"rates": [1000], "cluster": "local"}}
-    submission.prepare_spec(proj, spec)
+    (spec,) = submission.prepare_specs(
+        proj, {"project": "toy", "sweep": {"rates": [1000], "cluster": "local"}})
     assert spec["cluster"] == "local"
     assert spec["queue"] == "toy/local"
 
     # A cluster name the daemon doesn't manage only routes the queue.
-    spec2 = {"project": "toy", "sweep": {"rates": [1000], "cluster": "alias"}}
-    submission.prepare_spec(proj, spec2)
+    (spec2,) = submission.prepare_specs(
+        proj, {"project": "toy", "sweep": {"rates": [1000], "cluster": "alias"}})
     assert "cluster" not in spec2
     assert spec2["queue"] == "toy/alias"
 
     # An explicit unknown cluster is a submit-time error.
     with pytest.raises(ValueError, match="no cluster 'nope'"):
-        submission.prepare_spec(proj, {"project": "toy",
-                                       "experiments": ["x"],
-                                       "cluster": "nope"})
+        submission.prepare_specs(proj, {"project": "toy",
+                                        "experiments": ["toy-static"],
+                                        "cluster": "nope"})
+
+
+NATIVE_ADAPTER_SRC = '''
+from kitchen.adapter import ExperimentInfo
+
+class A:
+    name = "nat"
+    def experiments(self):
+        return [
+            ExperimentInfo(name="one", queue="main",
+                           command=("python3", "native.py", "--name", "one")),
+            ExperimentInfo(name="two", queue="main",
+                           command=("python3", "native.py", "--name", "two")),
+            ExperimentInfo(name="legacy", queue="main", args=("legacy",)),
+        ]
+    def aggregates(self):
+        return {"all": ["one", "two", "legacy"]}
+
+def get_adapter():
+    return A()
+'''
+
+
+def test_native_catalog_submission_fans_out_and_leases(tmp_path):
+    from kitchend.config import ClusterConfig, ProjectConfig
+    from kitchend.core import adapters as _adapters, submission
+
+    _adapters.clear_cache()
+    ap = tmp_path / "kitchen_adapter.py"
+    ap.write_text(NATIVE_ADAPTER_SRC)
+    # The submit-time check requires the scripts to exist in the driver cwd.
+    (tmp_path / "native.py").touch()
+    (tmp_path / "run_experiment.py").touch()
+    proj = ProjectConfig(name="nat", repo_path=tmp_path, adapter_path=ap,
+                         driver=("python3", "run_experiment.py"),
+                         clusters=(ClusterConfig(name="main", config="m.yaml"),))
+
+    specs = submission.prepare_specs(
+        proj, {"project": "nat", "experiments": ["all"], "after": 7})
+    by_exps = {tuple(s["experiments"]): s for s in specs}
+    assert set(by_exps) == {("one",), ("two",), ("legacy",)}
+    # Native experiments: their own command, the cluster queue, and the
+    # managed lease (they assume VMs are up). All inherit the chain gate.
+    for name in ("one", "two"):
+        s = by_exps[(name,)]
+        assert s["command"][-2:] == ["--name", name]
+        assert s["queue"] == "nat/main"
+        assert s["cluster"] == "main"
+        assert s["after"] == 7
+    # The classic experiment keeps the driver and manages its own VMs.
+    legacy = by_exps[("legacy",)]
+    assert "command" not in legacy and "cluster" not in legacy
+    assert legacy["driver_args"] == ["legacy"]
+    assert legacy["queue"] == "nat/main"
+
+
+def test_missing_native_script_rejected_at_submit(tmp_path):
+    # A native command whose script isn't in the driver checkout must fail at
+    # submit — not bring a leased cluster up just to die on "can't open file".
+    from kitchend.config import ClusterConfig, ProjectConfig
+    from kitchend.core import adapters as _adapters, submission
+
+    _adapters.clear_cache()
+    ap = tmp_path / "kitchen_adapter.py"
+    ap.write_text(NATIVE_ADAPTER_SRC)
+    (tmp_path / "run_experiment.py").touch()   # but no native.py
+    proj = ProjectConfig(name="nat", repo_path=tmp_path, adapter_path=ap,
+                         driver=("python3", "run_experiment.py"),
+                         clusters=(ClusterConfig(name="main", config="m.yaml"),))
+    with pytest.raises(ValueError, match="native.py not found"):
+        submission.prepare_specs(proj, {"project": "nat",
+                                        "experiments": ["one"]})
 
 
 def test_oneoff_requires_hook(tmp_path):

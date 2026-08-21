@@ -50,12 +50,12 @@ def submit_job(body: JobSubmit, request: Request):
         raise HTTPException(404, str(e))
     spec = body.model_dump(exclude_none=True)
     try:
-        submission.prepare_spec(project_cfg, spec)
+        specs = submission.prepare_specs(project_cfg, spec)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    job_id = submission.enqueue(app.state.db, app.state.hub,
-                                app.state.scheduler, project_cfg, spec)
-    return {"id": job_id}
+    ids = submission.enqueue_all(app.state.db, app.state.hub,
+                                 app.state.scheduler, project_cfg, specs)
+    return {"id": ids[0], "ids": ids}
 
 
 @router.get("/jobs")

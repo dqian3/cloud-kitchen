@@ -21,6 +21,7 @@ bounded resume-retries.
 """
 
 import json
+from pathlib import Path
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -170,6 +171,16 @@ def build_command(project_cfg, spec: dict):
     if spec.get("resume"):
         argv.append(project_cfg.resume_flag)
     cwd = project_cfg.repo_path / project_cfg.driver_cwd
+    # Fail at submit, not at dispatch: a job whose script isn't in the driver
+    # checkout would otherwise bring a leased cluster up just to die on
+    # "can't open file" (e.g. a native executor merged into the adapter's
+    # worktree but not yet into the checkout jobs run in).
+    script = next((a for a in argv[:3]
+                   if a.endswith(".py") and not Path(a).is_absolute()), None)
+    if script and cwd.is_dir() and not (cwd / script).exists():
+        raise ValueError(
+            f"{script} not found in {cwd} — is the change that adds it "
+            "merged into the checkout jobs run in?")
     return argv, cwd
 
 
