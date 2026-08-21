@@ -122,3 +122,44 @@ def test_vms_from_yaml_corfu_prefix_shape(tmp_path):
         "client": {"vm_prefix": "cl-", "count": 3},
     }))
     assert vms_from_yaml(p) == ["r0", "r1", "r2", "seq0", "cl-0", "cl-1", "cl-2"]
+
+
+def test_create_runs_setup_script_and_captures_output(tmp_path, manager):
+    mgr, mc, db = manager
+    mc.create_cmd = ("bash", "-c", "echo creating r0; echo creating r1")
+    mc.create_cwd = tmp_path
+
+    async def main():
+        await mgr.create("stub/main")
+        await mc.create_task
+        assert mc.create_rc == 0
+        assert mc.create_log == ["creating r0", "creating r1"]
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["create"] == {"running": False, "rc": 0,
+                                  "log_tail": ["creating r0", "creating r1"]}
+        # start/finish landed in the events audit trail
+        types = [r["type"] for r in db.query(
+            "SELECT type FROM events ORDER BY id")]
+        assert "cluster.create.started" in types
+        assert "cluster.create.finished" in types
+
+    asyncio.run(main())
+
+
+def test_create_guards(manager):
+    mgr, mc, db = manager
+
+    async def main():
+        # No create_cmd configured -> refused.
+        with pytest.raises(ValueError, match="no create_cmd"):
+            await mgr.create("stub/main")
+        # Refused while the cluster is up under daemon management.
+        mc.create_cmd = ("true",)
+        await mgr.up("stub/main", ttl_minutes=60)
+        with pytest.raises(RuntimeError, match="up under daemon management"):
+            await mgr.create("stub/main")
+        for lease_id in list(mc.lease_handles):
+            mgr.release("stub/main", lease_id)
+        await mgr.down("stub/main")
+
+    asyncio.run(main())

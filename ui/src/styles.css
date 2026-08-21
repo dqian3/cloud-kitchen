@@ -63,6 +63,9 @@ button.agg { background: none; border: 1px solid var(--blue);
   font-family: ui-monospace, monospace; font-size: 0.85rem; cursor: pointer; }
 .exp-disabled { opacity: 0.35; cursor: not-allowed; }
 .native-mark { color: var(--orange); font-size: 0.75rem; margin-left: 0.15rem; }
+.exp-variant { opacity: 0.75; font-size: 0.8rem; }
+button.variant-toggle { padding: 0 0.35rem; font-size: 0.72rem;
+  border-color: var(--muted); color: var(--muted); }
 
 table { width: 100%; border-collapse: collapse; }
 th { text-align: left; color: var(--muted); font-weight: 500;

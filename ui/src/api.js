@@ -44,6 +44,8 @@ export const api = {
   clusterDown: (key, force = false) =>
     req(`/api/clusters/${key}/down`, { method: 'POST', body: JSON.stringify({ force }) }),
   clusterRefresh: (key) => req(`/api/clusters/${key}/refresh`, { method: 'POST', body: '{}' }),
+  clusterCreate: (key) => req(`/api/clusters/${key}/create`, { method: 'POST', body: '{}' }),
+  daemonLog: (limit = 200) => req(`/api/logs?limit=${limit}`),
   clusterExtend: (key, leaseId, ttl) =>
     req(`/api/clusters/${key}/extend`, {
       method: 'POST',

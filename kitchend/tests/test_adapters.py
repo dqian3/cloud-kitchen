@@ -28,6 +28,8 @@ class A:
                            args=("--config", "x.yaml", "--n", "3")),
             ExperimentInfo(name="nat", description="native", queue="main",
                            command=("python3", "native.py", "--name", "nat")),
+            ExperimentInfo(name="alpha_n4", description="variant", queue="main",
+                           args=("alpha_n4",), group="alpha"),
         ]
     def aggregates(self):
         return {"pair": ["alpha", "beta"], "mixed": ["alpha", "nat", "beta"]}
@@ -50,7 +52,11 @@ def test_catalog(project):
     cat = adapters.catalog(project)
     assert cat["error"] is None
     assert [e["name"] for e in cat["experiments"]] == \
-        ["alpha", "beta", "gamma", "preset", "nat"]
+        ["alpha", "beta", "gamma", "preset", "nat", "alpha_n4"]
+    by_name = {e["name"]: e for e in cat["experiments"]}
+    # Display grouping passes through; ungrouped experiments carry "".
+    assert by_name["alpha_n4"]["group"] == "alpha"
+    assert by_name["alpha"]["group"] == ""
     assert cat["aggregates"] == {"pair": ["alpha", "beta"],
                                  "mixed": ["alpha", "nat", "beta"]}
     # display() passes through; empty labels fall back to the name.

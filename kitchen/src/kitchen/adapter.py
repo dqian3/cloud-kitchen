@@ -31,6 +31,12 @@ class ExperimentInfo:
     # that the per-queue FIFO serializes and same-cluster leases hand over
     # between. Empty () = a classic driver-run experiment.
     command: tuple[str, ...] = ()
+    # Display grouping: a variant (pbft_n4, aspen_no_crypto, ...) names its
+    # base experiment here so catalogs can fold it behind that base instead
+    # of crowding the top-level list. Purely presentational — grouped
+    # experiments stay individually submittable, and submission aggregates
+    # (`aggregates()`) are a separate, orthogonal construct.
+    group: str = ""
 
 
 @dataclass(frozen=True)

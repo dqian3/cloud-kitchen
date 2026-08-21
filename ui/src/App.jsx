@@ -67,8 +67,22 @@ function ClusterCard({ c, onAction }) {
           <button onClick={() => onAction('down', c)}>down</button>
         )}
         <button onClick={() => onAction('refresh', c)}>refresh VMs</button>
+        {c.create && c.state !== 'running' && !busy && !c.create.running && (
+          <button title="provision the VMs via the repo's setup script — creates instances (money); restartable, existing VMs are skipped"
+                  onClick={() => onAction('create', c)}>create VMs</button>
+        )}
+        {c.create?.running && <span className="muted">creating VMs…</span>}
         {busy && <span className="muted">waiting for gcloud…</span>}
       </div>
+      {c.create && (c.create.running || c.create.log_tail?.length > 0) && (
+        <details className="raw" open={c.create.running}>
+          <summary>
+            create log{c.create.rc != null && !c.create.running &&
+              ` (exited ${c.create.rc})`}
+          </summary>
+          <pre>{(c.create.log_tail || []).join('\n') || '(no output yet)'}</pre>
+        </details>
+      )}
     </div>
   )
 }
@@ -93,6 +107,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
   const [trials, setTrials] = useState('')
   const [duration, setDuration] = useState('')
   const [sweeps, setSweeps] = useState([])       // saved presets
+  const [expanded, setExpanded] = useState([])   // bases with variants shown
 
   const loadSweeps = useCallback(() => {
     if (project) api.sweeps(project).then(setSweeps).catch(() => setSweeps([]))
@@ -132,7 +147,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
   }
 
   useEffect(() => {
-    setSelected([]); setManagedCluster(''); setAfter('')
+    setSelected([]); setManagedCluster(''); setAfter(''); setExpanded([])
   }, [project])
 
   const hasCatalog = catalog && !catalog.error && catalog.experiments.length > 0
@@ -313,29 +328,58 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
               </button>
             </div>
           )}
-          {Object.entries(byQueue).map(([queue, exps]) => (
-            <div key={queue} className="queue-group">
-              <div className="queue-name">{queue}</div>
-              <div className="exp-grid">
-                {exps.map(e => {
-                  const disabled = selectedQueues.size > 0 && e.queue &&
-                    !selectedQueues.has(e.queue)
-                  return (
-                    <label key={e.name}
-                           className={`exp ${disabled ? 'exp-disabled' : ''}`}
-                           title={e.native
-                             ? `${e.description}\n\nnative: runs on the SweepEngine as its own job; the daemon leases ${e.queue} around it`
-                             : e.description}>
-                      <input type="checkbox" disabled={disabled}
-                             checked={selected.includes(e.name)}
-                             onChange={() => toggle(e.name)} />
-                      {e.name}{e.native && <span className="native-mark">⚡</span>}
-                    </label>
-                  )
-                })}
+          {Object.entries(byQueue).map(([queue, exps]) => {
+            // Variants (group = base experiment) fold behind their base so
+            // the *_n4 / *_no_crypto family doesn't crowd the top level.
+            const variantsOf = {}
+            for (const e of exps) if (e.group) (variantsOf[e.group] ||= []).push(e)
+            const bases = exps.filter(e =>
+              !e.group || !exps.some(b => b.name === e.group))
+            const renderExp = (e) => {
+              const disabled = selectedQueues.size > 0 && e.queue &&
+                !selectedQueues.has(e.queue)
+              return (
+                <label key={e.name}
+                       className={`exp ${disabled ? 'exp-disabled' : ''} ${e.group ? 'exp-variant' : ''}`}
+                       title={e.native
+                         ? `${e.description}\n\nnative: runs on the SweepEngine as its own job; the daemon leases ${e.queue} around it`
+                         : e.description}>
+                  <input type="checkbox" disabled={disabled}
+                         checked={selected.includes(e.name)}
+                         onChange={() => toggle(e.name)} />
+                  {e.name}{e.native && <span className="native-mark">⚡</span>}
+                </label>
+              )
+            }
+            return (
+              <div key={queue} className="queue-group">
+                <div className="queue-name">{queue}</div>
+                <div className="exp-grid">
+                  {bases.map(e => {
+                    const variants = variantsOf[e.name] || []
+                    const open = expanded.includes(e.name) ||
+                      variants.some(v => selected.includes(v.name))
+                    return (
+                      <React.Fragment key={e.name}>
+                        {renderExp(e)}
+                        {variants.length > 0 && (
+                          <button type="button" className="agg variant-toggle"
+                                  title={variants.map(v => v.name).join(', ')}
+                                  onClick={() => setExpanded(x =>
+                                    x.includes(e.name)
+                                      ? x.filter(n => n !== e.name)
+                                      : [...x, e.name])}>
+                            {open ? '−' : '+'}{variants.length}
+                          </button>
+                        )}
+                        {open && variants.map(renderExp)}
+                      </React.Fragment>
+                    )
+                  })}
+                </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </form>
@@ -639,6 +683,49 @@ function RunsSection({ projects, runs, display, onChanged }) {
   )
 }
 
+// ---------- daemon log ----------
+
+// The events table is the daemon's audit trail (every job/cluster/lease
+// state change goes through the hub); this is its readable tail.
+function DaemonLog() {
+  const [open, setOpen] = useState(false)
+  const [lines, setLines] = useState([])
+
+  const load = useCallback(() => {
+    api.daemonLog(200).then(setLines).catch(() => {})
+  }, [])
+  useEffect(() => {
+    if (!open) return
+    load()
+    const t = setInterval(load, 5000)
+    return () => clearInterval(t)
+  }, [open, load])
+
+  const skip = new Set(['id', 'ts', 'type', 'job_id', 'cluster_id', 'cluster'])
+  return (
+    <section>
+      <h2>Daemon log
+        <button className="link" onClick={() => setOpen(!open)}>
+          {open ? 'hide' : 'show'}</button>
+      </h2>
+      {open && (
+        <pre className="log">
+          {lines.map(e => {
+            const extra = Object.entries(e)
+              .filter(([k]) => !skip.has(k))
+              .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
+              .join(' ')
+            return `${(e.ts || '').slice(5, 19)}  ${e.type}`
+              + (e.job_id != null ? `  job#${e.job_id}` : '')
+              + (e.cluster ? `  ${e.cluster}` : '')
+              + (extra ? `  ${extra}` : '')
+          }).join('\n') || '(no events yet)'}
+        </pre>
+      )}
+    </section>
+  )
+}
+
 // ---------- app ----------
 
 export default function App() {
@@ -700,7 +787,11 @@ export default function App() {
             !confirm(`${c.key} has live leases — force down?`)) return
         await api.clusterDown(c.key, c.leases.length > 0)
       } else if (kind === 'refresh') await api.clusterRefresh(c.key)
-      else if (kind === 'extend') {
+      else if (kind === 'create') {
+        if (!confirm(`Provision ${c.key}'s VMs? This CREATES instances ` +
+                     '(billed). Existing VMs are skipped.')) return
+        await api.clusterCreate(c.key)
+      } else if (kind === 'extend') {
         const m = prompt('extend lease by minutes:', '120')
         if (m) await api.clusterExtend(c.key, lease.id, +m)
       }
@@ -769,6 +860,8 @@ export default function App() {
       <RunsSection projects={projects.filter(p => p.name === selected)}
                    runs={projRuns} display={catalog?.display}
                    onChanged={reload} />
+
+      <DaemonLog />
     </div>
   )
 }

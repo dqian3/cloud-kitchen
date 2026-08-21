@@ -65,6 +65,8 @@ class ManagedCluster:
     remote: GCloudRemote
     state: ClusterState
     db_id: int
+    create_cmd: tuple = ()      # provisioning argv (repo's setup script)
+    create_cwd: Path | None = None
     vms: list[str] = field(default_factory=list)
     task: asyncio.Task | None = None
     keepalive: KeepAlive | None = None
@@ -72,6 +74,9 @@ class ManagedCluster:
     session_id: int | None = None
     last_status: dict = field(default_factory=dict)
     last_rearm: float = 0.0
+    create_task: asyncio.Task | None = None
+    create_log: list = field(default_factory=list)   # captured output lines
+    create_rc: int | None = None                     # last run's exit code
 
 
 class ClusterManager:
@@ -114,6 +119,8 @@ class ClusterManager:
                                         tunnel_through_iap=settings.tunnel_through_iap),
                     state=ClusterState(f"{p.name}-{c.name}"),
                     db_id=db_id,
+                    create_cmd=tuple(c.create_cmd),
+                    create_cwd=p.repo_path / p.driver_cwd,
                 )
 
     def _get(self, key) -> ManagedCluster:
@@ -211,6 +218,53 @@ class ClusterManager:
             self.hub.emit("cluster.lease", cluster_id=mc.db_id, cluster=mc.key,
                           action="released", lease=lease_id)
 
+    async def create(self, key):
+        """Provision the cluster's VMs via the repo's own setup script.
+
+        This *creates* instances (money), so it only runs when the config
+        declares a create_cmd, nothing else is creating, and the cluster
+        isn't already being managed up. The scripts are restartable
+        (existing VMs are skipped), so re-running after a partial stockout
+        fills the gaps. Output is captured line by line into create_log,
+        which the snapshot exposes for the UI to tail.
+        """
+        mc = self._get(key)
+        if not mc.create_cmd:
+            raise ValueError(f"cluster {key} has no create_cmd configured")
+        if mc.create_task is not None and not mc.create_task.done():
+            raise RuntimeError(f"cluster {key} is already being created")
+        if mc.task is not None and not mc.task.done():
+            raise RuntimeError(
+                f"cluster {key} is up under daemon management; create is for "
+                "provisioning VMs that don't exist yet")
+        mc.create_log = []
+        mc.create_rc = None
+        self.hub.emit("cluster.create.started", cluster_id=mc.db_id,
+                      cluster=mc.key, cmd=list(mc.create_cmd))
+        mc.create_task = asyncio.get_running_loop().create_task(
+            self._run_create(mc))
+
+    async def _run_create(self, mc: ManagedCluster):
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *mc.create_cmd, cwd=str(mc.create_cwd),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT)
+            async for raw in proc.stdout:
+                line = raw.decode(errors="replace").rstrip()
+                mc.create_log.append(line)
+                if len(mc.create_log) > 500:
+                    del mc.create_log[:100]
+            mc.create_rc = await proc.wait()
+        except Exception as e:
+            mc.create_log.append(f"[daemon] create failed to run: {e!r}")
+            mc.create_rc = -1
+        # The setup scripts may regenerate the cluster YAML (n21 rewrites
+        # its config); drop the cached VM list so the next read is fresh.
+        mc.vms = []
+        self.hub.emit("cluster.create.finished", cluster_id=mc.db_id,
+                      cluster=mc.key, rc=mc.create_rc)
+
     async def refresh_status(self, key):
         mc = self._get(key)
         vms = self._vms(mc)
@@ -232,6 +286,7 @@ class ClusterManager:
             burn = None
             if mc.hourly_usd is not None and mc.session_id is not None:
                 burn = mc.hourly_usd * len(mc.vms)
+            creating = mc.create_task is not None and not mc.create_task.done()
             out.append({
                 "key": mc.key, "project": mc.project, "name": mc.name,
                 "state": row["state"] if row else "terminated",
@@ -242,6 +297,11 @@ class ClusterManager:
                 "active": mc.task is not None and not mc.task.done(),
                 "burn_usd_per_hr": burn,
                 "session_cost_usd": self._session_cost(mc),
+                "create": ({
+                    "running": creating,
+                    "rc": mc.create_rc,
+                    "log_tail": mc.create_log[-30:],
+                } if mc.create_cmd else None),
             })
         return out
 

@@ -81,7 +81,8 @@ def catalog(project_cfg) -> dict:
         "error": None,
         "experiments": [
             {"name": e.name, "description": e.description, "queue": e.queue,
-             "replicas": e.replicas, "native": bool(e.command)}
+             "replicas": e.replicas, "native": bool(e.command),
+             "group": e.group}
             for e in exps
         ],
         "aggregates": handle.adapter.aggregates(),

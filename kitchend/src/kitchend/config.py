@@ -40,6 +40,11 @@ class ClusterConfig:
     name: str
     config: str                       # path to the cluster YAML, relative to repo
     hourly_usd: float | None = None
+    # Provisioning command (argv, run in the project's driver_cwd): CREATES
+    # the VMs — gcloud instances create, not start — via the repo's own
+    # tested setup script. Unset = the daemon can only start/stop existing
+    # VMs for this cluster.
+    create_cmd: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -97,6 +102,7 @@ def load_config(path: Path | None = None) -> Config:
                     name=c["name"],
                     config=c["config"],
                     hourly_usd=c.get("hourly_usd"),
+                    create_cmd=tuple(c.get("create_cmd", ())),
                 )
                 for c in p.get("clusters", [])
             ),

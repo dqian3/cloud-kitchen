@@ -195,6 +195,39 @@ async def cluster_refresh(project: str, name: str, request: Request):
     return {"vms": statuses}
 
 
+@router.post("/clusters/{project}/{name}/create")
+async def cluster_create(project: str, name: str, request: Request):
+    """Provision the cluster's VMs via the repo's setup script (creates
+    instances — money). Runs in the background; progress lands in the
+    cluster snapshot's create.log_tail and the event log."""
+    try:
+        await request.app.state.clusters.create(f"{project}/{name}")
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True}
+
+
+# --- the daemon's own log: every state change, from the events table ---
+
+@router.get("/logs")
+def daemon_log(request: Request, limit: int = 200):
+    """Newest daemon events (jobs, clusters, leases, creates), oldest first
+    within the window — the audit trail behind the SSE stream."""
+    rows = request.app.state.db.query(
+        "SELECT id, ts, job_id, cluster_id, type, payload_json FROM events "
+        "ORDER BY id DESC LIMIT ?", (min(int(limit), 1000),))
+    out = []
+    for r in reversed(rows):
+        out.append({"id": r["id"], "ts": r["ts"], "type": r["type"],
+                    "job_id": r["job_id"], "cluster_id": r["cluster_id"],
+                    **json.loads(r["payload_json"])})
+    return out
+
+
 # --- saved sweeps: one-offs promoted to reusable presets ---
 
 class SweepSave(BaseModel):
