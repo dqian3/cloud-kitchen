@@ -343,11 +343,15 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
           )}
           {Object.entries(byQueue).map(([queue, exps]) => {
             // Variants (group = base experiment) fold behind their base so
-            // the *_n4 / *_no_crypto family doesn't crowd the top level.
+            // the *_n4 / *_no_crypto family doesn't crowd the top level. A
+            // group whose name is no experiment (a family label like
+            // intraregion_latency) folds behind a virtual header instead.
             const variantsOf = {}
             for (const e of exps) if (e.group) (variantsOf[e.group] ||= []).push(e)
-            const bases = exps.filter(e =>
-              !e.group || !exps.some(b => b.name === e.group))
+            const expNames = new Set(exps.map(e => e.name))
+            const bases = exps.filter(e => !e.group)
+            const virtualGroups = Object.keys(variantsOf)
+              .filter(g => !expNames.has(g))
             const renderExp = (e) => {
               const disabled = selectedQueues.size > 0 && e.queue &&
                 !selectedQueues.has(e.queue)
@@ -385,6 +389,24 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
                             {open ? '−' : '+'}{variants.length}
                           </button>
                         )}
+                        {open && variants.map(renderExp)}
+                      </React.Fragment>
+                    )
+                  })}
+                  {virtualGroups.map(g => {
+                    const variants = variantsOf[g]
+                    const open = expanded.includes(g) ||
+                      variants.some(v => selected.includes(v.name))
+                    return (
+                      <React.Fragment key={g}>
+                        <span className="exp exp-virtual">{g}</span>
+                        <button type="button" className="agg variant-toggle"
+                                title={variants.map(v => v.name).join(', ')}
+                                onClick={() => setExpanded(x =>
+                                  x.includes(g) ? x.filter(n => n !== g)
+                                    : [...x, g])}>
+                          {open ? '−' : '+'}{variants.length}
+                        </button>
                         {open && variants.map(renderExp)}
                       </React.Fragment>
                     )

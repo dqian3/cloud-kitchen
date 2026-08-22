@@ -56,19 +56,32 @@ def cmd_catalog(config, args):
     cat = _api(config, f"/api/experiments?project={args.project}")
     if cat.get("error"):
         raise SystemExit(f"no catalog: {cat['error']}")
+    names = {e["name"] for e in cat["experiments"]}
     by_queue: dict[str, list] = {}
     variants: dict[str, list] = {}
+    orphan_groups: dict[str, dict[str, list]] = {}   # queue -> group -> exps
     for e in cat["experiments"]:
-        if e.get("group"):
-            variants.setdefault(e["group"], []).append(e)
+        queue = e.get("queue") or "other"
+        group = e.get("group")
+        if group and group in names:
+            variants.setdefault(group, []).append(e)
+        elif group:
+            # A family label (e.g. intraregion_latency) that is no
+            # experiment itself: fold its members under a plain header.
+            orphan_groups.setdefault(queue, {}).setdefault(group, []).append(e)
         else:
-            by_queue.setdefault(e.get("queue") or "other", []).append(e)
-    for queue, exps in by_queue.items():
+            by_queue.setdefault(queue, []).append(e)
+    for queue in {**by_queue, **orphan_groups}:
         print(f"[{queue}]")
-        for e in exps:
+        for e in by_queue.get(queue, []):
             mark = " ⚡" if e.get("native") else ""
             print(f"  {e['name']}{mark}  — {e['description']}")
             for v in variants.get(e["name"], []):
+                vmark = " ⚡" if v.get("native") else ""
+                print(f"      {v['name']}{vmark}  — {v['description']}")
+        for group, members in orphan_groups.get(queue, {}).items():
+            print(f"  {group}/")
+            for v in members:
                 vmark = " ⚡" if v.get("native") else ""
                 print(f"      {v['name']}{vmark}  — {v['description']}")
     if cat.get("aggregates"):

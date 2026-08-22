@@ -72,6 +72,7 @@ button.agg { background: none; border: 1px solid var(--blue);
 .exp-disabled { opacity: 0.35; cursor: not-allowed; }
 .native-mark { color: var(--orange); font-size: 0.75rem; margin-left: 0.15rem; }
 .exp-variant { opacity: 0.75; font-size: 0.8rem; }
+.exp-virtual { color: var(--muted); cursor: default; }
 button.variant-toggle { padding: 0 0.35rem; font-size: 0.72rem;
   border-color: var(--muted); color: var(--muted); }
 
