@@ -350,6 +350,10 @@ class ClusterManager:
             elif mc.hourly_usd is not None and running:
                 burn = mc.hourly_usd * running
             creating = mc.create_task is not None and not mc.create_task.done()
+            try:
+                est_hourly = self.estimate_hourly(mc.key)
+            except Exception:
+                est_hourly = None
             out.append({
                 "key": mc.key, "project": mc.project, "name": mc.name,
                 "state": row["state"] if row else "terminated",
@@ -360,6 +364,7 @@ class ClusterManager:
                 "leases": leases,
                 "active": mc.task is not None and not mc.task.done(),
                 "burn_usd_per_hr": burn,
+                "est_usd_per_hr": est_hourly,   # whole-cluster rate if up
                 "session_cost_usd": self._session_cost(mc),
                 "create": ({
                     "running": creating,
