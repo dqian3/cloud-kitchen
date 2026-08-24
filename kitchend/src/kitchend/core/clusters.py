@@ -307,7 +307,14 @@ class ClusterManager:
         mc.last_status = statuses
         if mc.task is not None and not mc.task.done():
             return statuses
-        running = sum(1 for s in statuses.values() if s == "RUNNING")
+        # Clusters may share VMs (main is the head of the n51 fleet); VMs
+        # under another cluster's lease are managed, not stray.
+        leased_elsewhere = set()
+        for other in self.clusters.values():
+            if other is not mc and other.task is not None and not other.task.done():
+                leased_elsewhere.update(other.vms)
+        running = sum(1 for v, s in statuses.items()
+                      if s == "RUNNING" and v not in leased_elsewhere)
         row = self.db.query_one(
             "SELECT state FROM clusters WHERE id = ?", (mc.db_id,))
         state = row["state"] if row else "terminated"

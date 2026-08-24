@@ -225,3 +225,23 @@ def test_poll_status_leaves_managed_state_alone(manager):
         await mgr.down("stub/main")
 
     asyncio.run(main())
+
+
+def test_poll_status_ignores_vms_leased_by_an_overlapping_cluster(manager):
+    mgr, mc, db = manager
+    # A second cluster whose fleet includes this one's VMs, currently up.
+    import copy
+    other = copy.copy(mc)
+    other.key = "stub/big"; other.name = "big"
+    other.vms = ["r0", "r1", "c0", "x0"]
+
+    async def main():
+        other.task = asyncio.get_running_loop().create_task(asyncio.sleep(3600))
+        mgr.clusters["stub/big"] = other
+        mc.remote.vm_states = {"r0": "RUNNING", "r1": "RUNNING", "c0": "RUNNING"}
+        await mgr.poll_status(mc)
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["state"] == "terminated"      # not flagged unmanaged
+        other.task.cancel()
+
+    asyncio.run(main())
