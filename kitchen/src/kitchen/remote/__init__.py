@@ -9,6 +9,7 @@ theirs with set_default_settings() or pass them to load_remote().
 from .base import Remote
 from .mock import MockRemote
 from .gcloud import GCloudRemote
+from .docker import DockerRemote
 from .local import LocalRemote
 from .settings import (
     RemoteSettings,
@@ -18,7 +19,8 @@ from .settings import (
 from .sshremote import SSHRemote
 
 __all__ = [
-    "Remote", "GCloudRemote", "SSHRemote", "LocalRemote", "MockRemote",
+    "Remote", "GCloudRemote", "SSHRemote", "LocalRemote",
+    "DockerRemote", "MockRemote",
     "RemoteSettings", "get_default_settings", "set_default_settings",
     "load_remote",
 ]
@@ -56,5 +58,10 @@ def load_remote(config, settings: RemoteSettings | None = None):
         return SSHRemote(user=_cfg_get(config, "user", "root"), key_file=_cfg_get(config, "key_file"))
     elif platform == "local":
         return LocalRemote(root=_cfg_get(config, "local_root"))
+    elif platform == "docker":
+        compose = _cfg_get(config, "compose_file")
+        if not compose:
+            raise ValueError("platform: docker needs compose_file")
+        return DockerRemote(compose, project=_cfg_get(config, "compose_project"))
     else:
         raise ValueError(f"Unknown platform: {platform}")

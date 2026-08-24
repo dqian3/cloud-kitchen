@@ -19,7 +19,7 @@ from pathlib import Path
 import yaml
 
 from kitchen.cluster import ClusterState, KeepAlive, start_vms, stop_vms
-from kitchen.remote import GCloudRemote, RemoteSettings
+from kitchen.remote import DockerRemote, GCloudRemote, RemoteSettings
 
 
 def _group_vms(group: dict) -> list[str]:
@@ -34,6 +34,15 @@ def _group_vms(group: dict) -> list[str]:
     if "vm_prefix" in group and "count" in group:
         return [f"{group['vm_prefix']}{i}" for i in range(int(group["count"]))]
     return []
+
+
+def platform_from_yaml(path: Path) -> tuple[str, dict]:
+    """(platform, raw config) — the daemon picks the remote backend from
+    the cluster YAML, not the project: a docker fleet sits beside gcloud
+    ones in the same project."""
+    with open(path) as f:
+        d = yaml.safe_load(f) or {}
+    return d.get("platform", "gcloud"), d
 
 
 def vms_from_yaml(path: Path) -> list[str]:
@@ -123,12 +132,23 @@ class ClusterManager:
                         "INSERT INTO clusters (project_id, name, config_path, "
                         "hourly_usd, state) VALUES (?, ?, ?, ?, 'terminated')",
                         (project_id, c.name, str(config_path), c.hourly_usd))
+                remote = GCloudRemote(settings=settings,
+                                      project=settings.gcp_project,
+                                      tunnel_through_iap=settings.tunnel_through_iap)
+                try:
+                    platform, raw = platform_from_yaml(config_path)
+                except OSError:
+                    platform, raw = "gcloud", {}
+                if platform == "docker":
+                    compose = Path(raw.get("compose_file", "docker-compose.yml"))
+                    if not compose.is_absolute():
+                        compose = config_path.parent / compose
+                    remote = DockerRemote(compose,
+                                          project=raw.get("compose_project"))
                 self.clusters[key] = ManagedCluster(
                     key=key, project=p.name, name=c.name,
                     config_path=config_path, hourly_usd=c.hourly_usd,
-                    remote=GCloudRemote(settings=settings,
-                                        project=settings.gcp_project,
-                                        tunnel_through_iap=settings.tunnel_through_iap),
+                    remote=remote,
                     state=ClusterState(f"{p.name}-{c.name}"),
                     db_id=db_id,
                     create_cmd=tuple(c.create_cmd),

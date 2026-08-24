@@ -1,0 +1,9 @@
+# Two-node fleet for DockerRemote's tests: bash + procps present, sleeps
+# forever so exec has something to attach to.
+services:
+  a:
+    image: python:3.12-slim
+    command: ["sleep", "infinity"]
+  b:
+    image: python:3.12-slim
+    command: ["sleep", "infinity"]

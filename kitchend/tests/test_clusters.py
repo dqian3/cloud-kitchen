@@ -297,3 +297,27 @@ def test_create_gives_up_after_max_attempts_and_can_be_canceled(manager):
         assert mc.create_task.cancelled()
 
     asyncio.run(main())
+
+
+def test_registry_picks_docker_backend_from_yaml(tmp_path):
+    from kitchen.remote import DockerRemote
+
+    compose = tmp_path / "docker-compose.yml"
+    compose.write_text("services: {r0: {image: x}, c0: {image: x}}\n")
+    cfg_yaml = tmp_path / "docker.yaml"
+    cfg_yaml.write_text(yaml.dump({
+        "platform": "docker", "compose_file": "docker-compose.yml",
+        "replica": {"vms": ["r0"]}, "client": {"vms": ["c0"]},
+    }))
+    project = ProjectConfig(
+        name="stub", repo_path=tmp_path,
+        clusters=(ClusterConfig(name="docker", config="docker.yaml"),))
+    config = Config(db_path=tmp_path / "db.sqlite3",
+                    jobs_dir=tmp_path / "jobs", projects=(project,))
+    db = Db(config.db_path)
+    mgr = ClusterManager(config, db, EventHub(db))
+    mc = mgr.clusters["stub/docker"]
+    assert isinstance(mc.remote, DockerRemote)
+    assert mc.remote.compose_file == str(compose)
+    assert mgr.estimate_hourly("stub/docker") is None     # free
+    db.close()

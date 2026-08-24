@@ -16,7 +16,10 @@ def arm_shutdown_cmd(minutes=60, cancel_first=True):
 
 
 def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120):
-    """Arm (or re-arm) the auto-shutdown timer on all VMs."""
+    """Arm (or re-arm) the auto-shutdown timer on all VMs. A no-op for
+    backends whose hosts can't shut themselves down (containers)."""
+    if not getattr(remote, "supports_deadman", True):
+        return {}
     return remote.run_on_all(
         vms, arm_shutdown_cmd(minutes, cancel_first), quiet=True, timeout=timeout,
     )
