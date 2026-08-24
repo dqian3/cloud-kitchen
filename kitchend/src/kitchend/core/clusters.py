@@ -77,6 +77,10 @@ class ManagedCluster:
     create_task: asyncio.Task | None = None
     create_log: list = field(default_factory=list)   # captured output lines
     create_rc: int | None = None                     # last run's exit code
+    create_attempt: int = 0
+    create_max_attempts: int = 0
+    create_missing: list = field(default_factory=list)   # VMs still absent
+    create_next_at: float | None = None              # epoch of next attempt
 
 
 class ClusterManager:
@@ -243,14 +247,19 @@ class ClusterManager:
             self.hub.emit("cluster.lease", cluster_id=mc.db_id, cluster=mc.key,
                           action="released", lease=lease_id)
 
-    async def create(self, key):
-        """Provision the cluster's VMs via the repo's own setup script.
+    async def create(self, key, *, retry_delay_s=900, max_attempts=12,
+                     stop_after=True):
+        """Provision the cluster's VMs via the repo's own setup script,
+        retrying until every VM in its config exists.
 
         This *creates* instances (money), so it only runs when the config
         declares a create_cmd, nothing else is creating, and the cluster
         isn't already being managed up. The scripts are restartable
-        (existing VMs are skipped), so re-running after a partial stockout
-        fills the gaps. Output is captured line by line into create_log,
+        (existing VMs are skipped), so each attempt fills whatever a zone
+        stockout left missing; attempts are retry_delay_s apart, up to
+        max_attempts. Fresh VMs boot running: with stop_after they are
+        stopped after each attempt so nothing accrues cost while the fleet
+        waits on capacity. Output is captured line by line into create_log,
         which the snapshot exposes for the UI to tail.
         """
         mc = self._get(key)
@@ -264,12 +273,27 @@ class ClusterManager:
                 "provisioning VMs that don't exist yet")
         mc.create_log = []
         mc.create_rc = None
+        mc.create_attempt = 0
+        mc.create_max_attempts = max(1, int(max_attempts))
+        mc.create_missing = []
+        mc.create_next_at = None
         self.hub.emit("cluster.create.started", cluster_id=mc.db_id,
-                      cluster=mc.key, cmd=list(mc.create_cmd))
+                      cluster=mc.key, cmd=list(mc.create_cmd),
+                      max_attempts=mc.create_max_attempts)
         mc.create_task = asyncio.get_running_loop().create_task(
-            self._run_create(mc))
+            self._run_create(mc, float(retry_delay_s), bool(stop_after)))
 
-    async def _run_create(self, mc: ManagedCluster):
+    def cancel_create(self, key):
+        mc = self._get(key)
+        if mc.create_task is None or mc.create_task.done():
+            raise RuntimeError(f"cluster {key} is not being created")
+        mc.create_task.cancel()
+        mc.create_next_at = None
+        self.hub.emit("cluster.create.canceled", cluster_id=mc.db_id,
+                      cluster=mc.key, attempt=mc.create_attempt,
+                      missing=len(mc.create_missing))
+
+    async def _run_create_once(self, mc: ManagedCluster):
         try:
             proc = await asyncio.create_subprocess_exec(
                 *mc.create_cmd, cwd=str(mc.create_cwd),
@@ -281,14 +305,45 @@ class ClusterManager:
                 if len(mc.create_log) > 500:
                     del mc.create_log[:100]
             mc.create_rc = await proc.wait()
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             mc.create_log.append(f"[daemon] create failed to run: {e!r}")
             mc.create_rc = -1
-        # The setup scripts may regenerate the cluster YAML (n21 rewrites
-        # its config); drop the cached VM list so the next read is fresh.
-        mc.vms = []
+
+    async def _run_create(self, mc: ManagedCluster, retry_delay_s, stop_after):
+        while True:
+            mc.create_attempt += 1
+            mc.create_next_at = None
+            mc.create_log.append(
+                f"[daemon] provisioning attempt {mc.create_attempt}"
+                f"/{mc.create_max_attempts}")
+            await self._run_create_once(mc)
+            # The setup scripts may regenerate the cluster YAML; re-read it.
+            mc.vms = []
+            vms = self._vms(mc)
+            statuses = await asyncio.to_thread(mc.remote.vm_status, vms)
+            mc.last_status = statuses
+            mc.create_missing = [v for v in vms if v not in statuses]
+            running = [v for v, s in statuses.items() if s == "RUNNING"]
+            if stop_after and running:
+                await asyncio.to_thread(mc.remote.vm_stop, running)
+                mc.create_log.append(
+                    f"[daemon] stopped {len(running)} freshly created VM(s)")
+            self.hub.emit("cluster.create.attempt", cluster_id=mc.db_id,
+                          cluster=mc.key, attempt=mc.create_attempt,
+                          rc=mc.create_rc, missing=len(mc.create_missing))
+            if not mc.create_missing or mc.create_attempt >= mc.create_max_attempts:
+                break
+            mc.create_next_at = time.time() + retry_delay_s
+            mc.create_log.append(
+                f"[daemon] {len(mc.create_missing)} VM(s) still missing; "
+                f"next attempt in {int(retry_delay_s // 60)} min")
+            await asyncio.sleep(retry_delay_s)
         self.hub.emit("cluster.create.finished", cluster_id=mc.db_id,
-                      cluster=mc.key, rc=mc.create_rc)
+                      cluster=mc.key, rc=mc.create_rc,
+                      attempts=mc.create_attempt,
+                      missing=len(mc.create_missing))
 
     async def refresh_status(self, key):
         mc = self._get(key)
@@ -376,6 +431,10 @@ class ClusterManager:
                 "create": ({
                     "running": creating,
                     "rc": mc.create_rc,
+                    "attempt": mc.create_attempt,
+                    "max_attempts": mc.create_max_attempts,
+                    "missing": mc.create_missing,
+                    "next_at": mc.create_next_at,
                     "log_tail": mc.create_log[-200:],
                 } if mc.create_cmd else None),
             })

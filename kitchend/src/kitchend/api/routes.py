@@ -197,17 +197,39 @@ async def cluster_refresh(project: str, name: str, request: Request):
     return {"vms": statuses}
 
 
+class ClusterCreate(BaseModel):
+    retry_delay_s: int = 900       # between attempts while VMs are missing
+    max_attempts: int = 12
+    stop_after: bool = True        # fresh VMs boot running; stop them
+
+
 @router.post("/clusters/{project}/{name}/create")
-async def cluster_create(project: str, name: str, request: Request):
+async def cluster_create(project: str, name: str, request: Request,
+                         body: ClusterCreate | None = None):
     """Provision the cluster's VMs via the repo's setup script (creates
-    instances — money). Runs in the background; progress lands in the
-    cluster snapshot's create.log_tail and the event log."""
+    instances — money), retrying until every VM in its config exists.
+    Runs in the background; progress lands in the cluster snapshot's
+    create.* fields and the event log."""
+    body = body or ClusterCreate()
     try:
-        await request.app.state.clusters.create(f"{project}/{name}")
+        await request.app.state.clusters.create(
+            f"{project}/{name}", retry_delay_s=body.retry_delay_s,
+            max_attempts=body.max_attempts, stop_after=body.stop_after)
     except KeyError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return {"ok": True}
+
+
+@router.post("/clusters/{project}/{name}/create/cancel")
+def cluster_create_cancel(project: str, name: str, request: Request):
+    try:
+        request.app.state.clusters.cancel_create(f"{project}/{name}")
+    except KeyError as e:
+        raise HTTPException(404, str(e))
     except RuntimeError as e:
         raise HTTPException(409, str(e))
     return {"ok": True}

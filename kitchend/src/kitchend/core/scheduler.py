@@ -33,8 +33,8 @@ class Scheduler:
         # jobs still showing retries after a restart will never requeue, and
         # an `after` gate waiting on them would wait forever.
         self.db.execute(
-            "UPDATE jobs SET retries_left = 0 WHERE state = ? AND retries_left > 0",
-            (jobs.FAILED,))
+            "UPDATE jobs SET retries_left = 0, retry_at = NULL "
+            "WHERE state = ? AND retries_left > 0", (jobs.FAILED,))
 
     def wake(self):
         self._wake.set()
@@ -226,6 +226,9 @@ class Scheduler:
                 delay = int(job["spec"].get("retry_delay_secs", 600))
                 jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
                                exit_code=rc, finished_at=now)
+                self.db.execute(
+                    "UPDATE jobs SET retry_at = datetime('now', ?) WHERE id = ?",
+                    (f"+{delay} seconds", job_id))
                 self.hub.emit("job.retry_scheduled", job_id=job_id,
                               delay_secs=delay, retries_left=retries_left - 1)
                 # `current`, not `job`: the dispatch-time snapshot predates the
@@ -242,6 +245,8 @@ class Scheduler:
             await asyncio.sleep(delay)
         finally:
             self._requeues.pop(job["id"], None)
+            self.db.execute("UPDATE jobs SET retry_at = NULL WHERE id = ?",
+                            (job["id"],))
         spec = dict(job["spec"])
         spec["resume"] = True
         if job.get("run_dir"):
@@ -285,8 +290,8 @@ class Scheduler:
             timer = self._requeues.pop(job_id, None)
             if timer is not None:
                 timer.cancel()
-            self.db.execute("UPDATE jobs SET retries_left = 0 WHERE id = ?",
-                            (job_id,))
+            self.db.execute("UPDATE jobs SET retries_left = 0, retry_at = NULL "
+                            "WHERE id = ?", (job_id,))
             jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED)
             return jobs.CANCELED
         return job["state"]

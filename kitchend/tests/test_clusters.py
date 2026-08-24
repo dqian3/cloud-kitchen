@@ -130,13 +130,17 @@ def test_create_runs_setup_script_and_captures_output(tmp_path, manager):
     mc.create_cwd = tmp_path
 
     async def main():
+        mc.remote.vm_states = {"r0": "TERMINATED", "r1": "TERMINATED",
+                               "c0": "TERMINATED"}
         await mgr.create("stub/main")
         await mc.create_task
         assert mc.create_rc == 0
-        assert mc.create_log == ["creating r0", "creating r1"]
+        assert [l for l in mc.create_log if not l.startswith("[daemon]")] == \
+            ["creating r0", "creating r1"]
         snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
-        assert snap["create"] == {"running": False, "rc": 0,
-                                  "log_tail": ["creating r0", "creating r1"]}
+        cr = snap["create"]
+        assert (cr["running"], cr["rc"], cr["attempt"], cr["missing"]) == \
+            (False, 0, 1, [])
         # start/finish landed in the events audit trail
         types = [r["type"] for r in db.query(
             "SELECT type FROM events ORDER BY id")]
@@ -243,5 +247,53 @@ def test_poll_status_ignores_vms_leased_by_an_overlapping_cluster(manager):
         snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
         assert snap["state"] == "terminated"      # not flagged unmanaged
         other.task.cancel()
+
+    asyncio.run(main())
+
+
+def test_create_retries_until_fleet_complete(manager):
+    mgr, mc, db = manager
+    mc.create_cmd = ("true",)
+
+    async def main():
+        # First attempt: c0 never appears (stockout); r0 came up running.
+        mc.remote.vm_states = {"r0": "RUNNING", "r1": "TERMINATED"}
+        await mgr.create("stub/main", retry_delay_s=0.2, max_attempts=3)
+        while mc.create_attempt < 1 or mc.create_next_at is None:
+            await asyncio.sleep(0.02)
+        assert mc.create_missing == ["c0"]
+        assert mc.remote.vm_states["r0"] == "TERMINATED"   # stopped after
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["create"]["running"] and snap["create"]["attempt"] == 1
+        # Capacity returns before the next attempt.
+        mc.remote.vm_states["c0"] = "RUNNING"
+        await mc.create_task
+        assert mc.create_attempt == 2 and mc.create_missing == []
+        assert mc.remote.vm_states["c0"] == "TERMINATED"
+        types = [r["type"] for r in db.query("SELECT type FROM events")]
+        assert types.count("cluster.create.attempt") == 2
+
+    asyncio.run(main())
+
+
+def test_create_gives_up_after_max_attempts_and_can_be_canceled(manager):
+    mgr, mc, db = manager
+    mc.create_cmd = ("true",)
+
+    async def main():
+        mc.remote.vm_states = {"r0": "TERMINATED"}   # r1, c0 never appear
+        await mgr.create("stub/main", retry_delay_s=0.05, max_attempts=2)
+        await mc.create_task
+        assert mc.create_attempt == 2 and sorted(mc.create_missing) == ["c0", "r1"]
+
+        await mgr.create("stub/main", retry_delay_s=60, max_attempts=5)
+        while mc.create_next_at is None:
+            await asyncio.sleep(0.02)
+        mgr.cancel_create("stub/main")
+        try:
+            await mc.create_task
+        except asyncio.CancelledError:
+            pass
+        assert mc.create_task.cancelled()
 
     asyncio.run(main())

@@ -48,7 +48,10 @@ def _fmt_job_line(j):
         or " ".join(j["spec"].get("command") or [])[:60]
     queue = j["spec"].get("queue") or j["project"]
     lease = " ⚙" if j["spec"].get("cluster") else ""
-    return (f"#{j['id']:<5} {j['project']:<10} {j['state']:<11} "
+    state = j["state"]
+    if state == "failed" and j.get("retry_at"):
+        state = f"retry@{j['retry_at'][11:16]}Z"
+    return (f"#{j['id']:<5} {j['project']:<10} {state:<11} "
             f"{queue}{lease}  {what}")
 
 
@@ -182,12 +185,26 @@ def cmd_resubmit(config, args):
     print(f"resubmitted as #{out.get('id', out)}")
 
 
+def cmd_create(config, args):
+    body = {"retry_delay_s": args.retry_delay, "max_attempts": args.attempts,
+            "stop_after": not args.leave_running}
+    _api(config, f"/api/clusters/{args.cluster}/create", body=body)
+    print(f"provisioning {args.cluster}: up to {args.attempts} attempts, "
+          f"{args.retry_delay // 60} min apart; follow with: kitchend clusters")
+
+
 def cmd_clusters(config, args):
     for c in _api(config, "/api/clusters"):
         up = c.get("vms_running")
         vms = f"{up}/{c['vm_count']}" if up is not None and c.get("vm_count") \
             else (c.get("vm_count") or "?")
         line = f"{c['key']:<24} {c['state']:<11} vms {vms}"
+        cr = c.get("create") or {}
+        if cr.get("running"):
+            line += (f"  provisioning {cr['attempt']}/{cr['max_attempts']}"
+                     f" ({len(cr.get('missing') or [])} missing)")
+        elif cr.get("missing"):
+            line += f"  {len(cr['missing'])} VMs missing"
         if c.get("burn_usd_per_hr"):
             line += f"  ${c['burn_usd_per_hr']:.2f}/hr"
         elif c.get("est_usd_per_hr"):
@@ -242,6 +259,15 @@ def main(argv=None):
                    help="new run dir instead of resuming")
 
     sub.add_parser("clusters", help="cluster states, VMs, burn")
+
+    p = sub.add_parser("create", help="provision a cluster's VMs (creates "
+                       "instances; retries while a zone is out of capacity)")
+    p.add_argument("cluster", help="project/name")
+    p.add_argument("--attempts", type=int, default=12)
+    p.add_argument("--retry-delay", type=int, default=900, dest="retry_delay",
+                   help="seconds between attempts")
+    p.add_argument("--leave-running", action="store_true", dest="leave_running",
+                   help="don't stop freshly created VMs after each attempt")
     args = parser.parse_args(argv)
 
     from pathlib import Path
@@ -266,6 +292,7 @@ def main(argv=None):
         "catalog": cmd_catalog, "submit": cmd_submit, "jobs": cmd_jobs,
         "watch": cmd_watch, "log": cmd_log, "cancel": cmd_cancel,
         "resubmit": cmd_resubmit, "clusters": cmd_clusters,
+        "create": cmd_create,
     }[args.cmd]
     try:
         return handler(config, args) or 0

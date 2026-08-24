@@ -151,6 +151,10 @@ MIGRATIONS = [
         UNIQUE (project_id, name)
     );
     """,
+    # v4 — when a failed job's pending retry will requeue (NULL = none)
+    """
+    ALTER TABLE jobs ADD COLUMN retry_at TEXT;
+    """,
 ]
 
 

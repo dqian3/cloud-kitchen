@@ -165,8 +165,10 @@ def test_cancel_reaches_pending_retry(env):
         # lands on the child it would create).
         assert jobs.get(db, failing)["retries_left"] == 3
         assert failing in scheduler._requeues
+        assert jobs.get(db, failing)["retry_at"] is not None   # visible retry
         assert await scheduler.cancel(failing) == jobs.CANCELED
         assert jobs.get(db, failing)["retries_left"] == 0
+        assert jobs.get(db, failing)["retry_at"] is None
         assert failing not in scheduler._requeues
         await asyncio.sleep(0.05)
         # The chain ended here: no child was queued.

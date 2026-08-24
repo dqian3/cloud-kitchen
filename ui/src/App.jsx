@@ -14,6 +14,12 @@ function fmtTs(ts) {
   return ts ? ts.replace('T', ' ').slice(5, 19) : '—'
 }
 
+// Minutes until a daemon timestamp ("YYYY-MM-DD HH:MM:SS", UTC).
+function fmtUntil(ts) {
+  const ms = Date.parse(ts.replace(' ', 'T') + 'Z') - Date.now()
+  return ms <= 0 ? 'moments' : `${Math.max(1, Math.round(ms / 60000))}m`
+}
+
 // ---------- clusters ----------
 
 function ClusterCard({ c, onAction }) {
@@ -84,9 +90,24 @@ function ClusterCard({ c, onAction }) {
           <button title="provision the VMs via the repo's setup script — creates instances (money); restartable, existing VMs are skipped"
                   onClick={() => onAction('create', c)}>create VMs</button>
         )}
-        {c.create?.running && <span className="muted">creating VMs…</span>}
+        {c.create?.running && (
+          <>
+            <span className="muted">
+              provisioning · attempt {c.create.attempt}/{c.create.max_attempts}
+              {c.create.missing?.length > 0 && ` · ${c.create.missing.length} VMs missing`}
+              {c.create.next_at &&
+                ` · next in ${Math.max(1, Math.round((c.create.next_at * 1000 - Date.now()) / 60000))}m`}
+            </span>
+            <button className="link" onClick={() => onAction('create-cancel', c)}>stop</button>
+          </>
+        )}
         {busy && <span className="muted">waiting for gcloud…</span>}
       </div>
+      {c.create && !c.create.running && c.create.missing?.length > 0 && (
+        <div className="muted" title={c.create.missing.join(', ')}>
+          provisioning stopped with {c.create.missing.length} VM(s) missing
+        </div>
+      )}
       {c.create && (c.create.running || c.create.log_tail?.length > 0) && (
         <details className="raw" open={c.create.running}>
           <summary>
@@ -498,7 +519,11 @@ function JobRow({ job, onChanged }) {
           {spec.cluster && <span title={`daemon-managed lease on ${spec.cluster}`}> ⚙</span>}
         </td>
         <td>{job.priority !== 0 ? job.priority : ''}</td>
-        <td><Chip text={job.state} color={STATE_COLORS[job.state]} />
+        <td><Chip text={job.state === 'failed' && job.retry_at ? 'retrying' : job.state}
+                  color={job.state === 'failed' && job.retry_at ? 'orange' : STATE_COLORS[job.state]} />
+          {job.state === 'failed' && job.retry_at &&
+            <span className="muted" title={`retry at ${job.retry_at} UTC`}>
+              {' '}in {fmtUntil(job.retry_at)} · {job.retries_left} left</span>}
           {job.state === 'queued' && spec.after &&
             <span className="muted" title="waits for that job's retry chain">
               {' '}after #{spec.after}</span>}
@@ -846,6 +871,8 @@ export default function App() {
         if (!confirm(`Provision ${c.key}'s VMs? This CREATES instances ` +
                      '(billed). Existing VMs are skipped.')) return
         await api.clusterCreate(c.key)
+      } else if (kind === 'create-cancel') {
+        await api.clusterCreateCancel(c.key)
       } else if (kind === 'extend') {
         const m = prompt('extend lease by minutes:', '120')
         if (m) await api.clusterExtend(c.key, lease.id, +m)
@@ -856,8 +883,12 @@ export default function App() {
 
   // Everything below the tabs is scoped to one project.
   const projJobs = jobs.filter(j => j.project === selected)
-  const active = projJobs.filter(j => ['queued', 'running'].includes(j.state))
-  const done = projJobs.filter(j => !['queued', 'running'].includes(j.state))
+  // A failed job with a pending retry is still work in flight: it stays in
+  // the queue until the retry requeues (as a child) or the chain is canceled.
+  const inFlight = j => ['queued', 'running'].includes(j.state) ||
+    (j.state === 'failed' && j.retry_at)
+  const active = projJobs.filter(inFlight)
+  const done = projJobs.filter(j => !inFlight(j))
   const projClusters = clusters.filter(c => c.project === selected)
   const projRuns = runs.filter(r => r.project === selected)
   const projInfo = projects.find(p => p.name === selected)
