@@ -369,7 +369,7 @@ class ClusterManager:
                 "create": ({
                     "running": creating,
                     "rc": mc.create_rc,
-                    "log_tail": mc.create_log[-30:],
+                    "log_tail": mc.create_log[-200:],
                 } if mc.create_cmd else None),
             })
         return out
