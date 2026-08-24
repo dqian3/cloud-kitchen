@@ -515,6 +515,12 @@ class ClusterManager:
                     "WHERE id = ?", (mc.session_id,))
                 mc.session_id = None
             self._set_db_state(mc, "terminated")
+            # The last poll ran mid-lease; re-read so the card doesn't
+            # keep showing the VMs as up until the next poll.
+            try:
+                mc.last_status = await asyncio.to_thread(mc.remote.vm_status, vms)
+            except Exception:
+                pass
 
     async def shutdown_all(self):
         """Daemon exit: stop every cluster this daemon is keeping alive."""
