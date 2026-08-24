@@ -26,8 +26,15 @@ class Scheduler:
         self.clusters = clusters                      # ClusterManager, for
         self._tasks: dict[int, asyncio.Task] = {}     # spec.cluster leases
         self._running_queues: dict[str, int] = {}     # queue key -> job_id
+        self._requeues: dict[int, asyncio.Task] = {}  # failed job -> retry timer
         self._wake = asyncio.Event()
         self._stopped = False
+        # A retry timer lives only in the process that started it: failed
+        # jobs still showing retries after a restart will never requeue, and
+        # an `after` gate waiting on them would wait forever.
+        self.db.execute(
+            "UPDATE jobs SET retries_left = 0 WHERE state = ? AND retries_left > 0",
+            (jobs.FAILED,))
 
     def wake(self):
         self._wake.set()
@@ -223,7 +230,7 @@ class Scheduler:
                               delay_secs=delay, retries_left=retries_left - 1)
                 # `current`, not `job`: the dispatch-time snapshot predates the
                 # daemon-assigned run_dir, and the retry must resume into it.
-                asyncio.get_running_loop().create_task(
+                self._requeues[job_id] = asyncio.get_running_loop().create_task(
                     self._requeue_after(current, delay, retries_left - 1))
             else:
                 jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
@@ -231,7 +238,10 @@ class Scheduler:
         self._release(key, job_id)
 
     async def _requeue_after(self, job, delay, retries_left):
-        await asyncio.sleep(delay)
+        try:
+            await asyncio.sleep(delay)
+        finally:
+            self._requeues.pop(job["id"], None)
         spec = dict(job["spec"])
         spec["resume"] = True
         if job.get("run_dir"):
@@ -268,6 +278,16 @@ class Scheduler:
             await self.runner.cancel(job_id)
             self.db.execute("UPDATE jobs SET finished_at = datetime('now') "
                             "WHERE id = ?", (job_id,))
+            return jobs.CANCELED
+        if job["state"] == jobs.FAILED and job["retries_left"] > 0:
+            # Failed but a retry is pending: cancel the timer and end the
+            # chain here, so nothing requeues and `after` gates release.
+            timer = self._requeues.pop(job_id, None)
+            if timer is not None:
+                timer.cancel()
+            self.db.execute("UPDATE jobs SET retries_left = 0 WHERE id = ?",
+                            (job_id,))
+            jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED)
             return jobs.CANCELED
         return job["state"]
 

@@ -151,3 +151,38 @@ def test_recover_orphans(env):
                (dead,))
     jobs.recover_orphans(db, hub)
     assert _state(db, dead) == jobs.INTERRUPTED
+
+
+def test_cancel_reaches_pending_retry(env):
+    config, db, hub, runner, scheduler = env
+
+    async def main():
+        failing = _submit(db, hub, config, "exit 1", queue="a",
+                          max_retries=3, retry_delay_secs=600)
+        await _run_until(db, scheduler,
+                         lambda: _state(db, failing) == jobs.FAILED)
+        # Failed, with a retry timer sleeping out its delay (the decrement
+        # lands on the child it would create).
+        assert jobs.get(db, failing)["retries_left"] == 3
+        assert failing in scheduler._requeues
+        assert await scheduler.cancel(failing) == jobs.CANCELED
+        assert jobs.get(db, failing)["retries_left"] == 0
+        assert failing not in scheduler._requeues
+        await asyncio.sleep(0.05)
+        # The chain ended here: no child was queued.
+        assert not db.query("SELECT id FROM jobs WHERE parent_job_id = ?",
+                            (failing,))
+
+    asyncio.run(main())
+
+
+def test_restart_clears_orphaned_retries(env):
+    config, db, hub, runner, scheduler = env
+    from kitchend.core.scheduler import Scheduler
+
+    project_id = jobs.ensure_project_row(db, config.project("stub"))
+    jid = jobs.submit(db, project_id, {"project": "stub", "experiments": ["x"]})
+    db.execute("UPDATE jobs SET state = ?, retries_left = 2 WHERE id = ?",
+               (jobs.FAILED, jid))
+    Scheduler(config, db, hub, runner)     # a fresh daemon
+    assert jobs.get(db, jid)["retries_left"] == 0
