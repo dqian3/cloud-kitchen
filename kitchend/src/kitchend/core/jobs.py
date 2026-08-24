@@ -181,6 +181,14 @@ def build_command(project_cfg, spec: dict):
         raise ValueError(
             f"{script} not found in {cwd} — is the change that adds it "
             "merged into the checkout jobs run in?")
+    # Same for a checkout-relative interpreter (.venv/bin/python): a venv
+    # that was never created there would fail the same way.
+    interp = argv[0] if argv else ""
+    if "/" in interp and not Path(interp).is_absolute() and cwd.is_dir() \
+            and not (cwd / interp).exists():
+        raise ValueError(
+            f"{interp} not found in {cwd} — create the checkout's environment "
+            "before submitting")
     return argv, cwd
 
 

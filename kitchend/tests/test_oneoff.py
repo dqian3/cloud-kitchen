@@ -173,3 +173,17 @@ def test_oneoff_requires_hook(tmp_path):
     p = ProjectConfig(name="bare", repo_path=tmp_path, adapter_path=ap)
     with pytest.raises(ValueError, match="oneoff"):
         adapters.oneoff_command(p, {"rates": [1]})
+
+
+def test_missing_relative_interpreter_rejected_at_submit(tmp_path):
+    from kitchend.config import ProjectConfig
+    from kitchend.core import jobs
+
+    (tmp_path / "sweep.py").touch()
+    proj = ProjectConfig(name="p", repo_path=tmp_path)
+    with pytest.raises(ValueError, match=".venv/bin/python not found"):
+        jobs.build_command(proj, {"command": [".venv/bin/python", "sweep.py"]})
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    (tmp_path / ".venv" / "bin" / "python").touch()
+    argv, cwd = jobs.build_command(proj, {"command": [".venv/bin/python", "sweep.py"]})
+    assert argv[0] == ".venv/bin/python"
