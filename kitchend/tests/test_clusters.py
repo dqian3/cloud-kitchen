@@ -339,3 +339,14 @@ def test_hold_keeps_cluster_up_after_last_lease(manager, monkeypatch):
         assert snap["state"] == "terminated"
 
     asyncio.run(main())
+
+
+def test_poll_interval_follows_cluster_state(manager):
+    mgr, mc, db = manager
+    assert mgr.poll_interval(mc) == ClusterManager.POLL_IDLE_S
+    db.execute("UPDATE clusters SET state = 'starting' WHERE id = ?", (mc.db_id,))
+    assert mgr.poll_interval(mc) == ClusterManager.POLL_TRANSITIONAL_S
+    db.execute("UPDATE clusters SET state = 'running' WHERE id = ?", (mc.db_id,))
+    assert mgr.poll_interval(mc) == ClusterManager.POLL_RUNNING_S
+    db.execute("UPDATE clusters SET state = 'unmanaged' WHERE id = ?", (mc.db_id,))
+    assert mgr.poll_interval(mc) == ClusterManager.POLL_RUNNING_S

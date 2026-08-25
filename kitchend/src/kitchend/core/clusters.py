@@ -97,7 +97,11 @@ class ManagedCluster:
 class ClusterManager:
     REARM_INTERVAL_S = 30 * 60
     TICK_S = 60
-    STATUS_POLL_S = 5 * 60
+    # gcloud status poll cadence by what the cluster is doing: fast while
+    # it changes, slow when nothing should be happening.
+    POLL_TRANSITIONAL_S = 10    # starting, stopping, provisioning
+    POLL_RUNNING_S = 60         # running or unmanaged: VMs are billing
+    POLL_IDLE_S = 10 * 60       # terminated
 
     def __init__(self, config, db, hub):
         self.config = config
@@ -438,15 +442,32 @@ class ClusterManager:
             self._set_db_state(mc, "terminated")
         return statuses
 
+    def poll_interval(self, mc: ManagedCluster) -> float:
+        if mc.create_task is not None and not mc.create_task.done():
+            return self.POLL_TRANSITIONAL_S
+        row = self.db.query_one("SELECT state FROM clusters WHERE id = ?",
+                                (mc.db_id,))
+        state = row["state"] if row else "terminated"
+        if state in ("starting", "stopping"):
+            return self.POLL_TRANSITIONAL_S
+        if state in ("running", "unmanaged"):
+            return self.POLL_RUNNING_S
+        return self.POLL_IDLE_S
+
     async def status_poll_loop(self):
+        due: dict[str, float] = {}
         while True:
+            now = time.monotonic()
             for mc in self.clusters.values():
+                if now < due.get(mc.key, 0.0):
+                    continue
                 try:
                     await self.poll_status(mc)
                 except Exception as e:
                     self.hub.emit("cluster.error", cluster_id=mc.db_id,
                                   cluster=mc.key, error=f"status poll: {e!r}")
-            await asyncio.sleep(self.STATUS_POLL_S)
+                due[mc.key] = time.monotonic() + self.poll_interval(mc)
+            await asyncio.sleep(5)
 
     def snapshot(self):
         out = []
