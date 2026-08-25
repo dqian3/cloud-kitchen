@@ -94,6 +94,22 @@ class Scheduler:
             if len(self._running_queues) >= self.config.max_concurrent_queues:
                 break
 
+    def next_queued(self):
+        """The job that dispatches next (priority DESC, id ASC), or None."""
+        row = self.db.query_one(
+            "SELECT id FROM jobs WHERE state = ? "
+            "ORDER BY priority DESC, id ASC LIMIT 1", (jobs.QUEUED,))
+        return jobs.get(self.db, row["id"]) if row else None
+
+    def _shares_cluster(self, a, b) -> bool:
+        ca, cb = a["spec"].get("cluster"), b["spec"].get("cluster")
+        if not ca or not cb or a["project"] != b["project"]:
+            return False
+        if ca == cb:
+            return True
+        return self.clusters is not None and self.clusters.overlaps(
+            f"{a['project']}/{ca}", f"{b['project']}/{cb}")
+
     def _after_gate(self, job) -> str:
         """'ready' | 'wait' | 'cancel' for a job's `after` dependency.
 
@@ -206,6 +222,13 @@ class Scheduler:
             if extender is not None:
                 extender.cancel()
             if lease_id is not None:
+                nxt = self.next_queued()
+                if nxt is not None and self._shares_cluster(job, nxt):
+                    # The head of the queue runs on these VMs: keep them up
+                    # for it rather than stop now and start again.
+                    self.clusters.hold(cluster_key, 600, for_job=nxt["id"])
+                    self.hub.emit("job.lease_handoff", job_id=job_id,
+                                  cluster=cluster_key, to_job=nxt["id"])
                 try:
                     self.clusters.release(cluster_key, lease_id)
                 except Exception as e:

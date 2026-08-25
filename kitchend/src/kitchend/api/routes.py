@@ -106,6 +106,32 @@ def edit_job(job_id: int, body: JobEdit, request: Request):
     return job
 
 
+class Purge(BaseModel):
+    states: list[str] = list(jobs.PURGEABLE_STATES)
+    project: str | None = None
+
+
+@router.post("/jobs/purge")
+def purge_jobs(body: Purge, request: Request):
+    """Delete finished failed/canceled/interrupted jobs (and their driver
+    logs). Jobs with a pending retry are kept."""
+    app = request.app
+    bad = [s for s in body.states if s not in jobs.PURGEABLE_STATES]
+    if bad:
+        raise HTTPException(422, f"not purgeable: {bad}")
+    project_id = None
+    if body.project:
+        try:
+            project_id = jobs.ensure_project_row(
+                app.state.db, app.state.config.project(body.project))
+        except KeyError as e:
+            raise HTTPException(404, str(e))
+    ids = jobs.purge(app.state.db, app.state.hub, body.states, project_id)
+    for jid in ids:
+        (app.state.runner.jobs_dir / f"{jid}.log").unlink(missing_ok=True)
+    return {"purged": ids}
+
+
 class Reorder(BaseModel):
     ids: list[int]
 

@@ -193,6 +193,14 @@ def cmd_create(config, args):
           f"{args.retry_delay // 60} min apart; follow with: kitchend clusters")
 
 
+def cmd_purge(config, args):
+    body = {"states": args.states}
+    if args.project:
+        body["project"] = args.project
+    out = _api(config, "/api/jobs/purge", body=body)
+    print(f"purged {len(out['purged'])} job(s): {out['purged']}")
+
+
 def cmd_clusters(config, args):
     for c in _api(config, "/api/clusters"):
         up = c.get("vms_running")
@@ -260,6 +268,11 @@ def main(argv=None):
 
     sub.add_parser("clusters", help="cluster states, VMs, burn")
 
+    p = sub.add_parser("purge", help="delete failed/canceled/interrupted jobs")
+    p.add_argument("--project")
+    p.add_argument("--states", nargs="+",
+                   default=["failed", "canceled", "interrupted"])
+
     p = sub.add_parser("create", help="provision a cluster's VMs (creates "
                        "instances; retries while a zone is out of capacity)")
     p.add_argument("cluster", help="project/name")
@@ -292,7 +305,7 @@ def main(argv=None):
         "catalog": cmd_catalog, "submit": cmd_submit, "jobs": cmd_jobs,
         "watch": cmd_watch, "log": cmd_log, "cancel": cmd_cancel,
         "resubmit": cmd_resubmit, "clusters": cmd_clusters,
-        "create": cmd_create,
+        "create": cmd_create, "purge": cmd_purge,
     }[args.cmd]
     try:
         return handler(config, args) or 0

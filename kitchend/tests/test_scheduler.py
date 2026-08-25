@@ -259,6 +259,8 @@ def test_overlapping_clusters_serialize_across_queues(env):
             pass
         def overlaps(self, a, b):
             return a != b and {a, b} == {"stub/main", "stub/n51"}
+        def hold(self, key, seconds, for_job=None):
+            pass
 
     scheduler.clusters = FakeClusters()
     from dataclasses import replace
@@ -284,5 +286,55 @@ def test_overlapping_clusters_serialize_across_queues(env):
         # VMs with a's leased one: it waited until a released.
         assert seen and set(seen) == {jobs.QUEUED}
         assert scheduler.clusters.leases == ["stub/main", "stub/n51"]
+
+    asyncio.run(main())
+
+
+def test_purge_deletes_finished_failures_only(env):
+    config, db, hub, runner, scheduler = env
+    dead = _submit(db, hub, config, "exit 1", queue="q")
+    retrying = _submit(db, hub, config, "exit 1", queue="q")
+    ok = _submit(db, hub, config, "true", queue="q")
+    db.execute("UPDATE jobs SET state = 'failed' WHERE id = ?", (dead,))
+    db.execute("UPDATE jobs SET state = 'failed', retry_at = datetime('now', '+600 seconds') "
+               "WHERE id = ?", (retrying,))
+    db.execute("UPDATE jobs SET state = 'succeeded' WHERE id = ?", (ok,))
+    assert jobs.purge(db, hub) == [dead]
+    assert jobs.get(db, dead) is None
+    assert jobs.get(db, retrying) is not None and jobs.get(db, ok) is not None
+
+
+def test_lease_handoff_holds_cluster_for_next_job(env):
+    config, db, hub, runner, scheduler = env
+
+    class FakeClusters:
+        def __init__(self):
+            self.holds = []
+        async def up(self, key, ttl, purpose=None):
+            return "lease"
+        def release(self, key, lease_id):
+            pass
+        def extend(self, *a):
+            pass
+        def overlaps(self, a, b):
+            return False
+        def hold(self, key, seconds, for_job=None):
+            self.holds.append((key, for_job))
+
+    fake = FakeClusters()
+    scheduler.clusters = fake
+    from dataclasses import replace
+    from kitchend.config import ClusterConfig
+    scheduler.config = replace(config, projects=(replace(
+        config.project("stub"),
+        clusters=(ClusterConfig(name="c", config="c.yaml"),)),))
+
+    async def main():
+        a = _submit(db, hub, config, "true", queue="c", cluster="c")
+        b = _submit(db, hub, config, "true", queue="c", cluster="c")
+        await _run_until(db, scheduler,
+                         lambda: _state(db, b) == jobs.SUCCEEDED, timeout=10)
+        # a finished with b (same cluster) at the head of the queue: held.
+        assert fake.holds[0] == ("stub/c", b)
 
     asyncio.run(main())

@@ -90,6 +90,8 @@ class ManagedCluster:
     create_max_attempts: int = 0
     create_missing: list = field(default_factory=list)   # VMs still absent
     create_next_at: float | None = None              # epoch of next attempt
+    hold_until: float = 0.0     # keep VMs up past the last lease until then
+    hold_for: int | None = None  # the job the hand-off is for
 
 
 class ClusterManager:
@@ -265,6 +267,17 @@ class ClusterManager:
             if force:
                 l.path.unlink(missing_ok=True)
         await self._shutdown(mc, vms, reason="user")
+
+    def hold(self, key, seconds, for_job=None):
+        """Keep the cluster up past its last lease for `seconds`: the next
+        job in the queue uses these VMs, so hand them over instead of
+        stopping and restarting them. The hold ends early when a new lease
+        arrives; a job that never comes lets it lapse."""
+        mc = self._get(key)
+        mc.hold_until = time.time() + seconds
+        mc.hold_for = for_job
+        self.hub.emit("cluster.hold", cluster_id=mc.db_id, cluster=mc.key,
+                      seconds=seconds, for_job=for_job)
 
     def extend(self, key, lease_id, ttl_minutes):
         mc = self._get(key)
@@ -467,6 +480,8 @@ class ClusterManager:
                 "vms": mc.last_status or None,
                 "leases": leases,
                 "active": mc.task is not None and not mc.task.done(),
+                "hold_for": (mc.hold_for if time.time() < mc.hold_until
+                             and not leases else None),
                 "burn_usd_per_hr": burn,
                 "est_usd_per_hr": est_hourly,   # whole-cluster rate if up
                 "session_cost_usd": self._session_cost(mc),
@@ -500,6 +515,11 @@ class ClusterManager:
             while True:
                 await asyncio.sleep(self.TICK_S)
                 live = mc.state.live_leases()
+                if live:
+                    mc.hold_until = 0.0
+                    mc.hold_for = None
+                elif time.time() < mc.hold_until:
+                    continue    # handing over to the next job
                 if not live:
                     self.hub.emit("cluster.lease", cluster_id=mc.db_id,
                                   cluster=mc.key, action="all_expired")

@@ -321,3 +321,21 @@ def test_registry_picks_docker_backend_from_yaml(tmp_path):
     assert mc.remote.compose_file == str(compose)
     assert mgr.estimate_hourly("stub/docker") is None     # free
     db.close()
+
+
+def test_hold_keeps_cluster_up_after_last_lease(manager, monkeypatch):
+    mgr, mc, db = manager
+    monkeypatch.setattr(ClusterManager, "TICK_S", 0.05)
+
+    async def main():
+        lease_id = await mgr.up("stub/main", ttl_minutes=60)
+        mgr.hold("stub/main", 0.5, for_job=42)
+        mgr.release("stub/main", lease_id)
+        await asyncio.sleep(0.2)
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["state"] == "running" and snap["hold_for"] == 42
+        await asyncio.sleep(0.6)      # the hold lapses with no new lease
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["state"] == "terminated"
+
+    asyncio.run(main())

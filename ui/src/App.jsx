@@ -44,6 +44,11 @@ function ClusterCard({ c, onAction }) {
           {c.session_cost_usd != null &&
             <span className="muted"> · total ${c.session_cost_usd}</span>}
         </div>
+        {c.hold_for != null && (
+          <div className="muted" title="kept up past its last lease for the next job on this cluster">
+            held for job #{c.hold_for}
+          </div>
+        )}
         {c.leases.length > 0 && (
           <ul className="leases">
             {c.leases.map(l => (
@@ -484,7 +489,7 @@ function ProgressPanel({ p }) {
   )
 }
 
-function JobRow({ job, onChanged, reorder, onMove }) {
+function JobRow({ job, onChanged, reorder, onMove, inherits }) {
   const [open, setOpen] = useState(false)
   const [log, setLog] = useState('')
   const timer = useRef(null)
@@ -528,6 +533,9 @@ function JobRow({ job, onChanged, reorder, onMove }) {
           {queued && spec.after &&
             <span className="muted" title="waits for that job's retry chain">
               {' '}after #{spec.after}</span>}
+          {queued && inherits &&
+            <span className="muted" title="same cluster as the job ahead of it: the VMs are handed over, not cycled">
+              {' '}↳ inherits lease</span>}
           {job.state === 'running' && job.progress?.points &&
             <span className="muted"> {job.progress.points.done}
               {(job.progress.totals_final?.points_total ?? job.progress.est_points)
@@ -768,6 +776,15 @@ function RunsSection({ projects, entries, display, onChanged }) {
           <button key={p.name} className="link" disabled={scanBusy}
                   title={`index existing run dirs under ${p.name}'s runs roots`}
                   onClick={() => scan(p.name)}>scan {p.name}</button>
+        ))}
+        {projects.map(p => (
+          <button key={`purge-${p.name}`} className="link"
+                  title="delete failed, canceled, and interrupted jobs (ledger runs are kept)"
+                  onClick={async () => {
+                    if (!confirm(`Delete ${p.name}'s failed/canceled/interrupted jobs?`)) return
+                    try { const r = await api.purgeJobs(p.name); onChanged(); alert(`purged ${r.purged.length}`) }
+                    catch (e) { alert(e.message || e) }
+                  }}>purge failed</button>
         ))}
       </h2>
       {!entries.length
@@ -1032,6 +1049,15 @@ export default function App() {
 
 function JobTable({ jobs, onChanged, empty, reorder, onMove }) {
   if (!jobs.length) return <p className="muted">{empty}</p>
+  // A queued job inherits the lease when the job right ahead of it in
+  // dispatch order runs on the same cluster.
+  const inherits = new Set()
+  for (let i = 1; i < jobs.length; i++) {
+    const prev = jobs[i - 1], cur = jobs[i]
+    if (cur.state === 'queued' && cur.spec.cluster &&
+        cur.spec.cluster === prev.spec.cluster &&
+        ['running', 'starting', 'queued'].includes(prev.state)) inherits.add(cur.id)
+  }
   return (
     <table>
       <thead><tr>
@@ -1040,7 +1066,8 @@ function JobTable({ jobs, onChanged, empty, reorder, onMove }) {
       </tr></thead>
       <tbody>
         {jobs.map(j => <JobRow key={j.id} job={j} onChanged={onChanged}
-                               reorder={reorder} onMove={onMove} />)}
+                               reorder={reorder} onMove={onMove}
+                               inherits={inherits.has(j.id)} />)}
       </tbody>
     </table>
   )

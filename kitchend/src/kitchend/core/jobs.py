@@ -152,6 +152,33 @@ def update_queued(db, hub, job_id, updates: dict):
     return get(db, job_id)
 
 
+PURGEABLE_STATES = (FAILED, CANCELED, INTERRUPTED)
+
+
+def purge(db, hub, states=PURGEABLE_STATES, project_id=None) -> list[int]:
+    """Delete finished jobs in `states` (never one with a retry pending).
+    Ledger runs they produced stay; the ledger marks them as having no
+    job record."""
+    sql = (f"SELECT id FROM jobs WHERE state IN ({','.join('?' * len(states))}) "
+           "AND retry_at IS NULL")
+    params = list(states)
+    if project_id is not None:
+        sql += " AND project_id = ?"
+        params.append(project_id)
+    ids = [r["id"] for r in db.query(sql, params)]
+    for job_id in ids:
+        # Detach what points at the row: the audit trail and ledger runs
+        # keep their history, children lose their parent link.
+        db.execute("UPDATE events SET job_id = NULL WHERE job_id = ?", (job_id,))
+        db.execute("UPDATE runs SET job_id = NULL WHERE job_id = ?", (job_id,))
+        db.execute("UPDATE jobs SET parent_job_id = NULL WHERE parent_job_id = ?",
+                   (job_id,))
+        db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    if ids:
+        hub.emit("jobs.purged", ids=ids, states=list(states))
+    return ids
+
+
 def reorder(db, hub, ids: list[int]) -> None:
     """Make the queued jobs in `ids` dispatch in that order: priorities are
     assigned N..1 down the list (dispatch is priority DESC, id ASC). Jobs
