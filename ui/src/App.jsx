@@ -763,9 +763,11 @@ function RunEntry({ entry, display, onChanged }) {
                     const what = [run && `run r${run.id}`, job && `job #${job.id}`]
                       .filter(Boolean).join(' and ')
                     // A failed run is only worth keeping to rerun it, so it
-                    // goes on one click; measurements get a confirm.
-                    const failed = !job || ['failed', 'canceled', 'interrupted']
-                      .includes(job.state)
+                    // goes on one click; anything that produced measurements
+                    // confirms — including an imported run, which has no job
+                    // row but is somebody's data.
+                    const failed = ['failed', 'canceled', 'interrupted']
+                      .includes(job ? job.state : run.status)
                     if (!failed && !await ask(
                           `Delete ${what} and its data in ${job?.run_dir || run?.run_dir}? `
                           + 'The measurements are not recoverable.', true)) return
