@@ -607,6 +607,7 @@ function RunEntry({ entry, display, onChanged }) {
   const [detail, setDetail] = useState(null)
   const [log, setLog] = useState(null)
   const [note, setNote] = useState('')
+  const [sortBy, setSortBy] = useState('rate')   // 'rate' | 'time'
 
   useEffect(() => {
     if (!open) return
@@ -628,6 +629,16 @@ function RunEntry({ entry, display, onChanged }) {
   const cols = detail
     ? metricCols.filter(([k]) => detail.points.some(p => k in p.metrics))
     : []
+  // Points arrive in the order they ran; the natural reading order is by
+  // dims, then numeric rate, then trial.
+  const points = !detail ? [] : sortBy === 'time' ? detail.points
+    : [...detail.points].sort((a, b) => {
+        const da = JSON.stringify(a.dims), db = JSON.stringify(b.dims)
+        if (da !== db) return da < db ? -1 : 1
+        const ra = a.rate ?? -Infinity, rb = b.rate ?? -Infinity
+        if (ra !== rb) return ra - rb
+        return (a.trial ?? 0) - (b.trial ?? 0)
+      })
 
   const state = job ? job.state : run.status
   const chipColor = job
@@ -675,6 +686,13 @@ function RunEntry({ entry, display, onChanged }) {
           )}
           <button className="link" onClick={() => setOpen(!open)}>
             {open ? 'hide' : 'details'}</button>
+          {run && (
+            <button className="link" title="remove this run from the ledger (files on disk stay; a scan re-indexes them)"
+                    onClick={() => {
+                      if (confirm(`Delete run r${run.id} (${run.experiment}) from the ledger?`))
+                        act(() => api.deleteRun(run.id).then(() => setOpen(false)))
+                    }}>delete</button>
+          )}
         </td>
       </tr>
       {open && (
@@ -720,12 +738,17 @@ function RunEntry({ entry, display, onChanged }) {
                 ? <p className="muted">no points recorded</p>
                 : <table className="points">
                     <thead><tr>
-                      <th>dims</th><th>rate</th><th>trial</th>
+                      <th>dims</th>
+                      <th>rate
+                        <button className="link" title="toggle point order: by rate or by when they ran"
+                                onClick={e => { e.stopPropagation(); setSortBy(sortBy === 'rate' ? 'time' : 'rate') }}>
+                          {sortBy === 'rate' ? '↑' : '⏱'}</button>
+                      </th><th>trial</th>
                       {cols.map(([k, label]) => <th key={k}>{label}</th>)}
                       <th></th>
                     </tr></thead>
                     <tbody>
-                      {detail.points.map(p => (
+                      {points.map(p => (
                         <tr key={p.id}>
                           <td className="mono">{Object.entries(p.dims)
                             .map(([k, v]) => `${k}=${v}`).join(' ') || '—'}</td>

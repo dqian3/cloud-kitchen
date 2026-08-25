@@ -373,6 +373,16 @@ class NoteAdd(BaseModel):
     text: str
 
 
+@router.delete("/runs/{run_id}")
+def delete_run(run_id: int, request: Request):
+    """Remove a run from the ledger (points, tags, notes). Files on disk
+    stay; a scan re-indexes them."""
+    if not ledger.delete_run(request.app.state.db, run_id):
+        raise HTTPException(404, f"no run {run_id}")
+    request.app.state.hub.emit("run.deleted", run_id=run_id)
+    return {"ok": True}
+
+
 @router.post("/runs/{run_id}/notes")
 def add_note(run_id: int, body: NoteAdd, request: Request):
     if ledger.get_run(request.app.state.db, run_id) is None:

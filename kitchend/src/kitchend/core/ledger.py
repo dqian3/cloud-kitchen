@@ -209,6 +209,17 @@ def list_runs(db, project=None, experiment=None, tag=None, limit=100):
     return out
 
 
+def delete_run(db, run_id) -> bool:
+    """Drop a run from the ledger: its points, tags, and notes. The run
+    directory on disk is untouched (a scan would index it again)."""
+    if db.query_one("SELECT id FROM runs WHERE id = ?", (run_id,)) is None:
+        return False
+    for table in ("run_points", "run_tags", "notes"):
+        db.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
+    db.execute("DELETE FROM runs WHERE id = ?", (run_id,))
+    return True
+
+
 def get_run(db, run_id):
     row = db.query_one(
         "SELECT r.*, p.name AS project FROM runs r "

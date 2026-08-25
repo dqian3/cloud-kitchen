@@ -32,6 +32,7 @@ export const api = {
   runs: (project) =>
     req(`/api/runs?limit=100${project ? `&project=${encodeURIComponent(project)}` : ''}`),
   run: (id) => req(`/api/runs/${id}`),
+  deleteRun: (id) => req(`/api/runs/${id}`, { method: 'DELETE' }),
   addNote: (id, text) =>
     req(`/api/runs/${id}/notes`, { method: 'POST', body: JSON.stringify({ text }) }),
   addTag: (id, name) =>

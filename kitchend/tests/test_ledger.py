@@ -141,3 +141,21 @@ def test_tags_notes_and_filters(env, tmp_path):
     # dir_exists tracks the filesystem: these sweep dirs were never created,
     # so listing flips the ingest-time default off.
     assert all(r["dir_exists"] == 0 for r in ledger.list_runs(db))
+
+def test_delete_run_removes_points_tags_notes(tmp_path):
+    from kitchend.core import ledger
+    from kitchend.core.db import Db
+    db = Db(tmp_path / "db.sqlite3")
+    pid = db.insert("INSERT INTO projects (name, repo_path) VALUES ('p', '/x')")
+    rid = db.insert(
+        "INSERT INTO runs (project_id, experiment, run_dir, status, dir_exists) "
+        "VALUES (?, 'e', '/x/run', 'ok', 0)", (pid,))
+    db.insert("INSERT INTO run_points (run_id, dims_json, rate, trial, metrics_json) "
+              "VALUES (?, '{}', 1.0, 0, '{}')", (rid,))
+    db.insert("INSERT INTO notes (run_id, text) VALUES (?, 'n')", (rid,))
+    assert ledger.delete_run(db, rid) is True
+    assert ledger.get_run(db, rid) is None
+    assert db.query("SELECT id FROM run_points WHERE run_id = ?", (rid,)) == []
+    assert db.query("SELECT id FROM notes WHERE run_id = ?", (rid,)) == []
+    assert ledger.delete_run(db, rid) is False
+    db.close()
