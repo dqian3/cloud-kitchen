@@ -217,6 +217,30 @@ def list_runs(db, project=None, experiment=None, tag=None, limit=100):
     return out
 
 
+def deletable_dir(project_cfg, run_dir: str):
+    """The run's directory if it is safe to delete: it must sit strictly
+    inside one of the project's configured runs roots. Anything else (a
+    path outside them, a root itself, a symlink out) returns None — the
+    ledger must never be able to remove arbitrary directories."""
+    if not run_dir:
+        return None
+    path = Path(run_dir).expanduser()
+    try:
+        path = path.resolve(strict=True)
+    except OSError:
+        return None
+    if not path.is_dir():
+        return None
+    for rel in (project_cfg.runs_roots or ()):
+        try:
+            root = (project_cfg.repo_path / rel).resolve(strict=True)
+        except OSError:
+            continue
+        if path != root and root in path.parents:
+            return path
+    return None
+
+
 def delete_run(db, run_id) -> bool:
     """Drop a run from the ledger: its points, tags, and notes. The run
     directory on disk is untouched (a scan would index it again)."""

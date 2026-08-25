@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -166,10 +167,21 @@ async def cancel_job(job_id: int, request: Request):
 
 
 @router.delete("/jobs/{job_id}")
-def delete_job(job_id: int, request: Request):
-    """Delete a finished job and its driver log. Ledger runs it produced
-    are kept (they lose the job link)."""
+def delete_job(job_id: int, request: Request, delete_files: bool = False):
+    """Delete a finished job and its driver log. With delete_files, its run
+    directory (and any ledger runs inside it) go too."""
     app = request.app
+    job = jobs.get(app.state.db, job_id)
+    if job is None:
+        raise HTTPException(404, f"no job {job_id}")
+    removed = None
+    if delete_files and job.get("run_dir"):
+        removed = _remove_run_dir(app, job["project"], job["run_dir"])
+        for r in ledger.list_runs(app.state.db, project=job["project"],
+                                  limit=1000):
+            if r.get("job_id") == job_id or \
+                    str(r["run_dir"]).startswith(str(job["run_dir"])):
+                ledger.delete_run(app.state.db, r["id"])
     try:
         jobs.delete(app.state.db, app.state.hub, job_id)
     except KeyError:
@@ -177,7 +189,7 @@ def delete_job(job_id: int, request: Request):
     except ValueError as e:
         raise HTTPException(409, str(e))
     (app.state.runner.jobs_dir / f"{job_id}.log").unlink(missing_ok=True)
-    return {"ok": True}
+    return {"ok": True, "removed_dir": removed}
 
 
 class Resubmit(BaseModel):
@@ -388,14 +400,44 @@ class NoteAdd(BaseModel):
     text: str
 
 
+def _remove_run_dir(app, project_name, run_dir) -> str | None:
+    """Delete a run directory if it is inside the project's runs roots.
+    Returns the path removed, or None when there was nothing safe to
+    remove. Raises HTTPException when the path exists but is out of
+    bounds — silently keeping data the caller asked to delete would be
+    worse than refusing."""
+    import shutil
+    if not run_dir:
+        return None
+    try:
+        project_cfg = app.state.config.project(project_name)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    path = ledger.deletable_dir(project_cfg, run_dir)
+    if path is None:
+        if Path(run_dir).exists():
+            raise HTTPException(
+                409, f"{run_dir} is not inside {project_name}'s runs roots "
+                     f"{list(project_cfg.runs_roots)}; delete it by hand")
+        return None
+    shutil.rmtree(path)
+    return str(path)
+
+
 @router.delete("/runs/{run_id}")
-def delete_run(run_id: int, request: Request):
-    """Remove a run from the ledger (points, tags, notes). Files on disk
-    stay; a scan re-indexes them."""
-    if not ledger.delete_run(request.app.state.db, run_id):
+def delete_run(run_id: int, request: Request, delete_files: bool = False):
+    """Remove a run from the ledger (points, tags, notes). With
+    delete_files, its directory under the project's runs roots goes too —
+    that is the measurement data, and it is not recoverable."""
+    app = request.app
+    run = ledger.get_run(app.state.db, run_id)
+    if run is None:
         raise HTTPException(404, f"no run {run_id}")
-    request.app.state.hub.emit("run.deleted", run_id=run_id)
-    return {"ok": True}
+    removed = (_remove_run_dir(app, run["project"], run["run_dir"])
+               if delete_files else None)
+    ledger.delete_run(app.state.db, run_id)
+    app.state.hub.emit("run.deleted", run_id=run_id, removed_dir=removed)
+    return {"ok": True, "removed_dir": removed}
 
 
 @router.post("/runs/{run_id}/notes")

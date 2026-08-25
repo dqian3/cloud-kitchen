@@ -159,3 +159,23 @@ def test_delete_run_removes_points_tags_notes(tmp_path):
     assert db.query("SELECT id FROM notes WHERE run_id = ?", (rid,)) == []
     assert ledger.delete_run(db, rid) is False
     db.close()
+
+
+def test_deletable_dir_only_inside_runs_roots(tmp_path):
+    from kitchend.config import ProjectConfig
+    from kitchend.core import ledger
+
+    repo = tmp_path / "repo"
+    (repo / "data" / "runs" / "run1").mkdir(parents=True)
+    (repo / "elsewhere").mkdir()
+    cfg = ProjectConfig(name="p", repo_path=repo, runs_roots=("data/runs",))
+
+    assert ledger.deletable_dir(cfg, str(repo / "data" / "runs" / "run1")) \
+        == (repo / "data" / "runs" / "run1").resolve()
+    # the root itself, an outside dir, a missing path, and a file: refused
+    assert ledger.deletable_dir(cfg, str(repo / "data" / "runs")) is None
+    assert ledger.deletable_dir(cfg, str(repo / "elsewhere")) is None
+    assert ledger.deletable_dir(cfg, str(tmp_path / "nope")) is None
+    f = repo / "data" / "runs" / "f.txt"; f.write_text("x")
+    assert ledger.deletable_dir(cfg, str(f)) is None
+    assert ledger.deletable_dir(cfg, "") is None

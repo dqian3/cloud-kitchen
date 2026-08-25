@@ -32,8 +32,10 @@ export const api = {
   runs: (project) =>
     req(`/api/runs?limit=100${project ? `&project=${encodeURIComponent(project)}` : ''}`),
   run: (id) => req(`/api/runs/${id}`),
-  deleteJob: (id) => req(`/api/jobs/${id}`, { method: 'DELETE' }),
-  deleteRun: (id) => req(`/api/runs/${id}`, { method: 'DELETE' }),
+  deleteJob: (id, files = false) =>
+    req(`/api/jobs/${id}?delete_files=${files}`, { method: 'DELETE' }),
+  deleteRun: (id, files = false) =>
+    req(`/api/runs/${id}?delete_files=${files}`, { method: 'DELETE' }),
   addNote: (id, text) =>
     req(`/api/runs/${id}/notes`, { method: 'POST', body: JSON.stringify({ text }) }),
   addTag: (id, name) =>

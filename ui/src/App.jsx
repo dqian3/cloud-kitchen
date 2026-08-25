@@ -27,8 +27,11 @@ function UIProvider({ children }) {
     setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)),
                kind === 'error' ? 8000 : 4000)
   }, [])
-  const ask = useCallback((message, danger = false) =>
-    new Promise(resolve => setDialog({ kind: 'confirm', message, danger, resolve })), [])
+  // `check` adds an opt-in checkbox; ask resolves false when canceled,
+  // otherwise true or {checked} when a checkbox was offered.
+  const ask = useCallback((message, danger = false, check = null) =>
+    new Promise(resolve => setDialog({
+      kind: 'confirm', message, danger, check, checked: false, resolve })), [])
   const askText = useCallback((message, value = '') =>
     new Promise(resolve => setDialog({ kind: 'prompt', message, value, resolve })), [])
 
@@ -52,6 +55,13 @@ function UIProvider({ children }) {
         <div className="modal-back" onClick={() => close(dialog.kind === 'prompt' ? null : false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-msg">{dialog.message}</div>
+            {dialog.check && (
+              <label className="modal-check">
+                <input type="checkbox"
+                       onChange={e => { dialog.checked = e.target.checked }} />
+                {dialog.check}
+              </label>
+            )}
             {dialog.kind === 'prompt' && (
               <input autoFocus defaultValue={dialog.value}
                      onChange={e => { dialog.value = e.target.value }}
@@ -64,7 +74,8 @@ function UIProvider({ children }) {
               <button className="link" onClick={() => close(dialog.kind === 'prompt' ? null : false)}>
                 cancel</button>
               <button className={dialog.danger ? 'danger' : ''}
-                      onClick={() => close(dialog.kind === 'prompt' ? dialog.value : true)}>
+                      onClick={() => close(dialog.kind === 'prompt' ? dialog.value
+                        : dialog.check ? { checked: dialog.checked } : true)}>
                 {dialog.danger ? 'delete' : 'ok'}</button>
             </div>
           </div>
@@ -762,14 +773,19 @@ function RunEntry({ entry, display, onChanged }) {
                   onClick={async () => {
                     const what = [run && `run r${run.id}`, job && `job #${job.id}`]
                       .filter(Boolean).join(' and ')
-                    if (!await ask(`Delete ${what}? Files on disk stay; a scan `
-                                   + 're-indexes them.', true)) return
+                    const dir = job?.run_dir || run?.run_dir
+                    const res = await ask(
+                      `Delete ${what}? Without the box below only the records go — `
+                      + 'the data stays on disk and a scan re-indexes it.', true,
+                      dir ? `also delete the data in ${dir} (permanent)` : null)
+                    if (!res) return
+                    const files = res.checked === true
                     setOpen(false)
                     await act(async () => {
-                      if (run) await api.deleteRun(run.id)
-                      if (job) await api.deleteJob(job.id)
+                      if (run) await api.deleteRun(run.id, files)
+                      if (job) await api.deleteJob(job.id, files)
                     }, false)
-                    notify(`deleted ${what}`)
+                    notify(`deleted ${what}${files ? ' and its data' : ''}`)
                   }}>delete</button>
         </td>
       </tr>

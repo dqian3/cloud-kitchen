@@ -142,3 +142,5 @@ h2 button.link { margin-left: 0.6rem; font-size: 0.75rem; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem;
   align-items: center; margin-top: 0.8rem; }
 button.danger { background: var(--red); }
+.modal-check { display: flex; gap: 0.4rem; align-items: center;
+  margin-top: 0.5rem; font-size: 0.85rem; color: var(--red); }
