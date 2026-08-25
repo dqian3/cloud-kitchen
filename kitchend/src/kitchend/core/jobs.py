@@ -11,8 +11,8 @@ A job spec (stored verbatim as spec_json):
       "run_dir":     null,                     # pinned on retry/resume
       "resume":      false,
       "priority":    0,
-      "max_retries": 2,
-      "retry_delay_secs": 600
+      "max_retries": 20,
+      "retry_delay_secs": 120
     }
 
 Exit-code contract (from run_experiment.py): 0 clean → succeeded; 2 degraded
@@ -22,6 +22,12 @@ bounded resume-retries.
 
 import json
 from pathlib import Path
+
+# Retries are cheap next to a lost measurement: a failed run resumes into
+# its directory, and a cluster that would not come up (a zone stockout) is
+# probed again after a short cooldown rather than given up on.
+DEFAULT_MAX_RETRIES = 20
+DEFAULT_RETRY_DELAY_SECS = 120
 
 QUEUED = "queued"
 STARTING = "starting"       # dispatched; its cluster is coming up
@@ -53,7 +59,8 @@ def submit(db, project_id, spec: dict) -> int:
         "INSERT INTO jobs (project_id, spec_json, run_dir, state, priority, retries_left) "
         "VALUES (?, ?, ?, ?, ?, ?)",
         (project_id, json.dumps(spec), spec.get("run_dir"), QUEUED,
-         int(spec.get("priority", 0)), int(spec.get("max_retries", 0))),
+         int(spec.get("priority", 0)),
+         int(spec.get("max_retries", DEFAULT_MAX_RETRIES))),
     )
 
 
@@ -136,11 +143,15 @@ def update_queued(db, hub, job_id, updates: dict):
     spec = dict(job["spec"])
     priority = updates.pop("priority", None)
     spec.update(updates)
-    params = [json.dumps(spec), spec.get("run_dir"),
-              int(spec.get("max_retries", 0))]
+    # A job that was dispatched once (its cluster would not come up) already
+    # has a daemon-assigned dir on the row, not in the spec: an edit keeps it.
+    params = [json.dumps(spec), spec.get("run_dir") or job.get("run_dir"),
+              int(spec.get("max_retries", DEFAULT_MAX_RETRIES))]
     sets = "spec_json = ?, run_dir = ?, retries_left = ?"
     if priority is not None:
-        sets += ", priority = ?"
+        # Re-ranking a job that was waiting on a cluster cancels that wait:
+        # whoever is at the front now is the one that retries.
+        sets += ", priority = ?, retry_at = NULL"
         params.append(int(priority))
         spec["priority"] = int(priority)
     params.append(job_id)
@@ -211,6 +222,12 @@ def reorder(db, hub, ids: list[int]) -> None:
     for i, job_id in enumerate(ids):
         db.execute("UPDATE jobs SET priority = ? WHERE id = ? AND state = 'queued'",
                    (n - i, job_id))
+    # Only the job at the front waits on a cluster. Anything moved behind it
+    # stops retrying: its pending attempt is dropped and it just sits in the
+    # queue until its turn comes.
+    db.executemany("UPDATE jobs SET retry_at = NULL "
+                   "WHERE id = ? AND state = 'queued'",
+                   [(job_id,) for job_id in ids[1:]])
     hub.emit("job.reordered", ids=list(ids))
 
 

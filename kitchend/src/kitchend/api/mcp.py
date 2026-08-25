@@ -110,7 +110,7 @@ def build_mcp(state) -> MCPServer:
                    sweep: dict | None = None, queue: str | None = None,
                    cluster: str | None = None, cluster_ttl_minutes: int = 60,
                    after: int | None = None,
-                   priority: int = 0, max_retries: int = 0,
+                   priority: int = 0, max_retries: int = 20,
                    est_hours: float | None = None,
                    confirm_cost_usd: float | None = None) -> dict:
         """Queue a job. Give catalog `experiments` OR a one-off `sweep`

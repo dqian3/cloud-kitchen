@@ -198,7 +198,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
   const [freeText, setFreeText] = useState('')
   const [flags, setFlags] = useState('')
   const [priority, setPriority] = useState(0)
-  const [retries, setRetries] = useState(2)
+  const [retries, setRetries] = useState(20)
   const [after, setAfter] = useState('')          // chain: wait for job #
   const [managedCluster, setManagedCluster] = useState('')  // daemon lease
   const [err, setErr] = useState(null)
@@ -580,6 +580,12 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
 
   const queued = job.state === 'queued'
   const retrying = job.state === 'failed' && job.retry_at
+  // Queued with a retry_at: its cluster would not come up, so it never ran.
+  const waitingCluster = job.state === 'queued' && job.retry_at
+  // Its own delay can lapse while the cluster is still held down — by its
+  // cooldown, or by one on a cluster sharing the same VMs.
+  const dueNow = waitingCluster &&
+    Date.parse(job.retry_at.replace(' ', 'T') + 'Z') <= Date.now()
   const spec = job.spec
 
   return (
@@ -591,13 +597,17 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
         <td>{spec.queue || job.project}
           {spec.cluster && <span title={`daemon-managed lease on ${spec.cluster}`}> ⚙</span>}
         </td>
-        <td><Chip text={retrying ? 'retrying' : job.state}
-                  color={retrying ? 'orange' : STATE_COLORS[job.state]} />
+        <td><Chip text={retrying ? 'retrying' : waitingCluster ? 'waiting' : job.state}
+                  color={retrying || waitingCluster ? 'orange' : STATE_COLORS[job.state]} />
           {job.state === 'starting' &&
             <span className="muted"> {spec.cluster ? `${spec.cluster} coming up` : 'launching'}</span>}
           {retrying &&
             <span className="muted" title={`retry at ${job.retry_at} UTC`}>
               {' '}in {fmtUntil(job.retry_at)} · {job.retries_left} left</span>}
+          {waitingCluster &&
+            <span className="muted" title={`last attempt failed; due ${job.retry_at} UTC`}>
+              {' '}{spec.cluster} unavailable · {dueNow
+                ? 'retrying when it frees up' : `retrying in ${fmtUntil(job.retry_at)}`}</span>}
           {queued && spec.after &&
             <span className="muted" title="waits for that job's retry chain">
               {' '}after #{spec.after}</span>}

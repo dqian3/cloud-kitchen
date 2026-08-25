@@ -243,7 +243,7 @@ def main(argv=None):
     p.add_argument("--cluster", help="daemon-managed lease on this cluster")
     p.add_argument("--ttl", type=int, default=60, help="lease TTL minutes")
     p.add_argument("--priority", type=int, default=0)
-    p.add_argument("--retries", type=int, default=0)
+    p.add_argument("--retries", type=int, default=20)
     p.add_argument("--after", type=int, default=None,
                    help="run after this job's retry chain succeeds")
     p.add_argument("--flags", nargs="+", default=None,

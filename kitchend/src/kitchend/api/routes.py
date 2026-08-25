@@ -38,8 +38,8 @@ class JobSubmit(BaseModel):
     run_dir: str | None = None
     resume: bool = False
     priority: int = 0
-    max_retries: int = 0
-    retry_delay_secs: int = 600
+    max_retries: int = jobs.DEFAULT_MAX_RETRIES
+    retry_delay_secs: int = jobs.DEFAULT_RETRY_DELAY_SECS
 
 
 @router.post("/jobs")
