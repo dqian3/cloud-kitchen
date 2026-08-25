@@ -165,6 +165,21 @@ async def cancel_job(job_id: int, request: Request):
     return {"id": job_id, "state": state}
 
 
+@router.delete("/jobs/{job_id}")
+def delete_job(job_id: int, request: Request):
+    """Delete a finished job and its driver log. Ledger runs it produced
+    are kept (they lose the job link)."""
+    app = request.app
+    try:
+        jobs.delete(app.state.db, app.state.hub, job_id)
+    except KeyError:
+        raise HTTPException(404, f"no job {job_id}")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    (app.state.runner.jobs_dir / f"{job_id}.log").unlink(missing_ok=True)
+    return {"ok": True}
+
+
 class Resubmit(BaseModel):
     resume: bool = True
 

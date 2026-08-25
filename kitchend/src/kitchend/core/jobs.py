@@ -179,6 +179,24 @@ def purge(db, hub, states=PURGEABLE_STATES, project_id=None) -> list[int]:
     return ids
 
 
+def delete(db, hub, job_id: int) -> None:
+    """Delete one finished job and detach what points at it. Active jobs
+    (and ones with a retry pending) must be canceled first."""
+    job = get(db, job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if job["state"] in ACTIVE_STATES or job["retry_at"]:
+        raise ValueError(f"job {job_id} is {job['state']}; cancel it first")
+    db.execute("UPDATE events SET job_id = NULL WHERE job_id = ?", (job_id,))
+    db.execute("UPDATE runs SET job_id = NULL WHERE job_id = ?", (job_id,))
+    db.execute("UPDATE jobs SET parent_job_id = NULL WHERE parent_job_id = ?",
+               (job_id,))
+    db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    # The id goes in the payload, not the job_id column: that column is a
+    # foreign key into the row we just deleted.
+    hub.emit("job.deleted", deleted_job_id=job_id)
+
+
 def reorder(db, hub, ids: list[int]) -> None:
     """Make the queued jobs in `ids` dispatch in that order: priorities are
     assigned N..1 down the list (dispatch is priority DESC, id ASC). Jobs

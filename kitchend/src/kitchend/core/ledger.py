@@ -149,6 +149,13 @@ def _index_sweep_dir(db, project_id, sweep_dir: Path) -> bool | None:
     status = "failed" if failed else ("degraded" if dead else "ok")
 
     run_dir = str(sweep_dir)
+    # A scanned dir may be a job's output: the daemon assigns <run_dir> and
+    # the engine writes <run_dir>/<experiment>/, so the job owning it is the
+    # one whose run_dir is this dir or its parent.
+    job_row = db.query_one(
+        "SELECT id FROM jobs WHERE run_dir IN (?, ?) ORDER BY id DESC LIMIT 1",
+        (run_dir, str(sweep_dir.parent)))
+    job_id = job_row["id"] if job_row else None
     row = db.query_one("SELECT id FROM runs WHERE run_dir = ?", (run_dir,))
     if row:
         run_id = row["id"]
@@ -156,15 +163,16 @@ def _index_sweep_dir(db, project_id, sweep_dir: Path) -> bool | None:
             "UPDATE runs SET status = ?, n_points = ?, started_at = "
             "COALESCE(started_at, ?), git_commit = COALESCE(git_commit, ?), "
             "argv = COALESCE(argv, ?), dir_exists = 1, "
+            "job_id = COALESCE(job_id, ?), "
             "indexed_at = datetime('now') WHERE id = ?",
-            (status, len(entries), started_at, git_commit, argv, run_id))
+            (status, len(entries), started_at, git_commit, argv, job_id, run_id))
     else:
         run_id = db.insert(
             "INSERT INTO runs (project_id, run_dir, experiment, started_at, "
-            "git_commit, argv, n_points, status, dir_exists, indexed_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))",
+            "git_commit, argv, n_points, status, job_id, dir_exists, indexed_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))",
             (project_id, run_dir, sweep_dir.name, started_at, git_commit,
-             argv, len(entries), status))
+             argv, len(entries), status, job_id))
     for entry in entries:
         if not isinstance(entry, dict):
             continue

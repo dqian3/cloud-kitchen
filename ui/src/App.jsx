@@ -757,17 +757,20 @@ function RunEntry({ entry, display, onChanged }) {
           )}
           <button className="link" onClick={() => setOpen(!open)}>
             {open ? 'hide' : 'details'}</button>
-          {run && (
-            <button className="link" title="remove this run from the ledger (files on disk stay; a scan re-indexes them)"
-                    onClick={async () => {
-                      if (await ask(`Delete run r${run.id} (${run.experiment}) from the ledger? `
-                                    + 'Files on disk stay; a scan re-indexes them.', true)) {
-                        setOpen(false)
-                        await act(() => api.deleteRun(run.id), false)
-                        notify(`deleted run r${run.id}`)
-                      }
-                    }}>delete</button>
-          )}
+          <button className="link"
+                  title="remove this entry: its ledger run and/or job record (files on disk stay; a scan re-indexes them)"
+                  onClick={async () => {
+                    const what = [run && `run r${run.id}`, job && `job #${job.id}`]
+                      .filter(Boolean).join(' and ')
+                    if (!await ask(`Delete ${what}? Files on disk stay; a scan `
+                                   + 're-indexes them.', true)) return
+                    setOpen(false)
+                    await act(async () => {
+                      if (run) await api.deleteRun(run.id)
+                      if (job) await api.deleteJob(job.id)
+                    }, false)
+                    notify(`deleted ${what}`)
+                  }}>delete</button>
         </td>
       </tr>
       {open && (

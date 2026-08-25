@@ -76,3 +76,23 @@ def test_edit_queued_job(tmp_path):
     with pytest.raises(ValueError, match="not queued"):
         jobs.update_queued(db, hub, job_id, {"priority": 9})
     db.close()
+
+
+def test_delete_job_requires_finished(tmp_path):
+    from kitchend.config import ProjectConfig
+    from kitchend.core import jobs
+    from kitchend.core.db import Db
+    from kitchend.core.hub import EventHub
+
+    db = Db(tmp_path / "db.sqlite3")
+    hub = EventHub(db)
+    pid = jobs.ensure_project_row(db, ProjectConfig(name="p", repo_path=tmp_path))
+    jid = jobs.submit(db, pid, {"project": "p"})
+    with pytest.raises(ValueError, match="cancel it first"):
+        jobs.delete(db, hub, jid)          # still queued
+    db.execute("UPDATE jobs SET state = 'succeeded' WHERE id = ?", (jid,))
+    jobs.delete(db, hub, jid)
+    assert jobs.get(db, jid) is None
+    with pytest.raises(KeyError):
+        jobs.delete(db, hub, jid)
+    db.close()
