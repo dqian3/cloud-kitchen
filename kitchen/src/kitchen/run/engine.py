@@ -64,6 +64,15 @@ class SweepAdapter(Protocol):
     def launch(self, ctx: RunContext, point: SweepPoint) -> None: ...
     def analyze(self, ctx: RunContext, point: SweepPoint) -> dict: ...
 
+    # Optional. vms_for(dims) names the hosts a point addresses (a committee
+    # sweep uses fewer at smaller points); with it and a `remote` attribute
+    # carrying check_vms_running / vm_stop, the engine checks that the
+    # largest point's hosts are up before deploying, and under
+    # release_unused_vms stops each host once no later point addresses it.
+    # The adapter knows its config's hosts; the engine owns their lifecycle.
+    # def vms_for(self, dims: dict) -> Iterable[str]: ...
+    # remote: object
+
 
 def default_point_dead(entry: dict) -> bool:
     """Did this point commit anything? total_completed is authoritative when
@@ -79,16 +88,17 @@ def _fmt(value) -> str:
     return str(value)
 
 
-def point_rel_dir(dims: dict, rate, trial: int) -> str:
+def point_rel_dir(dims: dict, rate, trial=None) -> str:
     """Directory segments for a point: dims in declaration order, then rate,
-    then trial. rate_ is always the innermost non-trial segment, and trial_N
-    is always emitted even for a single trial — omitting it once made a
-    1-trial sweep un-extendable, because trial aggregation drops entries
-    without a trial tag."""
+    then -- only for a multi-trial sweep -- trial_N. A single-trial sweep
+    (every point once; a repeat is a new run in a new directory) ends at
+    rate_R. Rows still carry a `trial` tag, so readers that pool runs or
+    aggregate trials work on either layout."""
     parts = [f"{name}_{_fmt(value)}" for name, value in dims.items()]
     if rate is not None:
         parts.append(f"rate_{_fmt(float(rate))}")
-    parts.append(f"trial_{trial}")
+    if trial is not None:
+        parts.append(f"trial_{trial}")
     return "/".join(parts)
 
 
@@ -154,14 +164,68 @@ class SweepEngine:
     """
 
     def __init__(self, adapter: SweepAdapter, out_root, emitter=None, *,
-                 saturated=None, point_dead=None, sleep=time.sleep):
+                 saturated=None, point_dead=None, sleep=time.sleep,
+                 release_unused_vms=False):
         self.adapter = adapter
         self.out_root = Path(out_root)
         self.emitter = emitter
         self._saturated = saturated
         self._point_dead = point_dead or default_point_dead
         self._sleep = sleep
+        self.release_unused_vms = release_unused_vms
         self.points_run = 0     # across every spec, for interrupt reporting
+        self._released: set = set()
+
+    # -- host lifecycle (only with an adapter that names a point's hosts) --
+
+    def _vms_for(self, dims) -> set:
+        hook = getattr(self.adapter, "vms_for", None)
+        return set(hook(dims)) if hook else set()
+
+    def _remote(self):
+        return getattr(self.adapter, "remote", None)
+
+    def _check_hosts(self, spec: SweepSpec) -> None:
+        """Every host any point addresses must be up before deploy: for a
+        committee sweep that is the largest point's set, not the config's."""
+        remote = self._remote()
+        if not hasattr(self.adapter, "vms_for") or remote is None:
+            return
+        needed = set()
+        for dims in spec.combos():
+            needed |= self._vms_for(dims)
+        if needed and hasattr(remote, "check_vms_running"):
+            remote.check_vms_running(sorted(needed))
+
+    def _release_hosts(self, spec: SweepSpec, point: SweepPoint) -> None:
+        """Stop every host neither this point nor any later one addresses.
+        Only on the last trial (an earlier trial's points all run again).
+        Points run in declaration order, so a sweep ordered largest-first
+        releases hosts as it shrinks; smallest-first releases nothing until
+        its last point."""
+        remote = self._remote()
+        if not self.release_unused_vms or remote is None \
+                or not hasattr(self.adapter, "vms_for") \
+                or not hasattr(remote, "vm_stop"):
+            return
+        if point.trial != spec.trial_offset + spec.trials - 1:
+            return
+        combos = list(spec.combos())
+        if dict(point.dims) not in combos:
+            return
+        every, later = set(), set()
+        for i, dims in enumerate(combos):
+            hosts = self._vms_for(dims)
+            every |= hosts
+            if i >= combos.index(dict(point.dims)):
+                later |= hosts
+        idle = sorted(every - later - self._released)
+        if not idle:
+            return
+        self._emit("hosts.released", experiment=spec.name, dims=point.dims,
+                   hosts=idle)
+        remote.vm_stop(idle)
+        self._released.update(idle)
 
     def _emit(self, type: str, **data) -> None:
         if self.emitter is not None:
@@ -176,6 +240,7 @@ class SweepEngine:
                    est_points=spec.est_points())
         try:
             self._emit("run.phase", phase="deploy", experiment=spec.name)
+            self._check_hosts(spec)
             self.adapter.deploy(ctx)
             self._emit("run.phase", phase="sweep", experiment=spec.name)
             searched = SearchedRates(sweep_dir) if spec.search else None
@@ -237,7 +302,8 @@ class SweepEngine:
 
     def _run_point(self, ctx, dims, rate, trial, result) -> dict:
         spec = ctx.spec
-        rel = point_rel_dir(dims, rate, trial)
+        multi = spec.trials > 1 or spec.trial_offset > 0
+        rel = point_rel_dir(dims, rate, trial if multi else None)
         point_dir = ctx.sweep_dir / rel
         tags = dict(dims)
         if rate is not None:
@@ -273,6 +339,7 @@ class SweepEngine:
             t0 = time.monotonic()
             metrics = None
             try:
+                self._release_hosts(spec, point)
                 self.adapter.launch(ctx, point)
                 metrics = self.adapter.analyze(ctx, point)
                 if not isinstance(metrics, dict):
@@ -314,7 +381,8 @@ class SweepEngine:
 
 def run_experiments(adapter: SweepAdapter, specs, out_root, *,
                     run_id=None, argv=None, emitter=None,
-                    saturated=None, point_dead=None) -> int:
+                    saturated=None, point_dead=None,
+                    release_unused_vms=False) -> int:
     """Run a list of SweepSpecs; returns the process exit code (0/1/2/130).
 
     Owns the run-level bookkeeping one process is responsible for: the
@@ -330,7 +398,8 @@ def run_experiments(adapter: SweepAdapter, specs, out_root, *,
     if own_emitter:
         emitter = EventEmitter(out_root / "events.jsonl", run_id)
     engine = SweepEngine(adapter, out_root, emitter,
-                         saturated=saturated, point_dead=point_dead)
+                         saturated=saturated, point_dead=point_dead,
+                         release_unused_vms=release_unused_vms)
     emitter.emit("run.started", argv=argv, adapter=adapter.name,
                  experiments=[s.name for s in specs], out_root=str(out_root))
     _append_provenance(out_root, argv, specs)

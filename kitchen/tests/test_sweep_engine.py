@@ -103,7 +103,7 @@ def test_dead_points_mean_degraded(tmp_path):
 
 def test_error_beats_dead_and_retry_recovers(tmp_path):
     # Point at rate 2000 fails once, then succeeds on the retry.
-    flaky = point_rel_dir({}, 2000, 0)
+    flaky = point_rel_dir({}, 2000)
     spec = SweepSpec(name="exp", rates=(1000, 2000), max_attempts=2)
     adapter = FakeAdapter(errors_at={flaky: 1})
     rc = run_experiments(adapter, [spec], tmp_path, argv=["test"])
@@ -118,7 +118,7 @@ def test_error_beats_dead_and_retry_recovers(tmp_path):
     # Without retries the same failure is terminal, and errors outrank dead.
     spec2 = SweepSpec(name="exp2", rates=(2000, 50000))
     adapter2 = FakeAdapter(dead_above=20000,
-                           errors_at={point_rel_dir({}, 2000, 0): 5})
+                           errors_at={point_rel_dir({}, 2000): 5})
     rc2 = run_experiments(adapter2, [spec2], tmp_path / "b", argv=["test"])
     assert rc2 == 1
     entry = json.loads(
@@ -153,7 +153,7 @@ def test_resume_skips_complete_points(tmp_path):
     assert len(_types(events, "point.skipped")) == 2
 
     # A summary missing a required key is not complete: that point re-runs.
-    victim = tmp_path / "exp/rate_1000/trial_0/summary.json"
+    victim = tmp_path / "exp/rate_1000/summary.json"
     data = json.loads(victim.read_text())
     del data["offered_rate"]
     victim.write_text(json.dumps(data))
@@ -161,7 +161,7 @@ def test_resume_skips_complete_points(tmp_path):
     partial = SweepSpec(name="exp", rates=(1000, 2000), resume=True,
                         resume_required_keys=("offered_rate",))
     run_experiments(adapter2, [partial], tmp_path, argv=["test"])
-    assert adapter2.launches == ["rate_1000/trial_0"]
+    assert adapter2.launches == ["rate_1000"]
 
 
 def test_rate_search_then_replay_on_later_trials(tmp_path):
@@ -170,15 +170,15 @@ def test_rate_search_then_replay_on_later_trials(tmp_path):
     adapter = FakeAdapter(capacity=8000)
     rc = run_experiments(adapter, [spec], tmp_path, argv=["test"])
     assert rc == 0
-    searched = [1000, 2000, 4000, 8000, 16000, 10000, 12000, 14000]
+    searched = [1000, 2000, 4000, 8000, 16000, 6000, 10000, 12000, 14000]
     # Trial 0 searches; trial 1 replays the recorded rates in order.
     expected = ([point_rel_dir({}, r, 0) for r in searched]
                 + [point_rel_dir({}, r, 1) for r in searched])
     assert adapter.launches == expected
     events = _events(tmp_path)
     actions = [e["data"]["action"] for e in _types(events, "search.decision")]
-    assert actions == (["start"] + ["climb"] * 4 + ["refine"] * 3
-                       + ["replay"] * 8)
+    assert actions == (["start"] + ["climb"] * 4 + ["refine"] * 4
+                       + ["replay"] * 9)
     record = json.loads((tmp_path / "exp/searched_rates.json").read_text())
     assert record["points"][0]["complete"] is True
     assert record["points"][0]["rates"] == searched
@@ -241,3 +241,60 @@ def test_coupled_three_way_group():
                      coupled=(("f", "p", "client_count"),))
     assert [tuple(c.values()) for c in spec.combos()] == \
         [(1, 1, 6), (4, 4, 21)]
+
+
+class _HostRemote:
+    def __init__(self):
+        self.checked = None
+        self.stopped = []
+
+    def check_vms_running(self, vms):
+        self.checked = list(vms)
+
+    def vm_stop(self, vms):
+        self.stopped.append(list(vms))
+
+
+class _CommitteeAdapter(FakeAdapter):
+    """A fake with hosts: point p uses replicas r0..r{p} and clients c0..c{p}."""
+
+    def __init__(self):
+        super().__init__()
+        self.remote = _HostRemote()
+
+    def vms_for(self, dims):
+        n = dims["p"] + 1
+        return [f"r{i}" for i in range(n)] + [f"c{i}" for i in range(n)]
+
+
+def test_hosts_checked_for_largest_point_and_released_as_sweep_shrinks(tmp_path):
+    spec = SweepSpec(name="exp", dims={"p": (3, 2, 1)}, rates=(1000,),
+                     duration_secs=1.0)
+    adapter = _CommitteeAdapter()
+    rc = run_experiments(adapter, [spec], tmp_path, argv=["test"],
+                         release_unused_vms=True)
+    assert rc == 0
+    # The pre-deploy check names the union over points: the largest one.
+    assert adapter.remote.checked == sorted(adapter.vms_for({"p": 3}))
+    # p=3 needs everything; p=2 releases r3/c3; p=1 releases r2/c2.
+    assert adapter.remote.stopped == [["c3", "r3"], ["c2", "r2"]]
+    events = _events(tmp_path)
+    assert [e["data"]["hosts"] for e in _types(events, "hosts.released")] \
+        == [["c3", "r3"], ["c2", "r2"]]
+
+
+def test_hosts_released_only_on_last_trial(tmp_path):
+    spec = SweepSpec(name="exp", dims={"p": (2, 1)}, rates=(1000,),
+                     trials=2, duration_secs=1.0)
+    adapter = _CommitteeAdapter()
+    run_experiments(adapter, [spec], tmp_path, argv=["test"],
+                    release_unused_vms=True)
+    assert adapter.remote.stopped == [["c2", "r2"]]
+
+
+def test_no_release_without_the_flag(tmp_path):
+    spec = SweepSpec(name="exp", dims={"p": (2, 1)}, rates=(1000,),
+                     duration_secs=1.0)
+    adapter = _CommitteeAdapter()
+    run_experiments(adapter, [spec], tmp_path, argv=["test"])
+    assert adapter.remote.stopped == []

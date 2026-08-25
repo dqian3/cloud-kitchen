@@ -37,6 +37,10 @@ class ExperimentInfo:
     # experiments stay individually submittable, and submission aggregates
     # (`aggregates()`) are a separate, orthogonal construct.
     group: str = ""
+    # The cluster VMs this experiment addresses, when fewer than the whole
+    # cluster (a committee sweep whose largest point uses 22 of 102). The
+    # daemon's lease starts only these. Empty = the whole cluster.
+    hosts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

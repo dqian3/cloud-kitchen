@@ -51,6 +51,13 @@ class KeepAlive:
         self.stop_on_exit = stop_on_exit
         self._lock_fd = None
 
+    def extend(self, vms):
+        """Cover more VMs: ones started after the loop began (a later lease
+        needing more of the cluster) must be re-armed too, or their dead-man
+        timer fires mid-run."""
+        have = set(self.vms)
+        self.vms += [v for v in vms if v not in have]
+
     # --- single-actor lock ---
 
     def acquire_lock(self):

@@ -16,7 +16,7 @@ def test_toy_static_sweep(tmp_path):
     # 8000 > capacity: delivered caps at 4000, still committing → not dead.
     assert rc == 0
     summary = json.loads(
-        (out / "toy/payload_16/rate_8000/trial_0/summary.json").read_text())
+        (out / "toy/payload_16/rate_8000/summary.json").read_text())
     assert summary["offered_rate"] == 8000
     assert summary["delivered_rate"] == 4000
     assert summary["num_clients"] == 2

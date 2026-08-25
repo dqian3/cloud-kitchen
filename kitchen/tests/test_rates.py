@@ -29,11 +29,13 @@ def test_climb_brackets_and_refines():
     visited = []
     decisions = _run(_capacity_measure(8000, log=visited),
                      start=1000, refine_steps=3)
-    # Climb 1000→16000: at 16000 delivered/offered = 0.5 → saturated.
-    assert visited == [1000, 2000, 4000, 8000, 16000, 10000, 12000, 14000]
+    # Climb 1000→16000: at 16000 delivered/offered = 0.5 → saturated. The
+    # refinement samples one step below the bracket (6000) before the three
+    # inside it.
+    assert visited == [1000, 2000, 4000, 8000, 16000, 6000, 10000, 12000, 14000]
     actions = [a for a, _ in decisions]
     assert actions == ["start", "climb", "climb", "climb", "climb",
-                       "refine", "refine", "refine"]
+                       "refine", "refine", "refine", "refine"]
 
 
 def test_dead_at_start_abandons():
@@ -86,8 +88,9 @@ def test_dead_during_refine_stops():
         return measure(rate)
 
     decisions = _run(logging_measure, start=8000, refine_steps=3)
-    # 8000 ok → climb to 16000 (dead ⇒ saturated) → refine 10000 dead → stop.
-    assert visited == [8000, 16000, 10000]
+    # 8000 ok → climb to 16000 (dead ⇒ saturated) → refine 6000 (below the
+    # bracket) → 10000 dead → stop.
+    assert visited == [8000, 16000, 6000, 10000]
     assert decisions[-1][0] == "abandon"
 
 

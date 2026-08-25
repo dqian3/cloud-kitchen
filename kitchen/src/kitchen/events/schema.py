@@ -33,7 +33,7 @@ EVENT_TYPES = frozenset({
     "run.started", "run.phase", "run.finished", "run.interrupted",
     "experiment.started", "experiment.finished",
     "point.started", "point.finished", "point.retrying", "point.skipped",
-    "search.decision",
+    "search.decision", "hosts.released",
     "cluster.state", "cluster.lease", "cluster.keepalive",
 })
 

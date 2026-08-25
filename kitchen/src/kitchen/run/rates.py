@@ -187,6 +187,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
     prev_delivered: Optional[float] = None
     last_good: Optional[float] = None
     first_bad: Optional[float] = None
+    below_good: Optional[float] = None   # highest rate measured under last_good
 
     decide("start", rate)
     point = measure(rate)
@@ -234,6 +235,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
                     first_bad = rate
                     break
                 if point is not None:
+                    below_good = last_good
                     last_good = rate
                     prev_delivered = point.delivered
                 rate *= 2
@@ -245,6 +247,20 @@ def search(measure: Callable[[float], Optional[Measurement]],
         return
 
     step = (first_bad - last_good) / (refine_steps + 1)
+    # The same step continues below the bracket down to the previous good
+    # point (a doubling under last_good; the same distance when the bracket
+    # came from halving), so the approach to the knee is sampled at the
+    # bracket's resolution rather than jumping a whole doubling.
+    floor = below_good if below_good is not None else last_good / 2
+    lower = []
+    i = 1
+    while last_good - step * i > max(floor, min_rate):
+        lower.append(round(last_good - step * i))
+        i += 1
+    for j, r in enumerate(reversed(lower)):
+        decide("refine", r, f"below the knee bracket {last_good:g}..{first_bad:g}"
+                            if j == 0 else "")
+        measure(r)
     for i in range(1, refine_steps + 1):
         refined = round(last_good + step * i)
         decide("refine", refined,
