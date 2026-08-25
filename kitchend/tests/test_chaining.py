@@ -147,6 +147,33 @@ def test_cluster_bringup_failure_fails_job(env):
     asyncio.run(main())
 
 
+def test_cluster_bringup_failure_retries_like_a_run_failure(env):
+    """A zone stockout at bring-up is transient: with retries left the job
+    is requeued (as a child resuming into its run dir) after the delay, and
+    the retry succeeds once the cluster comes up."""
+    config, db, hub, runner, scheduler = env
+    fake = FakeClusters(fail_up=True)
+    scheduler.clusters = fake
+
+    async def main():
+        # A one-second delay: with zero the retry dispatches in the same tick
+        # as the failure, before the test can restore capacity.
+        j = _submit(db, hub, config, "exit 0", cluster="main",
+                    queue="stub/main", max_retries=1, retry_delay_secs=1)
+
+        def retried_and_succeeded():
+            if _state(db, j) == jobs.FAILED:
+                fake.fail_up = False   # capacity returned
+            return any(r.get("parent_job_id") == j and r["state"] == jobs.SUCCEEDED
+                       for r in jobs.list_jobs(db, limit=10))
+
+        await _run_until(scheduler, retried_and_succeeded)
+        kinds = [c[0] for c in fake.calls]
+        assert kinds == ["up", "release"]
+
+    asyncio.run(main())
+
+
 def test_lease_released_on_cancel(env):
     config, db, hub, runner, scheduler = env
     scheduler.clusters = FakeClusters()

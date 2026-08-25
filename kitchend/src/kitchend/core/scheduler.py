@@ -187,10 +187,9 @@ class Scheduler:
                                                   purpose=f"job-{job_id}",
                                                   **subset)
             except Exception as e:
-                jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
-                               finished_at=jobs._now(self.db))
                 self.hub.emit("job.error", job_id=job_id,
                               error=f"cluster bring-up failed: {e!r}")
+                self._fail(job_id)
                 self._release(key, job_id)
                 return
             self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
@@ -267,24 +266,30 @@ class Scheduler:
             jobs.set_state(self.db, self.hub, job_id, jobs.DEGRADED,
                            exit_code=rc, finished_at=now)
         else:
-            retries_left = current["retries_left"]
-            if retries_left > 0:
-                delay = int(job["spec"].get("retry_delay_secs", 600))
-                jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
-                               exit_code=rc, finished_at=now)
-                self.db.execute(
-                    "UPDATE jobs SET retry_at = datetime('now', ?) WHERE id = ?",
-                    (f"+{delay} seconds", job_id))
-                self.hub.emit("job.retry_scheduled", job_id=job_id,
-                              delay_secs=delay, retries_left=retries_left - 1)
-                # `current`, not `job`: the dispatch-time snapshot predates the
-                # daemon-assigned run_dir, and the retry must resume into it.
-                self._requeues[job_id] = asyncio.get_running_loop().create_task(
-                    self._requeue_after(current, delay, retries_left - 1))
-            else:
-                jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
-                               exit_code=rc, finished_at=now)
+            self._fail(job_id, exit_code=rc)
         self._release(key, job_id)
+
+    def _fail(self, job_id, exit_code=None):
+        """Mark a job failed and, if it has retries left, schedule one. Used
+        for a non-zero exit and for a cluster that would not come up (a zone
+        stockout clears with time, which is what the delay is for)."""
+        current = jobs.get(self.db, job_id)
+        now = jobs._now(self.db)
+        jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
+                       exit_code=exit_code, finished_at=now)
+        retries_left = current["retries_left"]
+        if retries_left <= 0:
+            return
+        delay = int(current["spec"].get("retry_delay_secs", 600))
+        self.db.execute(
+            "UPDATE jobs SET retry_at = datetime('now', ?) WHERE id = ?",
+            (f"+{delay} seconds", job_id))
+        self.hub.emit("job.retry_scheduled", job_id=job_id,
+                      delay_secs=delay, retries_left=retries_left - 1)
+        # `current`, not the dispatch-time snapshot: that predates the
+        # daemon-assigned run_dir, and the retry must resume into it.
+        self._requeues[job_id] = asyncio.get_running_loop().create_task(
+            self._requeue_after(current, delay, retries_left - 1))
 
     async def _requeue_after(self, job, delay, retries_left):
         try:
