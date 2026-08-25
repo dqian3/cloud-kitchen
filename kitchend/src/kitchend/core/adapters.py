@@ -128,7 +128,8 @@ def resolve_jobs(project_cfg, names: list[str]) -> list[dict]:
         if by_name[n].command:
             plans.append({"experiments": [n],
                           "queue": by_name[n].queue or None,
-                          "command": [str(a) for a in by_name[n].command]})
+                          "command": [str(a) for a in by_name[n].command],
+                          "hosts": [str(h) for h in by_name[n].hosts]})
 
     if classic:
         queues = {by_name[n].queue for n in classic if by_name[n].queue}

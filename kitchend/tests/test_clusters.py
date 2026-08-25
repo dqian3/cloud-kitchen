@@ -350,3 +350,44 @@ def test_poll_interval_follows_cluster_state(manager):
     assert mgr.poll_interval(mc) == ClusterManager.POLL_RUNNING_S
     db.execute("UPDATE clusters SET state = 'unmanaged' WHERE id = ?", (mc.db_id,))
     assert mgr.poll_interval(mc) == ClusterManager.POLL_RUNNING_S
+
+
+def test_new_lease_restarts_vms_a_job_released(manager):
+    """A running job may stop VMs it no longer needs; the next lease on the
+    same cluster (a chained job) must find every VM up again."""
+    mgr, mc, db = manager
+
+    async def main():
+        first = await mgr.up("stub/main", ttl_minutes=60)
+        mc.remote.vm_stop(["r1", "c0"])          # the job released these
+        assert mc.remote.vm_states["r1"] != "RUNNING"
+        second = await mgr.up("stub/main", ttl_minutes=60)
+        assert second != first
+        assert mc.remote.vm_states == {"r0": "RUNNING", "r1": "RUNNING",
+                                       "c0": "RUNNING"}
+        await mgr.down("stub/main", force=True)
+
+    asyncio.run(main())
+
+
+def test_subset_lease_starts_only_its_hosts_and_a_wider_one_adds_the_rest(manager):
+    """A job naming its hosts leases only those; a later lease needing more
+    starts the difference and the keep-alive covers the union. Burn follows
+    what is held, not the config."""
+    mgr, mc, db = manager
+
+    async def main():
+        await mgr.up("stub/main", ttl_minutes=60, vms=["r0", "c0"])
+        assert mc.remote.vm_states.get("r1") != "RUNNING"
+        assert mc.remote.vm_states["r0"] == "RUNNING"
+        assert mc.keepalive.vms == ["r0", "c0"]
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["burn_usd_per_hr"] == 0.5 * 2
+        await mgr.up("stub/main", ttl_minutes=60)          # the whole cluster
+        assert mc.remote.vm_states["r1"] == "RUNNING"
+        assert sorted(mc.keepalive.vms) == ["c0", "r0", "r1"]
+        with pytest.raises(ValueError, match="no VM"):
+            await mgr.up("stub/main", ttl_minutes=60, vms=["nope"])
+        await mgr.down("stub/main", force=True)
+
+    asyncio.run(main())

@@ -180,8 +180,12 @@ class Scheduler:
             self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
                           action="acquiring")
             try:
+                # A job that names its hosts (a committee sweep addressing
+                # part of the fleet) leases only those; the rest stay down.
+                subset = {"vms": spec["hosts"]} if spec.get("hosts") else {}
                 lease_id = await self.clusters.up(cluster_key, ttl,
-                                                  purpose=f"job-{job_id}")
+                                                  purpose=f"job-{job_id}",
+                                                  **subset)
             except Exception as e:
                 jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
                                finished_at=jobs._now(self.db))

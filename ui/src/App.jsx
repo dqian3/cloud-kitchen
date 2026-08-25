@@ -1126,6 +1126,10 @@ function Dashboard() {
             )
           })}
         </nav>
+        {projInfo?.publish_url && (
+          <a className="pub-link" href={projInfo.publish_url} target="_blank" rel="noreferrer"
+             title={`${selected}'s published pages (figures, reports)`}>published ↗</a>
+        )}
         <span className={`dot ${connected ? 'dot-on' : 'dot-off'}`}
               title={connected ? 'live' : 'disconnected'} />
         {health && <span className="muted">v{health.version}</span>}

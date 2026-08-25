@@ -15,6 +15,7 @@ Example:
     resume_flag = "--resume"
     gcp_project = "nyu-rdg-fy26-as11800-2203"
     tunnel_through_iap = true
+    publish_root = "data/figures"        # served read-only at /pub/aspen-bft/
 
       [[projects.clusters]]
       name = "main"
@@ -59,6 +60,10 @@ class ProjectConfig:
     resume_flag: str = "--resume"
     gcp_project: str | None = None
     tunnel_through_iap: bool = False
+    # A directory (relative to repo_path) the daemon serves as static files
+    # at /pub/<project>/. What goes there is the project's business — the
+    # daemon knows nothing about its contents.
+    publish_root: str | None = None
     clusters: tuple[ClusterConfig, ...] = ()
 
 
@@ -97,6 +102,7 @@ def load_config(path: Path | None = None) -> Config:
             resume_flag=p.get("resume_flag", "--resume"),
             gcp_project=p.get("gcp_project"),
             tunnel_through_iap=bool(p.get("tunnel_through_iap", False)),
+            publish_root=p.get("publish_root"),
             clusters=tuple(
                 ClusterConfig(
                     name=c["name"],

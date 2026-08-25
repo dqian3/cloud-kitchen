@@ -208,11 +208,22 @@ class ClusterManager:
 
     # --- user/agent operations ---
 
-    async def up(self, key, ttl_minutes: int, purpose="user"):
+    async def up(self, key, ttl_minutes: int, purpose="user", vms=None):
+        """Lease the cluster, starting the VMs the holder needs.
+
+        `vms` restricts the start to a subset of the cluster (a job whose
+        largest point addresses 22 of 102 VMs); None means all of them. The
+        keep-alive covers the union of every live lease's VMs, and the tick
+        loop stops whatever is running when the last lease goes.
+        """
         mc = self._get(key)
         if ttl_minutes < 1:
             raise ValueError("ttl_minutes must be >= 1")
-        vms = self._vms(mc)
+        every = self._vms(mc)
+        unknown = sorted(set(vms or ()) - set(every))
+        if unknown:
+            raise ValueError(f"cluster {key} has no VM {unknown}")
+        vms = [v for v in every if v in set(vms)] if vms else every
         if mc.task is None or mc.task.done():
             busy = self.overlapping_active(key)
             if busy:
@@ -225,26 +236,34 @@ class ClusterManager:
             "INSERT INTO cluster_leases (cluster_id, holder_type, holder_id, "
             "expires_at) VALUES (?, ?, ?, datetime('now', ?))",
             (mc.db_id, purpose, lease.info.id, f"+{ttl_minutes * 60} seconds"))
-        if mc.task is None or mc.task.done():
+        fresh = mc.task is None or mc.task.done()
+        if fresh:
             self._set_db_state(mc, "starting")
-            try:
-                # A cluster that cannot fully start cannot run its job;
-                # stop_on_partial stops the started subset rather than
-                # holding it at cost. Pre-existing running VMs are untouched.
-                await asyncio.to_thread(start_vms, mc.remote, vms,
-                                        stop_on_partial=True)
-            except Exception as e:
-                self.hub.emit("cluster.error", cluster_id=mc.db_id,
-                              cluster=mc.key, error=repr(e))
-                lease.release()
-                mc.lease_handles.pop(lease.info.id, None)
-                self.db.execute(
-                    "UPDATE cluster_leases SET released_at = datetime('now') "
-                    "WHERE holder_id = ?", (lease.info.id,))
+        # The same start whether the cluster is coming up for this lease or
+        # is already up under another: start_vms skips RUNNING VMs, so a
+        # handover only starts what the new holder needs beyond what the
+        # last one left running (it may have released VMs its sweep stopped
+        # addressing, or never needed them). A cluster that cannot fully
+        # start cannot run its job; stop_on_partial stops the started subset
+        # rather than holding it at cost.
+        try:
+            started = await asyncio.to_thread(start_vms, mc.remote, vms,
+                                              drain_first=fresh,
+                                              stop_on_partial=True)
+        except Exception as e:
+            self.hub.emit("cluster.error", cluster_id=mc.db_id,
+                          cluster=mc.key, error=repr(e))
+            lease.release()
+            mc.lease_handles.pop(lease.info.id, None)
+            self.db.execute(
+                "UPDATE cluster_leases SET released_at = datetime('now') "
+                "WHERE holder_id = ?", (lease.info.id,))
+            if fresh:
                 self._set_db_state(mc, "terminated")
-                raise RuntimeError(
-                    f"cluster {key} failed to start (the VMs that did come "
-                    f"up were stopped again): {e}") from e
+            raise RuntimeError(
+                f"cluster {key} failed to start (the VMs that did come "
+                f"up were stopped again): {e}") from e
+        if fresh:
             mc.keepalive = KeepAlive(mc.remote, vms, state=mc.state,
                                      stop_on_exit=False)
             mc.keepalive.acquire_lock()
@@ -255,6 +274,14 @@ class ClusterManager:
                 (mc.db_id, len(vms), mc.hourly_usd))
             self._set_db_state(mc, "running")
             mc.task = asyncio.get_running_loop().create_task(self._tick_loop(mc))
+        else:
+            # The keep-alive must re-arm the dead-man timer on every VM any
+            # live lease holds, including ones this lease just started.
+            if mc.keepalive is not None:
+                mc.keepalive.extend(vms)
+            if started:
+                self.hub.emit("cluster.restarted", cluster_id=mc.db_id,
+                              cluster=mc.key, vms=started)
         return lease.info.id
 
     async def down(self, key, force=False):
@@ -484,7 +511,10 @@ class ClusterManager:
                           if s == "RUNNING")
             burn = None
             if mc.hourly_usd is not None and mc.session_id is not None:
-                burn = mc.hourly_usd * len(mc.vms)
+                # What the session is paying for: the VMs the keep-alive
+                # covers, not the whole config -- a subset lease starts fewer.
+                held = mc.keepalive.vms if mc.keepalive is not None else mc.vms
+                burn = mc.hourly_usd * len(held)
             elif mc.hourly_usd is not None and running:
                 burn = mc.hourly_usd * running
             creating = mc.create_task is not None and not mc.create_task.done()

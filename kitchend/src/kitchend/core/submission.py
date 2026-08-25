@@ -51,6 +51,9 @@ def prepare_specs(project_cfg, spec: dict) -> list[dict]:
                 s["command"] = plan["command"]
             if plan.get("driver_args") is not None:
                 s["driver_args"] = plan["driver_args"]
+            if plan.get("hosts"):
+                # The VMs the lease starts; the rest of the cluster stays down.
+                s["hosts"] = plan["hosts"]
             if plan.get("queue") and not s.get("queue"):
                 s["queue"] = f"{project_cfg.name}/{plan['queue']}"
             # A native experiment assumes its cluster is already up, so a

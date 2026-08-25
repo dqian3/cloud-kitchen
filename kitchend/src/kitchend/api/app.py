@@ -78,6 +78,7 @@ def create_app(config: Config) -> FastAPI:
                 "runs_roots": list(p.runs_roots),
                 "clusters": [c.name for c in p.clusters],
                 "has_driver": bool(p.driver),
+                "publish_url": f"/pub/{p.name}/" if p.publish_root else None,
             }
             for p in config.projects
         ]
@@ -94,6 +95,17 @@ def create_app(config: Config) -> FastAPI:
     app.router.routes.append(
         Route("/mcp", endpoint=mcp_asgi, methods=["GET", "POST", "DELETE"]))
     app.mount("/mcp", mcp_asgi)
+
+    # Per-project published pages (reports, figures — whatever the project
+    # writes to its publish_root). Plain static files; symlinks that leave
+    # the directory are refused by StaticFiles.
+    for p in config.projects:
+        if p.publish_root:
+            root = p.repo_path / p.publish_root
+            root.mkdir(parents=True, exist_ok=True)
+            app.mount(f"/pub/{p.name}",
+                      StaticFiles(directory=root, html=True),
+                      name=f"pub-{p.name}")
 
     if UI_DIST.is_dir():
         app.mount("/", StaticFiles(directory=UI_DIST, html=True), name="ui")
