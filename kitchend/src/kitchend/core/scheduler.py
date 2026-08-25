@@ -13,6 +13,7 @@ Exit-code policy (the drivers' existing contract):
 
 import asyncio
 import json
+import time
 
 from . import jobs
 
@@ -28,6 +29,10 @@ class Scheduler:
         self._running_queues: dict[str, int] = {}     # queue key -> job_id
         self._requeues: dict[int, asyncio.Task] = {}  # failed job -> retry timer
         self._cluster_jobs: dict[str, int] = {}       # leased cluster -> job_id
+        # A cluster that failed to come up (a zone stockout) is held for the
+        # failed job's retry delay, so the queue behind it does not burn one
+        # partial start per job discovering the same thing.
+        self._cluster_cooldown: dict[str, float] = {}  # cluster key -> monotonic
         self._wake = asyncio.Event()
         self._stopped = False
         # A retry timer lives only in the process that started it: failed
@@ -86,6 +91,8 @@ class Scheduler:
                     self.clusters.overlaps(cluster_key, held)
                     for held in self._cluster_jobs):
                 continue
+            if cluster_key and self._cooling(cluster_key):
+                continue
             if cluster_key:
                 self._cluster_jobs[cluster_key] = job["id"]
             self._running_queues[key] = job["id"]
@@ -93,6 +100,19 @@ class Scheduler:
                 self._execute(job, key))
             if len(self._running_queues) >= self.config.max_concurrent_queues:
                 break
+
+    def _cooling(self, cluster_key) -> bool:
+        """Is this cluster, or one sharing its VMs, inside a bring-up
+        cooldown? Expired entries are dropped as they are seen."""
+        now = time.monotonic()
+        for key, until in list(self._cluster_cooldown.items()):
+            if until <= now:
+                del self._cluster_cooldown[key]
+                continue
+            overlaps = getattr(self.clusters, "overlaps", None)
+            if key == cluster_key or (overlaps and overlaps(cluster_key, key)):
+                return True
+        return False
 
     def next_queued(self):
         """The job that dispatches next (priority DESC, id ASC), or None."""
@@ -189,6 +209,10 @@ class Scheduler:
             except Exception as e:
                 self.hub.emit("job.error", job_id=job_id,
                               error=f"cluster bring-up failed: {e!r}")
+                delay = int(spec.get("retry_delay_secs", 600))
+                self._cluster_cooldown[cluster_key] = time.monotonic() + delay
+                self.hub.emit("cluster.cooldown", cluster=cluster_key,
+                              job_id=job_id, delay_secs=delay)
                 self._fail(job_id)
                 self._release(key, job_id)
                 return

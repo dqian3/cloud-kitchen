@@ -174,6 +174,38 @@ def test_cluster_bringup_failure_retries_like_a_run_failure(env):
     asyncio.run(main())
 
 
+def test_cluster_bringup_failure_cools_the_cluster_down(env):
+    """After one job finds the cluster will not come up, the jobs queued
+    behind it on that cluster wait out the retry delay rather than each
+    paying a partial start to learn the same thing."""
+    config, db, hub, runner, scheduler = env
+    fake = FakeClusters(fail_up=True)
+    scheduler.clusters = fake
+
+    async def main():
+        first = _submit(db, hub, config, "exit 0", cluster="main",
+                        queue="stub/main", retry_delay_secs=2)
+        second = _submit(db, hub, config, "exit 0", cluster="main",
+                         queue="stub/main")
+        failed_at = {}
+
+        def phases():
+            if _state(db, first) == jobs.FAILED and "t" not in failed_at:
+                failed_at["t"] = time.monotonic()
+                fake.fail_up = False       # capacity is back immediately...
+            if "t" in failed_at and time.monotonic() - failed_at["t"] < 1.0:
+                # ...but inside the cooldown the second job must stay queued.
+                assert _state(db, second) == jobs.QUEUED
+                assert fake.calls == []
+            return _state(db, second) == jobs.SUCCEEDED
+
+        await _run_until(scheduler, phases)
+        # It dispatched only after the 2 s cooldown lapsed.
+        assert time.monotonic() - failed_at["t"] >= 2.0
+
+    asyncio.run(main())
+
+
 def test_lease_released_on_cancel(env):
     config, db, hub, runner, scheduler = env
     scheduler.clusters = FakeClusters()
