@@ -24,6 +24,7 @@ import json
 from pathlib import Path
 
 QUEUED = "queued"
+STARTING = "starting"       # dispatched; its cluster is coming up
 RUNNING = "running"
 SUCCEEDED = "succeeded"
 DEGRADED = "degraded"
@@ -31,7 +32,7 @@ FAILED = "failed"
 CANCELED = "canceled"
 INTERRUPTED = "interrupted"
 
-ACTIVE_STATES = (QUEUED, RUNNING)
+ACTIVE_STATES = (QUEUED, STARTING, RUNNING)
 
 
 def ensure_project_row(db, project_cfg):
@@ -151,6 +152,23 @@ def update_queued(db, hub, job_id, updates: dict):
     return get(db, job_id)
 
 
+def reorder(db, hub, ids: list[int]) -> None:
+    """Make the queued jobs in `ids` dispatch in that order: priorities are
+    assigned N..1 down the list (dispatch is priority DESC, id ASC). Jobs
+    not queued are refused — the running one is not reorderable."""
+    for job_id in ids:
+        job = get(db, job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job["state"] != QUEUED:
+            raise ValueError(f"job {job_id} is {job['state']}, not queued")
+    n = len(ids)
+    for i, job_id in enumerate(ids):
+        db.execute("UPDATE jobs SET priority = ? WHERE id = ? AND state = 'queued'",
+                   (n - i, job_id))
+    hub.emit("job.reordered", ids=list(ids))
+
+
 def build_command(project_cfg, spec: dict):
     """(argv, cwd) for a job. Explicit `command` wins; otherwise the project's
     driver + experiments + extra flags, with run-dir/resume flags appended."""
@@ -195,7 +213,8 @@ def build_command(project_cfg, spec: dict):
 def recover_orphans(db, hub):
     """Mark jobs that were 'running' under a dead daemon as interrupted."""
     import os
-    for row in db.query("SELECT id, pid FROM jobs WHERE state = ?", (RUNNING,)):
+    for row in db.query("SELECT id, pid FROM jobs WHERE state IN (?, ?)",
+                        (RUNNING, STARTING)):
         pid = row["pid"]
         alive = False
         if pid:

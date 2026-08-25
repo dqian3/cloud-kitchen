@@ -106,6 +106,25 @@ def edit_job(job_id: int, body: JobEdit, request: Request):
     return job
 
 
+class Reorder(BaseModel):
+    ids: list[int]
+
+
+@router.post("/jobs/reorder")
+def reorder_jobs(body: Reorder, request: Request):
+    """Queued jobs dispatch in the given order (first = next). The running
+    job is not part of the queue and can't be moved."""
+    app = request.app
+    try:
+        jobs.reorder(app.state.db, app.state.hub, body.ids)
+    except KeyError as e:
+        raise HTTPException(404, f"no job {e}")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    app.state.scheduler.wake()
+    return {"ok": True}
+
+
 @router.get("/jobs/{job_id}/log")
 def job_log(job_id: int, request: Request, tail: int = 200):
     return {"log": request.app.state.runner.tail_log(job_id, lines=tail)}

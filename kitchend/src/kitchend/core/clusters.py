@@ -165,6 +165,22 @@ class ClusterManager:
             mc.vms = vms_from_yaml(mc.config_path)
         return mc.vms
 
+    def overlaps(self, a: str, b: str) -> bool:
+        """Do two clusters share any VM? (main is the head of the n51 fleet.)
+        Leasing both at once would let one lease's release stop the other's
+        running job."""
+        if a == b:
+            return False
+        try:
+            return bool(set(self._vms(self._get(a))) & set(self._vms(self._get(b))))
+        except (KeyError, OSError, ValueError):
+            return False
+
+    def overlapping_active(self, key: str) -> list[str]:
+        return [other.key for other in self.clusters.values()
+                if other.task is not None and not other.task.done()
+                and self.overlaps(key, other.key)]
+
     def estimate_hourly(self, key) -> float | None:
         """Whole-cluster burn rate in $/hr, or None when no cost is
         configured. Reads the VM list if it hasn't been loaded yet, so the
@@ -191,6 +207,12 @@ class ClusterManager:
         if ttl_minutes < 1:
             raise ValueError("ttl_minutes must be >= 1")
         vms = self._vms(mc)
+        if mc.task is None or mc.task.done():
+            busy = self.overlapping_active(key)
+            if busy:
+                raise RuntimeError(
+                    f"cluster {key} shares VMs with {busy[0]}, which is up "
+                    "under a lease; wait for it or use that cluster")
         lease = mc.state.acquire_lease(purpose, ttl_s=ttl_minutes * 60)
         mc.lease_handles[lease.info.id] = lease
         self.db.insert(

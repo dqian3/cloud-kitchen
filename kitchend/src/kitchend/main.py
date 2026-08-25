@@ -158,7 +158,7 @@ def cmd_watch(config, args):
         if line != last:
             print(f"\r{time.strftime('%H:%M:%S')}  {line}")
             last = line
-        if j["state"] not in ("queued", "running"):
+        if j["state"] not in ("queued", "starting", "running"):
             tail = _api(config, f"/api/jobs/{args.job_id}/log?tail=15")["log"]
             if tail:
                 print("--- last output ---")

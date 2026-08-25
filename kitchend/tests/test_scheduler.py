@@ -188,3 +188,101 @@ def test_restart_clears_orphaned_retries(env):
                (jobs.FAILED, jid))
     Scheduler(config, db, hub, runner)     # a fresh daemon
     assert jobs.get(db, jid)["retries_left"] == 0
+
+
+def test_reorder_queued_jobs(env):
+    config, db, hub, runner, scheduler = env
+    a = _submit(db, hub, config, "true", queue="q")
+    b = _submit(db, hub, config, "true", queue="q")
+    c = _submit(db, hub, config, "true", queue="q")
+    jobs.reorder(db, hub, [c, a, b])
+    prios = {jid: jobs.get(db, jid)["priority"] for jid in (a, b, c)}
+    assert prios[c] > prios[a] > prios[b]
+    # Dispatch order follows: priority DESC, id ASC.
+    order = [r["id"] for r in db.query(
+        "SELECT id FROM jobs WHERE state = 'queued' ORDER BY priority DESC, id ASC")]
+    assert order == [c, a, b]
+    db.execute("UPDATE jobs SET state = 'running' WHERE id = ?", (a,))
+    import pytest
+    with pytest.raises(ValueError, match="not queued"):
+        jobs.reorder(db, hub, [a, b])
+
+
+def test_starting_state_and_cancel_while_cluster_comes_up(env):
+    config, db, hub, runner, scheduler = env
+
+    class FakeClusters:
+        def __init__(self):
+            self.gate = asyncio.Event()
+            self.released = []
+        async def up(self, key, ttl, purpose=None):
+            await self.gate.wait()
+            return "lease-1"
+        def release(self, key, lease_id):
+            self.released.append(lease_id)
+        def extend(self, *a):
+            pass
+
+    fake = FakeClusters()
+    scheduler.clusters = fake
+    from dataclasses import replace
+    from kitchend.config import ClusterConfig
+    # The stub project needs a configured cluster for spec.cluster to pass.
+    scheduler.config = replace(config, projects=(replace(
+        config.project("stub"),
+        clusters=(ClusterConfig(name="c", config="c.yaml"),)),))
+
+    async def main():
+        jid = _submit(db, hub, config, "true", queue="q", cluster="c")
+        await _run_until(db, scheduler, lambda: _state(db, jid) == jobs.STARTING)
+        assert _state(db, jid) == jobs.STARTING       # dispatched, not running
+        assert await scheduler.cancel(jid) == jobs.CANCELED
+        fake.gate.set()                              # cluster finishes coming up
+        await asyncio.sleep(0.2)
+        assert _state(db, jid) == jobs.CANCELED
+        assert fake.released == ["lease-1"]          # lease given back, no spawn
+
+    asyncio.run(main())
+
+
+def test_overlapping_clusters_serialize_across_queues(env):
+    config, db, hub, runner, scheduler = env
+
+    class FakeClusters:
+        def __init__(self):
+            self.leases = []
+        async def up(self, key, ttl, purpose=None):
+            self.leases.append(key); return f"lease-{len(self.leases)}"
+        def release(self, key, lease_id):
+            pass
+        def extend(self, *a):
+            pass
+        def overlaps(self, a, b):
+            return a != b and {a, b} == {"stub/main", "stub/n51"}
+
+    scheduler.clusters = FakeClusters()
+    from dataclasses import replace
+    from kitchend.config import ClusterConfig
+    scheduler.config = replace(config, projects=(replace(
+        config.project("stub"),
+        clusters=(ClusterConfig(name="main", config="m.yaml"),
+                  ClusterConfig(name="n51", config="n.yaml"))),))
+
+    async def main():
+        a = _submit(db, hub, config, "sleep 0.4", queue="main", cluster="main")
+        b = _submit(db, hub, config, "true", queue="n51", cluster="n51")
+        seen = []   # (state of a, state of b) while a is running
+
+        def done():
+            sa, sb = _state(db, a), _state(db, b)
+            if sa == jobs.RUNNING:
+                seen.append(sb)
+            return sb == jobs.SUCCEEDED
+
+        await _run_until(db, scheduler, done, timeout=10)
+        # b is on another queue and a slot was free, but its cluster shares
+        # VMs with a's leased one: it waited until a released.
+        assert seen and set(seen) == {jobs.QUEUED}
+        assert scheduler.clusters.leases == ["stub/main", "stub/n51"]
+
+    asyncio.run(main())

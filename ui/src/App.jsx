@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 
 const STATE_COLORS = {
-  queued: 'gray', running: 'blue', succeeded: 'green',
+  queued: 'gray', starting: 'blue', running: 'blue', succeeded: 'green',
   degraded: 'orange', failed: 'red', canceled: 'gray', interrupted: 'purple',
 }
 
@@ -484,7 +484,7 @@ function ProgressPanel({ p }) {
   )
 }
 
-function JobRow({ job, onChanged }) {
+function JobRow({ job, onChanged, reorder, onMove }) {
   const [open, setOpen] = useState(false)
   const [log, setLog] = useState('')
   const timer = useRef(null)
@@ -505,30 +505,29 @@ function JobRow({ job, onChanged }) {
     try { await fn(); onChanged() } catch (e) { alert(e.message || e) }
   }
 
-  const editable = job.state === 'queued'
+  const queued = job.state === 'queued'
+  const retrying = job.state === 'failed' && job.retry_at
   const spec = job.spec
 
   return (
     <>
       <tr className="job-row" onClick={() => setOpen(!open)}>
         <td>{job.id}</td>
-        <td>{job.project}</td>
         <td className="mono">{(spec.experiments || []).join(' ') ||
           (spec.command || []).join(' ')}</td>
         <td>{spec.queue || job.project}
           {spec.cluster && <span title={`daemon-managed lease on ${spec.cluster}`}> ⚙</span>}
         </td>
-        <td>{job.priority !== 0 ? job.priority : ''}</td>
-        <td><Chip text={job.state === 'failed' && job.retry_at ? 'retrying' : job.state}
-                  color={job.state === 'failed' && job.retry_at ? 'orange' : STATE_COLORS[job.state]} />
-          {job.state === 'failed' && job.retry_at &&
+        <td><Chip text={retrying ? 'retrying' : job.state}
+                  color={retrying ? 'orange' : STATE_COLORS[job.state]} />
+          {job.state === 'starting' &&
+            <span className="muted"> {spec.cluster ? `${spec.cluster} coming up` : 'launching'}</span>}
+          {retrying &&
             <span className="muted" title={`retry at ${job.retry_at} UTC`}>
               {' '}in {fmtUntil(job.retry_at)} · {job.retries_left} left</span>}
-          {job.state === 'queued' && spec.after &&
+          {queued && spec.after &&
             <span className="muted" title="waits for that job's retry chain">
               {' '}after #{spec.after}</span>}
-          {job.exit_code != null && job.exit_code !== 0 &&
-            <span className="muted"> rc={job.exit_code}</span>}
           {job.state === 'running' && job.progress?.points &&
             <span className="muted"> {job.progress.points.done}
               {(job.progress.totals_final?.points_total ?? job.progress.est_points)
@@ -536,44 +535,35 @@ function JobRow({ job, onChanged }) {
                 : ''} pts</span>}
         </td>
         <td className="muted">{fmtTs(job.created_at)}</td>
-        <td className="muted">{fmtTs(job.finished_at)}</td>
         <td onClick={e => e.stopPropagation()}>
-          {editable && (
+          {queued && !reorder && (
+            <button className="link" title="run this next"
+                    onClick={() => onMove(job.id, 'top')}>top</button>
+          )}
+          {queued && reorder && (
             <>
-              <button className="link" onClick={() => {
-                const exp = prompt('experiments (space-separated):',
-                  (spec.experiments || []).join(' '))
-                if (exp !== null) {
-                  act(() => api.editJob(job.id,
-                    { experiments: exp.split(/\s+/).filter(Boolean) }))
-                }
-              }}>edit</button>
-              <button className="link" onClick={() => {
-                const p = prompt('priority (higher runs first):',
-                  String(job.priority))
-                if (p !== null) act(() => api.editJob(job.id, { priority: +p }))
-              }}>prio</button>
+              <button className="link" onClick={() => onMove(job.id, 'up')}>▲</button>
+              <button className="link" onClick={() => onMove(job.id, 'down')}>▼</button>
             </>
           )}
-          {(job.state === 'queued' || job.state === 'running') && (
+          {queued && !reorder && (
+            <button className="link" onClick={() => {
+              const exp = prompt('experiments (space-separated):',
+                (spec.experiments || []).join(' '))
+              if (exp !== null) {
+                act(() => api.editJob(job.id,
+                  { experiments: exp.split(/\s+/).filter(Boolean) }))
+              }
+            }}>edit</button>
+          )}
+          {(queued || job.state === 'starting' || job.state === 'running' || retrying) && (
             <button className="link" onClick={() => act(() => api.cancel(job.id))}>
               cancel</button>
-          )}
-          {['degraded', 'failed', 'interrupted', 'canceled'].includes(job.state) && (
-            <button className="link" title="resubmit, resuming into the same run dir"
-                    onClick={() => act(() => api.resubmit(job.id))}>resume</button>
-          )}
-          {spec.sweep && (
-            <button className="link" title="save this one-off's params as a reusable preset"
-                    onClick={() => {
-                      const n = prompt('preset name:')
-                      if (n) act(() => api.saveSweep(job.project, n.trim(), spec.sweep))
-                    }}>save</button>
           )}
         </td>
       </tr>
       {open && (
-        <tr><td colSpan="9" className="log-cell">
+        <tr><td colSpan="6" className="log-cell">
           {job.run_dir && <div className="muted">run dir: <code>{job.run_dir}</code></div>}
           {job.progress && <ProgressPanel p={job.progress} />}
           <pre className="log">{log || '(no output yet)'}</pre>
@@ -600,19 +590,26 @@ function fmtNum(v) {
     : Math.round(v * 100) / 100
 }
 
-function RunRow({ run, display, onChanged }) {
+// One entry per piece of work: a finished job joined to its ledger run.
+// Either side can be missing — a job that died before producing data has no
+// run; a backfilled old run has no job — and the row says which.
+function RunEntry({ entry, display, onChanged }) {
+  const { job, run } = entry
   const [open, setOpen] = useState(false)
   const [detail, setDetail] = useState(null)
+  const [log, setLog] = useState(null)
   const [note, setNote] = useState('')
 
   useEffect(() => {
-    if (open) api.run(run.id).then(setDetail).catch(() => {})
-  }, [open, run.id])
+    if (!open) return
+    if (run) api.run(run.id).then(setDetail).catch(() => {})
+    if (job) api.jobLog(job.id, 60).then(r => setLog(r.log)).catch(() => {})
+  }, [open, run?.id, job?.id])
 
   async function act(fn) {
     try {
       await fn()
-      setDetail(await api.run(run.id))
+      if (run) setDetail(await api.run(run.id))
       onChanged()
     } catch (e) { alert(e.message || e) }
   }
@@ -624,29 +621,69 @@ function RunRow({ run, display, onChanged }) {
     ? metricCols.filter(([k]) => detail.points.some(p => k in p.metrics))
     : []
 
+  const state = job ? job.state : run.status
+  const chipColor = job
+    ? STATE_COLORS[job.state]
+    : { ok: 'green', degraded: 'orange', failed: 'red', running: 'blue',
+        interrupted: 'purple' }[run.status] || 'gray'
+  const what = job
+    ? ((job.spec.experiments || []).join(' ') || (job.spec.command || []).slice(1, 3).join(' '))
+    : run.experiment
+  const when = job ? (job.finished_at || job.created_at) : run.started_at
+
   return (
     <>
       <tr className="job-row" onClick={() => setOpen(!open)}>
-        <td>{run.id}</td>
-        <td>{run.project}</td>
-        <td className="mono">{run.experiment}</td>
-        <td><Chip text={run.status || '?'} color={{
-          ok: 'green', degraded: 'orange', failed: 'red',
-          running: 'blue', interrupted: 'purple',
-        }[run.status] || 'gray'} /></td>
-        <td>{run.n_points ?? ''}</td>
-        <td className="muted">{fmtTs(run.started_at)}</td>
-        <td>{(run.tags || []).map(t => <Chip key={t} text={t} color="blue" />)}</td>
-        <td className="muted">{run.job_id ? `#${run.job_id}` : ''}
-          {!run.dir_exists && <span title="run dir deleted; metrics preserved"> 🗑</span>}
+        <td className="muted">{job ? `#${job.id}` : ''}{run ? ` r${run.id}` : ''}</td>
+        <td className="mono">{what}</td>
+        <td><Chip text={state || '?'} color={chipColor} />
+          {job && job.exit_code != null && job.exit_code !== 0 &&
+            <span className="muted"> rc={job.exit_code}</span>}
+        </td>
+        <td>
+          {run
+            ? <>{run.n_points ?? 0} pts
+                {!run.dir_exists && <span className="muted" title="run directory deleted; metrics kept in the ledger"> · dir gone</span>}</>
+            : <span className="muted" title="no ledger entry: the job produced no summaries">no results</span>}
+          {!job && <span className="muted" title="indexed from disk; no daemon job record"> · no job record</span>}
+        </td>
+        <td className="muted">{fmtTs(when)}</td>
+        <td>{(run?.tags || []).map(t => <Chip key={t} text={t} color="blue" />)}</td>
+        <td onClick={e => e.stopPropagation()}>
+          {job && (
+            <button className="link" title="submit the same job again in a fresh run dir"
+                    onClick={() => act(() => api.resubmit(job.id, false))}>rerun</button>
+          )}
+          {job && ['degraded', 'failed', 'interrupted', 'canceled'].includes(job.state) && job.run_dir && (
+            <button className="link" title="resubmit, resuming into the same run dir"
+                    onClick={() => act(() => api.resubmit(job.id, true))}>resume</button>
+          )}
+          {job?.spec.sweep && (
+            <button className="link" title="save this one-off's params as a preset"
+                    onClick={() => {
+                      const n = prompt('preset name:')
+                      if (n) act(() => api.saveSweep(job.project, n.trim(), job.spec.sweep))
+                    }}>save</button>
+          )}
+          <button className="link" onClick={() => setOpen(!open)}>
+            {open ? 'hide' : 'details'}</button>
         </td>
       </tr>
       {open && (
-        <tr><td colSpan="8" className="log-cell">
-          <div className="muted">dir: <code>{run.run_dir}</code>
-            {run.git_commit && <> · commit <code>{run.git_commit.slice(0, 10)}</code></>}
-          </div>
-          {detail === null ? <p className="muted">loading…</p> : (
+        <tr><td colSpan="7" className="log-cell">
+          {job && (
+            <div className="muted">job #{job.id} · queue {job.spec.queue || job.project}
+              {job.spec.cluster && <> · lease on {job.spec.cluster}</>}
+              {job.run_dir && <> · dir <code>{job.run_dir}</code></>}
+              <div className="mono">{(job.spec.command || []).join(' ') ||
+                (job.spec.experiments || []).join(' ')}</div>
+            </div>
+          )}
+          {!job && run && <div className="muted">dir: <code>{run.run_dir}</code>
+            {run.git_commit && <> · commit <code>{run.git_commit.slice(0, 10)}</code></>}</div>}
+          {job?.progress && <ProgressPanel p={job.progress} />}
+          {run && detail === null && <p className="muted">loading results…</p>}
+          {run && detail && (
             <>
               <div className="run-actions" onClick={e => e.stopPropagation()}>
                 <input placeholder="add note (why it ran, what it showed)"
@@ -671,32 +708,40 @@ function RunRow({ run, display, onChanged }) {
                   ))}
                 </ul>
               )}
-              <table className="points">
-                <thead><tr>
-                  <th>dims</th><th>rate</th><th>trial</th>
-                  {cols.map(([k, label]) => <th key={k}>{label}</th>)}
-                  <th></th>
-                </tr></thead>
-                <tbody>
-                  {detail.points.map(p => (
-                    <tr key={p.id}>
-                      <td className="mono">{Object.entries(p.dims)
-                        .map(([k, v]) => `${k}=${v}`).join(' ') || '—'}</td>
-                      <td>{fmtNum(p.rate)}</td>
-                      <td>{p.trial ?? ''}</td>
-                      {cols.map(([k]) => <td key={k}>{fmtNum(p.metrics[k])}</td>)}
-                      <td>
-                        {p.metrics.status && <Chip text={p.metrics.status}
-                          color={p.metrics.status === 'dead' ? 'orange' : 'red'} />}
-                        <details className="raw"><summary>raw</summary>
-                          <pre>{JSON.stringify(p.metrics, null, 1)}</pre>
-                        </details>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+              {detail.points.length === 0
+                ? <p className="muted">no points recorded</p>
+                : <table className="points">
+                    <thead><tr>
+                      <th>dims</th><th>rate</th><th>trial</th>
+                      {cols.map(([k, label]) => <th key={k}>{label}</th>)}
+                      <th></th>
+                    </tr></thead>
+                    <tbody>
+                      {detail.points.map(p => (
+                        <tr key={p.id}>
+                          <td className="mono">{Object.entries(p.dims)
+                            .map(([k, v]) => `${k}=${v}`).join(' ') || '—'}</td>
+                          <td>{fmtNum(p.rate)}</td>
+                          <td>{p.trial ?? ''}</td>
+                          {cols.map(([k]) => <td key={k}>{fmtNum(p.metrics[k])}</td>)}
+                          <td>
+                            {p.metrics.status && <Chip text={p.metrics.status}
+                              color={p.metrics.status === 'dead' ? 'orange' : 'red'} />}
+                            <details className="raw"><summary>raw</summary>
+                              <pre>{JSON.stringify(p.metrics, null, 1)}</pre>
+                            </details>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>}
             </>
+          )}
+          {job && (
+            <details className="raw" open={!run}>
+              <summary>driver output{log === '' ? ' (none)' : ''}</summary>
+              <pre className="log">{log || '(no output)'}</pre>
+            </details>
           )}
         </td></tr>
       )}
@@ -704,7 +749,7 @@ function RunRow({ run, display, onChanged }) {
   )
 }
 
-function RunsSection({ projects, runs, display, onChanged }) {
+function RunsSection({ projects, entries, display, onChanged }) {
   const [scanBusy, setScanBusy] = useState(false)
 
   async function scan(name) {
@@ -725,17 +770,18 @@ function RunsSection({ projects, runs, display, onChanged }) {
                   onClick={() => scan(p.name)}>scan {p.name}</button>
         ))}
       </h2>
-      {!runs.length
-        ? <p className="muted">No runs recorded yet — native jobs land here
-            automatically; use scan to backfill old dirs.</p>
+      {!entries.length
+        ? <p className="muted">No finished jobs or recorded runs yet — use scan to
+            index old run dirs.</p>
         : <table>
             <thead><tr>
-              <th>id</th><th>project</th><th>experiment</th><th>status</th>
-              <th>points</th><th>started</th><th>tags</th><th>job</th>
+              <th>id</th><th>experiment</th><th>status</th>
+              <th>results</th><th>when</th><th>tags</th><th></th>
             </tr></thead>
             <tbody>
-              {runs.map(r => (
-                <RunRow key={r.id} run={r} display={display} onChanged={onChanged} />
+              {entries.map(e => (
+                <RunEntry key={e.job ? `j${e.job.id}` : `r${e.run.id}`}
+                          entry={e} display={display} onChanged={onChanged} />
               ))}
             </tbody>
           </table>}
@@ -885,13 +931,45 @@ export default function App() {
   const projJobs = jobs.filter(j => j.project === selected)
   // A failed job with a pending retry is still work in flight: it stays in
   // the queue until the retry requeues (as a child) or the chain is canceled.
-  const inFlight = j => ['queued', 'running'].includes(j.state) ||
+  const inFlight = j => ['queued', 'starting', 'running'].includes(j.state) ||
     (j.state === 'failed' && j.retry_at)
-  const active = projJobs.filter(inFlight)
+  // Queue shows dispatch order: running/starting first, then queued by
+  // priority (high first) and age, then pending retries.
+  const rank = j => j.state === 'running' ? 0 : j.state === 'starting' ? 1
+    : j.state === 'queued' ? 2 : 3
+  const active = projJobs.filter(inFlight).sort((a, b) =>
+    rank(a) - rank(b) || (b.priority - a.priority) || (a.id - b.id))
   const done = projJobs.filter(j => !inFlight(j))
   const projClusters = clusters.filter(c => c.project === selected)
   const projRuns = runs.filter(r => r.project === selected)
   const projInfo = projects.find(p => p.name === selected)
+
+  // Finished jobs joined to their ledger runs, plus runs with no job.
+  const runByJob = {}
+  for (const r of projRuns) if (r.job_id) runByJob[r.job_id] = r
+  const entries = [
+    ...done.map(j => ({ job: j, run: runByJob[j.id] || null })),
+    ...projRuns.filter(r => !r.job_id || !projJobs.some(j => j.id === r.job_id))
+      .map(r => ({ job: null, run: r })),
+  ].sort((a, b) => {
+    const ta = a.job ? (a.job.finished_at || a.job.created_at) : a.run.started_at
+    const tb = b.job ? (b.job.finished_at || b.job.created_at) : b.run.started_at
+    return (tb || '').localeCompare(ta || '')
+  })
+
+  const [reorder, setReorder] = useState(false)
+  async function moveJob(id, how) {
+    const queued = active.filter(j => j.state === 'queued').map(j => j.id)
+    const i = queued.indexOf(id)
+    if (i < 0) return
+    let order = [...queued]
+    if (how === 'top') { order.splice(i, 1); order.unshift(id) }
+    else if (how === 'up' && i > 0) { [order[i - 1], order[i]] = [order[i], order[i - 1]] }
+    else if (how === 'down' && i < order.length - 1) {
+      [order[i + 1], order[i]] = [order[i], order[i + 1]]
+    } else return
+    try { await api.reorderJobs(order); reload() } catch (e) { alert(e.message || e) }
+  }
 
   return (
     <div className="app">
@@ -900,7 +978,7 @@ export default function App() {
         <nav className="tabs">
           {projects.map(p => {
             const n = jobs.filter(j => j.project === p.name &&
-              ['queued', 'running'].includes(j.state)).length
+              ['queued', 'starting', 'running'].includes(j.state)).length
             return (
               <button key={p.name}
                       className={`tab ${p.name === selected ? 'tab-on' : ''}`}
@@ -927,24 +1005,24 @@ export default function App() {
       )}
 
       <section>
-        <h2>Queue</h2>
+        <h2>Queue
+          {active.some(j => j.state === 'queued') && (
+            <button className="link" onClick={() => setReorder(!reorder)}>
+              {reorder ? 'done' : 'reorder'}</button>
+          )}
+        </h2>
         {selected && (
           <SubmitForm project={selected}
                       clusters={(projInfo?.clusters) || []}
                       catalog={catalog}
                       onSubmitted={reload} />
         )}
-        <JobTable jobs={active} onChanged={reload}
-                  empty="Nothing queued or running." />
-      </section>
-
-      <section>
-        <h2>History</h2>
-        <JobTable jobs={done} onChanged={reload} empty="No finished jobs yet." />
+        <JobTable jobs={active} onChanged={reload} reorder={reorder}
+                  onMove={moveJob} empty="Nothing queued or running." />
       </section>
 
       <RunsSection projects={projects.filter(p => p.name === selected)}
-                   runs={projRuns} display={catalog?.display}
+                   entries={entries} display={catalog?.display}
                    onChanged={reload} />
 
       <DaemonLog />
@@ -952,16 +1030,17 @@ export default function App() {
   )
 }
 
-function JobTable({ jobs, onChanged, empty }) {
+function JobTable({ jobs, onChanged, empty, reorder, onMove }) {
   if (!jobs.length) return <p className="muted">{empty}</p>
   return (
     <table>
       <thead><tr>
-        <th>id</th><th>project</th><th>experiments</th><th>queue</th>
-        <th>prio</th><th>state</th><th>created</th><th>finished</th><th></th>
+        <th>id</th><th>experiments</th><th>queue</th>
+        <th>state</th><th>created</th><th></th>
       </tr></thead>
       <tbody>
-        {jobs.map(j => <JobRow key={j.id} job={j} onChanged={onChanged} />)}
+        {jobs.map(j => <JobRow key={j.id} job={j} onChanged={onChanged}
+                               reorder={reorder} onMove={onMove} />)}
       </tbody>
     </table>
   )

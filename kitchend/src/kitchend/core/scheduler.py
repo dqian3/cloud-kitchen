@@ -27,6 +27,7 @@ class Scheduler:
         self._tasks: dict[int, asyncio.Task] = {}     # spec.cluster leases
         self._running_queues: dict[str, int] = {}     # queue key -> job_id
         self._requeues: dict[int, asyncio.Task] = {}  # failed job -> retry timer
+        self._cluster_jobs: dict[str, int] = {}       # leased cluster -> job_id
         self._wake = asyncio.Event()
         self._stopped = False
         # A retry timer lives only in the process that started it: failed
@@ -77,6 +78,16 @@ class Scheduler:
             key = jobs.queue_key(job)
             if key in self._running_queues:
                 continue
+            # Clusters that share VMs (main inside n51) must not be leased
+            # by two jobs at once, whatever queues they sit on.
+            cluster_key = (f"{job['project']}/{job['spec']['cluster']}"
+                           if job["spec"].get("cluster") else None)
+            if cluster_key and self.clusters is not None and any(
+                    self.clusters.overlaps(cluster_key, held)
+                    for held in self._cluster_jobs):
+                continue
+            if cluster_key:
+                self._cluster_jobs[cluster_key] = job["id"]
             self._running_queues[key] = job["id"]
             self._tasks[job["id"]] = asyncio.get_running_loop().create_task(
                 self._execute(job, key))
@@ -136,8 +147,9 @@ class Scheduler:
             self._release(key, job_id)
             return
 
-        jobs.set_state(self.db, self.hub, job_id, jobs.RUNNING,
-                       started_at=jobs._now(self.db),
+        # Dispatched, but not running until the driver actually spawns: a
+        # cluster coming up (or failing to) is 'starting'.
+        jobs.set_state(self.db, self.hub, job_id, jobs.STARTING,
                        run_dir=spec.get("run_dir"))
 
         # Daemon-managed cluster: lease it up before the driver spawns (the
@@ -163,7 +175,14 @@ class Scheduler:
                 return
             self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
                           action="leased", lease=lease_id)
+            if jobs.get(self.db, job_id)["state"] == jobs.CANCELED:
+                # Canceled while the cluster was coming up.
+                self.clusters.release(cluster_key, lease_id)
+                self._release(key, job_id)
+                return
 
+        jobs.set_state(self.db, self.hub, job_id, jobs.RUNNING,
+                       started_at=jobs._now(self.db))
         extender = None
         if lease_id is not None:
             extender = asyncio.get_running_loop().create_task(
@@ -265,6 +284,9 @@ class Scheduler:
     def _release(self, key, job_id):
         if self._running_queues.get(key) == job_id:
             del self._running_queues[key]
+        for ck, jid in list(self._cluster_jobs.items()):
+            if jid == job_id:
+                del self._cluster_jobs[ck]
         self._tasks.pop(job_id, None)
         self.wake()
 
@@ -275,6 +297,12 @@ class Scheduler:
         if job is None:
             raise KeyError(job_id)
         if job["state"] == jobs.QUEUED:
+            jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED,
+                           finished_at=jobs._now(self.db))
+            return jobs.CANCELED
+        if job["state"] == jobs.STARTING:
+            # The dispatch coroutine sees this after the lease returns and
+            # releases it instead of spawning.
             jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED,
                            finished_at=jobs._now(self.db))
             return jobs.CANCELED
