@@ -110,12 +110,14 @@ def edit_job(job_id: int, body: JobEdit, request: Request):
 class Purge(BaseModel):
     states: list[str] = list(jobs.PURGEABLE_STATES)
     project: str | None = None
+    delete_files: bool = True   # a failed run's data is only clutter
 
 
 @router.post("/jobs/purge")
 def purge_jobs(body: Purge, request: Request):
-    """Delete finished failed/canceled/interrupted jobs (and their driver
-    logs). Jobs with a pending retry are kept."""
+    """Delete failed/canceled/interrupted jobs: rows, driver logs, ledger
+    runs, and (by default) whatever they wrote under the project's runs
+    roots. Jobs with a pending retry are kept."""
     app = request.app
     bad = [s for s in body.states if s not in jobs.PURGEABLE_STATES]
     if bad:
@@ -127,10 +129,27 @@ def purge_jobs(body: Purge, request: Request):
                 app.state.db, app.state.config.project(body.project))
         except KeyError as e:
             raise HTTPException(404, str(e))
+    # Read the rows before they go: the run dirs are on them.
+    doomed = [j for j in jobs.list_jobs(app.state.db, limit=1000)
+              if j["state"] in body.states and not j["retry_at"]
+              and (project_id is None or j["project_id"] == project_id)]
+    removed = []
+    if body.delete_files:
+        for j in doomed:
+            try:
+                path = _remove_run_dir(app, j["project"], j.get("run_dir"))
+            except HTTPException:
+                continue        # out of bounds: leave it, keep purging rows
+            if path:
+                removed.append(path)
+            for r in ledger.list_runs(app.state.db, project=j["project"],
+                                      limit=1000):
+                if r.get("job_id") == j["id"]:
+                    ledger.delete_run(app.state.db, r["id"])
     ids = jobs.purge(app.state.db, app.state.hub, body.states, project_id)
     for jid in ids:
         (app.state.runner.jobs_dir / f"{jid}.log").unlink(missing_ok=True)
-    return {"purged": ids}
+    return {"purged": ids, "removed_dirs": removed}
 
 
 class Reorder(BaseModel):

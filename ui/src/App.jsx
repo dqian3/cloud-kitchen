@@ -27,11 +27,8 @@ function UIProvider({ children }) {
     setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)),
                kind === 'error' ? 8000 : 4000)
   }, [])
-  // `check` adds an opt-in checkbox; ask resolves false when canceled,
-  // otherwise true or {checked} when a checkbox was offered.
-  const ask = useCallback((message, danger = false, check = null) =>
-    new Promise(resolve => setDialog({
-      kind: 'confirm', message, danger, check, checked: false, resolve })), [])
+  const ask = useCallback((message, danger = false) =>
+    new Promise(resolve => setDialog({ kind: 'confirm', message, danger, resolve })), [])
   const askText = useCallback((message, value = '') =>
     new Promise(resolve => setDialog({ kind: 'prompt', message, value, resolve })), [])
 
@@ -55,13 +52,6 @@ function UIProvider({ children }) {
         <div className="modal-back" onClick={() => close(dialog.kind === 'prompt' ? null : false)}>
           <div className="modal" onClick={e => e.stopPropagation()}>
             <div className="modal-msg">{dialog.message}</div>
-            {dialog.check && (
-              <label className="modal-check">
-                <input type="checkbox"
-                       onChange={e => { dialog.checked = e.target.checked }} />
-                {dialog.check}
-              </label>
-            )}
             {dialog.kind === 'prompt' && (
               <input autoFocus defaultValue={dialog.value}
                      onChange={e => { dialog.value = e.target.value }}
@@ -74,8 +64,7 @@ function UIProvider({ children }) {
               <button className="link" onClick={() => close(dialog.kind === 'prompt' ? null : false)}>
                 cancel</button>
               <button className={dialog.danger ? 'danger' : ''}
-                      onClick={() => close(dialog.kind === 'prompt' ? dialog.value
-                        : dialog.check ? { checked: dialog.checked } : true)}>
+                      onClick={() => close(dialog.kind === 'prompt' ? dialog.value : true)}>
                 {dialog.danger ? 'delete' : 'ok'}</button>
             </div>
           </div>
@@ -773,19 +762,19 @@ function RunEntry({ entry, display, onChanged }) {
                   onClick={async () => {
                     const what = [run && `run r${run.id}`, job && `job #${job.id}`]
                       .filter(Boolean).join(' and ')
-                    const dir = job?.run_dir || run?.run_dir
-                    const res = await ask(
-                      `Delete ${what}? Without the box below only the records go — `
-                      + 'the data stays on disk and a scan re-indexes it.', true,
-                      dir ? `also delete the data in ${dir} (permanent)` : null)
-                    if (!res) return
-                    const files = res.checked === true
+                    // A failed run is only worth keeping to rerun it, so it
+                    // goes on one click; measurements get a confirm.
+                    const failed = !job || ['failed', 'canceled', 'interrupted']
+                      .includes(job.state)
+                    if (!failed && !await ask(
+                          `Delete ${what} and its data in ${job?.run_dir || run?.run_dir}? `
+                          + 'The measurements are not recoverable.', true)) return
                     setOpen(false)
                     await act(async () => {
-                      if (run) await api.deleteRun(run.id, files)
-                      if (job) await api.deleteJob(job.id, files)
+                      if (run) await api.deleteRun(run.id, true)
+                      if (job) await api.deleteJob(job.id, true)
                     }, false)
-                    notify(`deleted ${what}${files ? ' and its data' : ''}`)
+                    notify(`deleted ${what} and its data`)
                   }}>delete</button>
         </td>
       </tr>
@@ -900,8 +889,12 @@ function RunsSection({ projects, entries, display, onChanged }) {
                   title="delete failed, canceled, and interrupted jobs (ledger runs are kept)"
                   onClick={async () => {
                     if (!await ask(`Delete ${p.name}'s failed, canceled, and `
-                                   + 'interrupted jobs? Ledger runs are kept.', true)) return
-                    try { const r = await api.purgeJobs(p.name); onChanged(); notify(`purged ${r.purged.length} job(s)`) }
+                                   + 'interrupted jobs and everything they wrote?', true)) return
+                    try {
+                      const r = await api.purgeJobs(p.name); onChanged()
+                      notify(`purged ${r.purged.length} job(s)`
+                             + (r.removed_dirs.length ? `, ${r.removed_dirs.length} run dir(s)` : ''))
+                    }
                     catch (e) { notify(e.message || e, 'error') }
                   }}>purge failed</button>
         ))}

@@ -197,8 +197,11 @@ def cmd_purge(config, args):
     body = {"states": args.states}
     if args.project:
         body["project"] = args.project
+    body["delete_files"] = not args.keep_files
     out = _api(config, "/api/jobs/purge", body=body)
     print(f"purged {len(out['purged'])} job(s): {out['purged']}")
+    if out.get("removed_dirs"):
+        print(f"removed {len(out['removed_dirs'])} run dir(s)")
 
 
 def cmd_clusters(config, args):
@@ -272,6 +275,8 @@ def main(argv=None):
     p.add_argument("--project")
     p.add_argument("--states", nargs="+",
                    default=["failed", "canceled", "interrupted"])
+    p.add_argument("--keep-files", action="store_true", dest="keep_files",
+                   help="keep what the purged jobs wrote on disk")
 
     p = sub.add_parser("create", help="provision a cluster's VMs (creates "
                        "instances; retries while a zone is out of capacity)")
