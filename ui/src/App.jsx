@@ -10,6 +10,70 @@ function Chip({ text, color }) {
   return <span className={`chip chip-${color || 'gray'}`}>{text}</span>
 }
 
+// In-page notices and dialogs: the browser's alert/confirm/prompt block the
+// whole tab and can't be styled or dismissed together.
+const UI = React.createContext({
+  notify: () => {}, ask: async () => false, askText: async () => null,
+})
+const useUI = () => React.useContext(UI)
+
+function UIProvider({ children }) {
+  const [toasts, setToasts] = useState([])
+  const [dialog, setDialog] = useState(null)   // {kind, message, value, resolve}
+
+  const notify = useCallback((text, kind = 'info') => {
+    const id = Math.random().toString(36).slice(2)
+    setToasts(ts => [...ts, { id, text: String(text), kind }])
+    setTimeout(() => setToasts(ts => ts.filter(t => t.id !== id)),
+               kind === 'error' ? 8000 : 4000)
+  }, [])
+  const ask = useCallback((message, danger = false) =>
+    new Promise(resolve => setDialog({ kind: 'confirm', message, danger, resolve })), [])
+  const askText = useCallback((message, value = '') =>
+    new Promise(resolve => setDialog({ kind: 'prompt', message, value, resolve })), [])
+
+  function close(result) {
+    dialog?.resolve(result)
+    setDialog(null)
+  }
+
+  return (
+    <UI.Provider value={{ notify, ask, askText }}>
+      {children}
+      <div className="toasts">
+        {toasts.map(t => (
+          <div key={t.id} className={`toast toast-${t.kind}`}
+               onClick={() => setToasts(ts => ts.filter(x => x.id !== t.id))}>
+            {t.text}
+          </div>
+        ))}
+      </div>
+      {dialog && (
+        <div className="modal-back" onClick={() => close(dialog.kind === 'prompt' ? null : false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-msg">{dialog.message}</div>
+            {dialog.kind === 'prompt' && (
+              <input autoFocus defaultValue={dialog.value}
+                     onChange={e => { dialog.value = e.target.value }}
+                     onKeyDown={e => {
+                       if (e.key === 'Enter') close(dialog.value)
+                       if (e.key === 'Escape') close(null)
+                     }} />
+            )}
+            <div className="modal-actions">
+              <button className="link" onClick={() => close(dialog.kind === 'prompt' ? null : false)}>
+                cancel</button>
+              <button className={dialog.danger ? 'danger' : ''}
+                      onClick={() => close(dialog.kind === 'prompt' ? dialog.value : true)}>
+                {dialog.danger ? 'delete' : 'ok'}</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </UI.Provider>
+  )
+}
+
 function fmtTs(ts) {
   return ts ? ts.replace('T', ' ').slice(5, 19) : '—'
 }
@@ -129,6 +193,7 @@ function ClusterCard({ c, onAction }) {
 // ---------- jobs ----------
 
 function SubmitForm({ project, clusters, catalog, onSubmitted }) {
+  const { notify, askText } = useUI()
   const [selected, setSelected] = useState([])
   const [freeText, setFreeText] = useState('')
   const [flags, setFlags] = useState('')
@@ -281,11 +346,12 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
             </button>
           ))}
           <button type="button" className="agg" title="delete a preset"
-                  onClick={() => {
-                    const n = prompt('delete which preset?',
-                                     sweeps[0]?.name || '')
+                  onClick={async () => {
+                    const n = await askText('delete which preset?',
+                                            sweeps[0]?.name || '')
                     const hit = sweeps.find(s2 => s2.name === n)
                     if (hit) api.deleteSweep(hit.id).then(loadSweeps)
+                    else if (n) notify(`no preset named ${n}`, 'error')
                   }}>✕</button>
         </div>
       )}
@@ -296,11 +362,12 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
                   onClick={async () => {
                     const sweep = buildSweep()
                     if (sweep === null) return
-                    const n = prompt('preset name:')
+                    const n = await askText('preset name:')
                     if (!n) return
                     try {
                       await api.saveSweep(project, n.trim(), sweep)
                       loadSweeps()
+                      notify(`saved preset ${n.trim()}`)
                     } catch (e2) { setErr(String(e2.message || e2)) }
                   }}>save preset</button>
           <label>base
@@ -490,6 +557,7 @@ function ProgressPanel({ p }) {
 }
 
 function JobRow({ job, onChanged, reorder, onMove, inherits }) {
+  const { notify, askText } = useUI()
   const [open, setOpen] = useState(false)
   const [log, setLog] = useState('')
   const timer = useRef(null)
@@ -507,7 +575,7 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
   }, [open, fetchLog])
 
   async function act(fn) {
-    try { await fn(); onChanged() } catch (e) { alert(e.message || e) }
+    try { await fn(); onChanged() } catch (e) { notify(e.message || e, 'error') }
   }
 
   const queued = job.state === 'queued'
@@ -555,8 +623,8 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
             </>
           )}
           {queued && !reorder && (
-            <button className="link" onClick={() => {
-              const exp = prompt('experiments (space-separated):',
+            <button className="link" onClick={async () => {
+              const exp = await askText('experiments (space-separated):',
                 (spec.experiments || []).join(' '))
               if (exp !== null) {
                 act(() => api.editJob(job.id,
@@ -603,6 +671,7 @@ function fmtNum(v) {
 // run; a backfilled old run has no job — and the row says which.
 function RunEntry({ entry, display, onChanged }) {
   const { job, run } = entry
+  const { notify, ask, askText } = useUI()
   const [open, setOpen] = useState(false)
   const [detail, setDetail] = useState(null)
   const [log, setLog] = useState(null)
@@ -615,12 +684,14 @@ function RunEntry({ entry, display, onChanged }) {
     if (job) api.jobLog(job.id, 60).then(r => setLog(r.log)).catch(() => {})
   }, [open, run?.id, job?.id])
 
-  async function act(fn) {
+  // `refresh: false` for actions that remove the run — re-reading it would
+  // 404 on the row we just deleted.
+  async function act(fn, refresh = true) {
     try {
       await fn()
-      if (run) setDetail(await api.run(run.id))
+      if (run && refresh) setDetail(await api.run(run.id))
       onChanged()
-    } catch (e) { alert(e.message || e) }
+    } catch (e) { notify(e.message || e, 'error') }
   }
 
   const metricCols = display?.metrics?.length
@@ -679,8 +750,8 @@ function RunEntry({ entry, display, onChanged }) {
           )}
           {job?.spec.sweep && (
             <button className="link" title="save this one-off's params as a preset"
-                    onClick={() => {
-                      const n = prompt('preset name:')
+                    onClick={async () => {
+                      const n = await askText('preset name:')
                       if (n) act(() => api.saveSweep(job.project, n.trim(), job.spec.sweep))
                     }}>save</button>
           )}
@@ -688,9 +759,13 @@ function RunEntry({ entry, display, onChanged }) {
             {open ? 'hide' : 'details'}</button>
           {run && (
             <button className="link" title="remove this run from the ledger (files on disk stay; a scan re-indexes them)"
-                    onClick={() => {
-                      if (confirm(`Delete run r${run.id} (${run.experiment}) from the ledger?`))
-                        act(() => api.deleteRun(run.id).then(() => setOpen(false)))
+                    onClick={async () => {
+                      if (await ask(`Delete run r${run.id} (${run.experiment}) from the ledger? `
+                                    + 'Files on disk stay; a scan re-indexes them.', true)) {
+                        setOpen(false)
+                        await act(() => api.deleteRun(run.id), false)
+                        notify(`deleted run r${run.id}`)
+                      }
                     }}>delete</button>
           )}
         </td>
@@ -717,8 +792,8 @@ function RunEntry({ entry, display, onChanged }) {
                 <button className="link" onClick={() => {
                   if (note.trim()) act(() => api.addNote(run.id, note.trim()).then(() => setNote('')))
                 }}>note</button>
-                <button className="link" onClick={() => {
-                  const t = prompt('tag:')
+                <button className="link" onClick={async () => {
+                  const t = await askText('tag:')
                   if (t) act(() => api.addTag(run.id, t.trim()))
                 }}>tag</button>
                 {(detail.tags || []).map(t => (
@@ -782,14 +857,15 @@ function RunEntry({ entry, display, onChanged }) {
 
 function RunsSection({ projects, entries, display, onChanged }) {
   const [scanBusy, setScanBusy] = useState(false)
+  const { notify, ask } = useUI()
 
   async function scan(name) {
     setScanBusy(true)
     try {
       const r = await api.scanRuns(name)
       onChanged()
-      alert(`${name}: ${r.added} added, ${r.updated} refreshed`)
-    } catch (e) { alert(e.message || e) } finally { setScanBusy(false) }
+      notify(`${name}: ${r.added} added, ${r.updated} refreshed`)
+    } catch (e) { notify(e.message || e, 'error') } finally { setScanBusy(false) }
   }
 
   return (
@@ -804,9 +880,10 @@ function RunsSection({ projects, entries, display, onChanged }) {
           <button key={`purge-${p.name}`} className="link"
                   title="delete failed, canceled, and interrupted jobs (ledger runs are kept)"
                   onClick={async () => {
-                    if (!confirm(`Delete ${p.name}'s failed/canceled/interrupted jobs?`)) return
-                    try { const r = await api.purgeJobs(p.name); onChanged(); alert(`purged ${r.purged.length}`) }
-                    catch (e) { alert(e.message || e) }
+                    if (!await ask(`Delete ${p.name}'s failed, canceled, and `
+                                   + 'interrupted jobs? Ledger runs are kept.', true)) return
+                    try { const r = await api.purgeJobs(p.name); onChanged(); notify(`purged ${r.purged.length} job(s)`) }
+                    catch (e) { notify(e.message || e, 'error') }
                   }}>purge failed</button>
         ))}
       </h2>
@@ -875,6 +952,11 @@ function DaemonLog() {
 // ---------- app ----------
 
 export default function App() {
+  return <UIProvider><Dashboard /></UIProvider>
+}
+
+function Dashboard() {
+  const { notify, ask, askText } = useUI()
   const [health, setHealth] = useState(null)
   const [projects, setProjects] = useState([])
   const [jobs, setJobs] = useState([])
@@ -950,21 +1032,22 @@ export default function App() {
       if (kind === 'up') await api.clusterUp(c.key, ttl || 120)
       else if (kind === 'down') {
         if (c.leases.length &&
-            !confirm(`${c.key} has live leases — force down?`)) return
+            !await ask(`${c.key} has live leases — force it down?`, true)) return
         await api.clusterDown(c.key, c.leases.length > 0)
       } else if (kind === 'refresh') await api.clusterRefresh(c.key)
       else if (kind === 'create') {
-        if (!confirm(`Provision ${c.key}'s VMs? This CREATES instances ` +
-                     '(billed). Existing VMs are skipped.')) return
+        if (!await ask(`Provision ${c.key}'s VMs? This CREATES instances `
+                       + '(billed). Existing VMs are skipped.')) return
         await api.clusterCreate(c.key)
+        notify(`provisioning ${c.key}`)
       } else if (kind === 'create-cancel') {
         await api.clusterCreateCancel(c.key)
       } else if (kind === 'extend') {
-        const m = prompt('extend lease by minutes:', '120')
+        const m = await askText('extend lease by minutes:', '120')
         if (m) await api.clusterExtend(c.key, lease.id, +m)
       }
       reload()
-    } catch (e) { alert(e.message || e) }
+    } catch (e) { notify(e.message || e, 'error') }
   }
 
   // Everything below the tabs is scoped to one project.
@@ -1008,7 +1091,8 @@ export default function App() {
     else if (how === 'down' && i < order.length - 1) {
       [order[i + 1], order[i]] = [order[i], order[i + 1]]
     } else return
-    try { await api.reorderJobs(order); reload() } catch (e) { alert(e.message || e) }
+    try { await api.reorderJobs(order); reload() }
+    catch (e) { notify(e.message || e, 'error') }
   }
 
   return (

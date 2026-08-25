@@ -121,3 +121,24 @@ h2 button.link { margin-left: 0.6rem; font-size: 0.75rem; }
 .tab-count { margin-left: 0.35rem; background: var(--blue); color: #fff;
   border-radius: 999px; padding: 0 0.4rem; font-size: 0.72rem; }
 .after-input { width: 4rem; }
+
+/* in-page notices and dialogs (no browser alert/confirm/prompt) */
+.toasts { position: fixed; right: 1rem; bottom: 1rem; z-index: 20;
+  display: flex; flex-direction: column; gap: 0.4rem; max-width: 26rem; }
+.toast { background: var(--card); border: 1px solid var(--line);
+  border-left: 3px solid var(--blue); border-radius: 6px;
+  padding: 0.5rem 0.75rem; font-size: 0.85rem; cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18); }
+.toast-error { border-left-color: var(--red); }
+.modal-back { position: fixed; inset: 0; z-index: 30; display: flex;
+  align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.35); }
+.modal { background: var(--card); border: 1px solid var(--line);
+  border-radius: 8px; padding: 1rem 1.25rem; min-width: 22rem;
+  max-width: 32rem; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25); }
+.modal-msg { margin-bottom: 0.6rem; }
+.modal input { width: 100%; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0.3rem 0.4rem; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem;
+  align-items: center; margin-top: 0.8rem; }
+button.danger { background: var(--red); }
