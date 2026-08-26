@@ -7,6 +7,7 @@ row ids, which lets a reconnecting client replay from Last-Event-ID.
 
 import asyncio
 import json
+import sqlite3
 
 
 class EventHub:
@@ -20,11 +21,15 @@ class EventHub:
 
     def emit(self, type: str, job_id=None, cluster_id=None, **payload) -> int:
         """Record an event and broadcast it. Safe to call from any thread."""
-        event_id = self.db.insert(
-            "INSERT INTO events (job_id, cluster_id, type, payload_json) "
-            "VALUES (?, ?, ?, ?)",
-            (job_id, cluster_id, type, json.dumps(payload)),
-        )
+        try:
+            event_id = self._insert(type, job_id, cluster_id, payload)
+        except sqlite3.IntegrityError:
+            # The job or cluster went away mid-flight (deleted while its
+            # dispatch was still running). The event still happened, so keep
+            # it with the id in the payload instead of losing it — and, more
+            # to the point, never raise inside a caller's failure path.
+            payload = {**payload, "job_id": job_id, "cluster_id": cluster_id}
+            event_id = self._insert(type, None, None, payload)
         row = self.db.query_one("SELECT ts FROM events WHERE id = ?", (event_id,))
         event = {
             "id": event_id, "ts": row["ts"], "type": type,
@@ -33,6 +38,13 @@ class EventHub:
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._broadcast, event)
         return event_id
+
+    def _insert(self, type, job_id, cluster_id, payload) -> int:
+        return self.db.insert(
+            "INSERT INTO events (job_id, cluster_id, type, payload_json) "
+            "VALUES (?, ?, ?, ?)",
+            (job_id, cluster_id, type, json.dumps(payload)),
+        )
 
     def _broadcast(self, event):
         for q in list(self._subscribers):

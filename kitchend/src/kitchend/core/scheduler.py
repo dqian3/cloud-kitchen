@@ -211,6 +211,16 @@ class Scheduler:
     async def _execute(self, job, key):
         job_id = job["id"]
         try:
+            await self._run(job, key)
+        finally:
+            # The queue slot goes back whatever happened — including a
+            # job deleted mid-dispatch, whose bookkeeping raises. One
+            # slot never returned stops the scheduler entirely.
+            self._release(key, job_id)
+
+    async def _run(self, job, key):
+        job_id = job["id"]
+        try:
             project_cfg = self.config.project(job["project"])
             spec = dict(job["spec"])
             if not spec.get("run_dir"):
@@ -228,7 +238,6 @@ class Scheduler:
         except (KeyError, ValueError) as e:
             jobs.finish(self.db, self.hub, job_id, jobs.FAILED, last_error=str(e))
             self.hub.emit("job.error", job_id=job_id, error=str(e))
-            self._release(key, job_id)
             return
 
         # Daemon-managed cluster: lease it up before the driver spawns (the
@@ -259,14 +268,12 @@ class Scheduler:
                               job_id=job_id, delay_secs=delay)
                 # No attempt is spent: nothing ran.
                 jobs.wait_again(self.db, self.hub, job_id, delay, error)
-                self._release(key, job_id)
                 return
             self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
                           action="leased", lease=lease_id)
             if jobs.get(self.db, job_id)["state"] == jobs.DONE:
                 # Canceled while the cluster was coming up.
                 self.clusters.release(cluster_key, lease_id)
-                self._release(key, job_id)
                 return
 
         n = jobs.start_attempt(self.db, self.hub, job_id)
@@ -289,7 +296,6 @@ class Scheduler:
             jobs.end_attempt(self.db, job_id, error=repr(e))
             jobs.finish(self.db, self.hub, job_id, jobs.FAILED, last_error=repr(e))
             self.hub.emit("job.error", job_id=job_id, error=repr(e))
-            self._release(key, job_id)
             return
         finally:
             if extender is not None:
@@ -326,10 +332,11 @@ class Scheduler:
     def _finish(self, job, key, rc):
         job_id = job["id"]
         current = jobs.get(self.db, job_id)
+        if current is None:            # deleted while it ran; nothing to record
+            return
         points = ((current["progress"] or {}).get("points") or {}).get("done", 0)
         jobs.end_attempt(self.db, job_id, exit_code=rc, points=points)
         if current["state"] == jobs.DONE:      # canceled while it ran
-            self._release(key, job_id)
             return
         if rc == 0:
             jobs.finish(self.db, self.hub, job_id, jobs.OK)
@@ -337,7 +344,6 @@ class Scheduler:
             jobs.finish(self.db, self.hub, job_id, jobs.DEGRADED)
         else:
             self._retry_or_fail(job_id, rc)
-        self._release(key, job_id)
 
     def _retry_or_fail(self, job_id, exit_code):
         """A failed run gets another attempt in the same directory, unless it
