@@ -1,4 +1,4 @@
-"""SQLite schema and migrations.
+"""SQLite schema.
 
 One writer: the daemon process (the MCP server runs in-process; the CLI talks
 HTTP). WAL mode so readers never block on the writer.
@@ -7,9 +7,7 @@ HTTP). WAL mode so readers never block on the writer.
 import sqlite3
 from pathlib import Path
 
-MIGRATIONS = [
-    # v1 — jobs / clusters / events / results catalog
-    """
+SCHEMA = """
     CREATE TABLE projects (
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL UNIQUE,
@@ -53,25 +51,43 @@ MIGRATIONS = [
         released_at TEXT
     );
 
+    -- One row per job, for its whole life: waiting -> running -> done.
+    -- A retry raises attempts and goes back to waiting; it never adds a row.
     CREATE TABLE jobs (
         id INTEGER PRIMARY KEY,
         project_id INTEGER NOT NULL REFERENCES projects(id),
         spec_json TEXT NOT NULL,
         cluster_id INTEGER REFERENCES clusters(id),
         run_dir TEXT,
-        state TEXT NOT NULL DEFAULT 'queued',
+        state TEXT NOT NULL DEFAULT 'waiting',   -- waiting | running | done
+        outcome TEXT,                            -- done only: ok|degraded|failed|canceled
         priority INTEGER NOT NULL DEFAULT 0,
-        retries_left INTEGER NOT NULL DEFAULT 0,
-        exit_code INTEGER,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 20,
+        next_attempt_at TEXT,                    -- waiting only: not before this
+        last_error TEXT,
         pid INTEGER,
         events_offset INTEGER NOT NULL DEFAULT 0,
+        progress_json TEXT,
         estimate_json TEXT,
-        parent_job_id INTEGER REFERENCES jobs(id),
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         started_at TEXT,
         finished_at TEXT
     );
     CREATE INDEX idx_jobs_state ON jobs(state, cluster_id);
+
+    -- One row per driver invocation: the retry history, without the rows.
+    CREATE TABLE job_attempts (
+        id INTEGER PRIMARY KEY,
+        job_id INTEGER NOT NULL REFERENCES jobs(id),
+        n INTEGER NOT NULL,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        finished_at TEXT,
+        exit_code INTEGER,
+        points INTEGER,                          -- points this attempt finished
+        error TEXT
+    );
+    CREATE INDEX idx_job_attempts_job ON job_attempts(job_id, n);
 
     CREATE TABLE events (
         id INTEGER PRIMARY KEY,
@@ -84,6 +100,8 @@ MIGRATIONS = [
     CREATE INDEX idx_events_job ON events(job_id, id);
     CREATE INDEX idx_events_type ON events(type, ts);
 
+    -- The ledger: one row per sweep dir, and only once it holds a point.
+    -- status describes the data (ok|degraded|failed), never the job.
     CREATE TABLE runs (
         id INTEGER PRIMARY KEY,
         project_id INTEGER NOT NULL REFERENCES projects(id),
@@ -97,7 +115,7 @@ MIGRATIONS = [
         status TEXT,
         dir_exists INTEGER NOT NULL DEFAULT 1,
         archived INTEGER NOT NULL DEFAULT 0,
-        job_id INTEGER REFERENCES jobs(id),
+        job_id INTEGER REFERENCES jobs(id),      -- provenance: last writer
         indexed_at TEXT
     );
 
@@ -111,14 +129,6 @@ MIGRATIONS = [
         summary_path TEXT
     );
     CREATE INDEX idx_run_points_run ON run_points(run_id);
-
-    CREATE TABLE figures (
-        id INTEGER PRIMARY KEY,
-        run_id INTEGER NOT NULL REFERENCES runs(id),
-        relpath TEXT NOT NULL,
-        kind TEXT,
-        mtime REAL
-    );
 
     CREATE TABLE tags (
         id INTEGER PRIMARY KEY,
@@ -135,13 +145,7 @@ MIGRATIONS = [
         ts TEXT NOT NULL DEFAULT (datetime('now')),
         text TEXT NOT NULL
     );
-    """,
-    # v2 — ingest: progress summary folded from <run_dir>/events.jsonl
-    """
-    ALTER TABLE jobs ADD COLUMN progress_json TEXT;
-    """,
-    # v3 — saved sweeps: one-off experiments promoted to reusable presets
-    """
+
     CREATE TABLE saved_sweeps (
         id INTEGER PRIMARY KEY,
         project_id INTEGER NOT NULL REFERENCES projects(id),
@@ -150,12 +154,9 @@ MIGRATIONS = [
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         UNIQUE (project_id, name)
     );
-    """,
-    # v4 — when a failed job's pending retry will requeue (NULL = none)
-    """
-    ALTER TABLE jobs ADD COLUMN retry_at TEXT;
-    """,
-]
+"""
+
+SCHEMA_VERSION = 1
 
 
 class Db:
@@ -208,8 +209,19 @@ def open_db(path: Path) -> sqlite3.Connection:
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    version = conn.execute("PRAGMA user_version").fetchone()[0]
-    for i, script in enumerate(MIGRATIONS[version:], start=version + 1):
-        with conn:
-            conn.executescript(script)
-            conn.execute(f"PRAGMA user_version = {i}")
+    """Create the schema, rebuilding the file if it holds an older one.
+
+    The daemon's tables are a working record of what it is doing now; the
+    part worth keeping is the ledger, and that is rebuilt from the run dirs
+    on disk with `runs/scan`. So a schema change drops and recreates rather
+    than migrating.
+    """
+    if conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
+        return
+    with conn:
+        for (name,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name NOT LIKE 'sqlite_%'").fetchall():
+            conn.execute(f"DROP TABLE IF EXISTS {name}")
+        conn.executescript(SCHEMA)
+        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

@@ -1,21 +1,22 @@
-"""The queue: per-queue FIFO, one running job per queue, bounded resume-retries.
+"""The queue: per-queue FIFO, one running job per queue, bounded attempts.
 
 A job's queue key is spec.queue (or spec.cluster, or the project name), so two
 jobs that would fight over the same cluster serialize while different clusters
 run in parallel, capped by max_concurrent_queues.
 
-Exit-code policy (the drivers' existing contract):
-  0 → succeeded
-  2 → degraded: data was written; never auto-retried (resubmit-resume by hand)
-  * → failed: retried up to max_retries, each retry resuming into the same
-      run_dir so completed points are skipped.
+A job stays one row from submit to done. Exit-code policy (the drivers'
+existing contract):
+  0 → done, ok
+  2 → done, degraded: data was written; never retried automatically
+  * → another attempt, resuming into the same run_dir so completed points are
+      skipped, until max_attempts
 
-A cluster that will not come up is not one of those: nothing ran, so the job
-goes back to queued with its next attempt due, and the cluster is held down
-for that delay so the rest of its queue does not probe it in turn.
+A cluster that will not come up costs no attempt: nothing ran, so the job
+stays waiting with its next attempt due, and the cluster is held down for
+that delay so the rest of its queue does not probe it in turn.
 
-Retries stop early when two attempts in a row die before finishing a point:
-that is a broken environment, not a flaky run.
+Attempts stop early when two in a row die before finishing a point: that is a
+broken environment, not a flaky run.
 """
 
 import asyncio
@@ -34,31 +35,21 @@ class Scheduler:
         self.clusters = clusters                      # ClusterManager, for
         self._tasks: dict[int, asyncio.Task] = {}     # spec.cluster leases
         self._running_queues: dict[str, int] = {}     # queue key -> job_id
-        self._requeues: dict[int, asyncio.Task] = {}  # failed job -> retry timer
         self._cluster_jobs: dict[str, int] = {}       # leased cluster -> job_id
         # A cluster that failed to come up (a zone stockout) is held for the
-        # failed job's retry delay, so the queue behind it does not burn one
+        # waiting job's delay, so the queue behind it does not burn one
         # partial start per job discovering the same thing.
         self._cluster_cooldown: dict[str, float] = {}  # cluster key -> monotonic
         self._wake = asyncio.Event()
         self._stopped = False
-        # A retry timer lives only in the process that started it. A failed
-        # job with a retry still pending (retry_at set) is re-armed when the
-        # loop starts; one whose retry already spawned its child (retry_at
-        # cleared) has nothing left to do, and is zeroed so an `after` gate
-        # waiting on it does not wait forever.
-        self.db.execute(
-            "UPDATE jobs SET retries_left = 0 "
-            "WHERE state = ? AND retries_left > 0 AND retry_at IS NULL",
-            (jobs.FAILED,))
         self._restore_cooldowns()
         # Only the front of the queue waits on a cluster (see jobs.reorder):
         # hold that invariant across a restart too.
         self.db.execute(
-            "UPDATE jobs SET retry_at = NULL WHERE state = ? AND id NOT IN "
-            "(SELECT id FROM jobs WHERE state = ? "
-            " ORDER BY priority DESC, id ASC LIMIT 1)",
-            (jobs.QUEUED, jobs.QUEUED))
+            "UPDATE jobs SET next_attempt_at = NULL WHERE state = ? AND id "
+            "NOT IN (SELECT id FROM jobs WHERE state = ? "
+            "        ORDER BY priority DESC, id ASC LIMIT 1)",
+            (jobs.WAITING, jobs.WAITING))
 
     def _restore_cooldowns(self):
         """Rebuild the cluster cooldowns from the jobs a previous process
@@ -66,11 +57,11 @@ class Scheduler:
         failed to come up."""
         for row in self.db.query(
                 "SELECT j.spec_json, p.name AS project, "
-                "CAST((julianday(j.retry_at) - julianday('now')) * 86400 "
+                "CAST((julianday(j.next_attempt_at) - julianday('now')) * 86400 "
                 "AS INTEGER) AS left_s FROM jobs j "
                 "JOIN projects p ON p.id = j.project_id "
-                "WHERE j.state = ? AND j.retry_at IS NOT NULL",
-                (jobs.QUEUED,)):
+                "WHERE j.state = ? AND j.next_attempt_at IS NOT NULL",
+                (jobs.WAITING,)):
             cluster = (json.loads(row["spec_json"]) or {}).get("cluster")
             left = int(row["left_s"] or 0)
             if not cluster or left <= 0:
@@ -82,23 +73,7 @@ class Scheduler:
     def wake(self):
         self._wake.set()
 
-    def _rearm_retries(self):
-        """Restore the retry timers a previous daemon process left pending,
-        with whatever delay they had left."""
-        for row in self.db.query(
-                "SELECT id, CAST((julianday(retry_at) - julianday('now')) "
-                "* 86400 AS INTEGER) AS left_s FROM jobs "
-                "WHERE state = ? AND retries_left > 0 AND retry_at IS NOT NULL",
-                (jobs.FAILED,)):
-            job = jobs.get(self.db, row["id"])
-            delay = max(0, int(row["left_s"] or 0))
-            self.hub.emit("job.retry_rearmed", job_id=job["id"], delay_secs=delay,
-                          retries_left=job["retries_left"] - 1)
-            self._requeues[job["id"]] = asyncio.get_running_loop().create_task(
-                self._requeue_after(job, delay, job["retries_left"] - 1))
-
     async def loop(self):
-        self._rearm_retries()
         while not self._stopped:
             try:
                 self._dispatch()
@@ -121,19 +96,21 @@ class Scheduler:
             return
         for row in self.db.query(
             "SELECT j.id FROM jobs j WHERE j.state = ? "
-            # retry_at on a queued job: its cluster would not come up, and
-            # the next attempt is not due yet. Outlives a daemon restart,
-            # unlike the in-memory cooldown that holds the rest of the queue.
-            "AND (j.retry_at IS NULL OR j.retry_at <= datetime('now')) "
-            "ORDER BY j.priority DESC, j.id ASC", (jobs.QUEUED,)
+            # next_attempt_at: a failed run waiting out its delay, or a
+            # cluster that would not come up. Outlives a restart, unlike the
+            # in-memory cooldown that holds the rest of the queue.
+            "AND (j.next_attempt_at IS NULL "
+            "     OR j.next_attempt_at <= datetime('now')) "
+            "ORDER BY j.priority DESC, j.id ASC", (jobs.WAITING,)
         ):
             job = jobs.get(self.db, row["id"])
             gate = self._after_gate(job)
             if gate == "wait":
                 continue
             if gate == "cancel":
-                jobs.set_state(self.db, self.hub, job["id"], jobs.CANCELED,
-                               finished_at=jobs._now(self.db))
+                jobs.finish(self.db, self.hub, job["id"], jobs.CANCELED,
+                            last_error=f"job {job['spec'].get('after')} it "
+                                       "waited for did not produce data")
                 self.hub.emit("job.dependency_canceled", job_id=job["id"],
                               after=job["spec"].get("after"))
                 continue
@@ -171,11 +148,11 @@ class Scheduler:
                 return True
         return False
 
-    def next_queued(self):
+    def next_waiting(self):
         """The job that dispatches next (priority DESC, id ASC), or None."""
         row = self.db.query_one(
             "SELECT id FROM jobs WHERE state = ? "
-            "ORDER BY priority DESC, id ASC LIMIT 1", (jobs.QUEUED,))
+            "ORDER BY priority DESC, id ASC LIMIT 1", (jobs.WAITING,))
         return jobs.get(self.db, row["id"]) if row else None
 
     def _shares_cluster(self, a, b) -> bool:
@@ -190,38 +167,21 @@ class Scheduler:
     def _after_gate(self, job) -> str:
         """'ready' | 'wait' | 'cancel' for a job's `after` dependency.
 
-        The dependency is judged at the end of the predecessor's retry chain:
-        a failed job whose auto-retry is still queued means "wait", and a
-        chain that ultimately produced data (succeeded/degraded) satisfies
-        the dependent even though the first attempt failed. A chain that
-        ended failed/canceled/interrupted cancels the dependent — silently
-        burning cluster money after a broken predecessor is the worse
-        default; resubmit the canceled job to run it anyway.
+        One row per job means there is no chain to walk: the dependency is
+        ready when it is done and produced data, and a dependency that ended
+        without data cancels the dependent — silently burning cluster money
+        after a broken predecessor is the worse default; resubmit the
+        canceled job to run it anyway.
         """
         after = job["spec"].get("after")
         if after is None:
             return "ready"
-        current = after
-        while True:
-            row = self.db.query_one(
-                "SELECT id FROM jobs WHERE parent_job_id = ? "
-                "ORDER BY id DESC LIMIT 1", (current,))
-            if row is None:
-                break
-            current = row["id"]
-        dep = jobs.get(self.db, current)
+        dep = jobs.get(self.db, after)
         if dep is None:
             return "cancel"     # dangling reference
-        if dep["state"] in (jobs.SUCCEEDED, jobs.DEGRADED):
-            return "ready"
-        if dep["state"] in jobs.ACTIVE_STATES:
+        if dep["state"] != jobs.DONE:
             return "wait"
-        # failed / canceled / interrupted — but a scheduled retry may not
-        # have inserted its row yet; retries_left > 0 on a failure means one
-        # is coming, so keep waiting rather than canceling into the gap.
-        if dep["state"] == jobs.FAILED and dep["retries_left"] > 0:
-            return "wait"
-        return "cancel"
+        return "ready" if dep["outcome"] in (jobs.OK, jobs.DEGRADED) else "cancel"
 
     async def _execute(self, job, key):
         job_id = job["id"]
@@ -229,31 +189,28 @@ class Scheduler:
             project_cfg = self.config.project(job["project"])
             spec = dict(job["spec"])
             if not spec.get("run_dir"):
-                # The row's dir, if a previous attempt already named one: a
-                # job waiting out a cluster keeps the same output dir instead
-                # of minting a fresh timestamp per attempt.
+                # One directory per job: the first attempt names it, every
+                # later one resumes into it.
                 spec["run_dir"] = job.get("run_dir") or str(
                     jobs.default_run_dir(project_cfg, job_id))
                 self.db.execute("UPDATE jobs SET run_dir = ? WHERE id = ?",
                                 (spec["run_dir"], job_id))
+            if job["attempts"]:
+                # Every attempt after the first resumes: the points the last
+                # one finished are on disk and must not be run again.
+                spec["resume"] = True
             argv, cwd = jobs.build_command(project_cfg, spec)
         except (KeyError, ValueError) as e:
-            jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
-                           finished_at=jobs._now(self.db))
+            jobs.finish(self.db, self.hub, job_id, jobs.FAILED, last_error=str(e))
             self.hub.emit("job.error", job_id=job_id, error=str(e))
             self._release(key, job_id)
             return
 
-        # Dispatched, but not running until the driver actually spawns: a
-        # cluster coming up (or failing to) is 'starting'.
-        jobs.set_state(self.db, self.hub, job_id, jobs.STARTING,
-                       run_dir=spec.get("run_dir"), retry_at=None)
-
         # Daemon-managed cluster: lease it up before the driver spawns (the
         # driver assumes VMs are running), keep the lease renewed while the
-        # job lives, release it after. The tick loop stops the cluster ~a
-        # minute after the last lease goes, so a chained job on the same
-        # cluster picks the lease up without a VM cycle in between.
+        # job lives, release it after. The job stays `waiting` until the
+        # driver actually spawns — a cluster coming up is the cluster's
+        # business, and its state says so.
         cluster_key = lease_id = None
         ttl = int(spec.get("cluster_ttl_minutes", 60))
         if spec.get("cluster") and self.clusters is not None:
@@ -268,31 +225,33 @@ class Scheduler:
                                                   purpose=f"job-{job_id}",
                                                   **subset)
             except Exception as e:
-                self.hub.emit("job.error", job_id=job_id,
-                              error=f"cluster bring-up failed: {e!r}")
+                error = f"cluster bring-up failed: {e!r}"
+                self.hub.emit("job.error", job_id=job_id, error=error)
                 delay = int(spec.get("retry_delay_secs",
                                      jobs.DEFAULT_RETRY_DELAY_SECS))
                 self._cluster_cooldown[cluster_key] = time.monotonic() + delay
                 self.hub.emit("cluster.cooldown", cluster=cluster_key,
                               job_id=job_id, delay_secs=delay)
-                self._wait_for_cluster(job_id, delay)
+                # No attempt is spent: nothing ran.
+                jobs.wait_again(self.db, self.hub, job_id, delay, error)
                 self._release(key, job_id)
                 return
             self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
                           action="leased", lease=lease_id)
-            if jobs.get(self.db, job_id)["state"] == jobs.CANCELED:
+            if jobs.get(self.db, job_id)["state"] == jobs.DONE:
                 # Canceled while the cluster was coming up.
                 self.clusters.release(cluster_key, lease_id)
                 self._release(key, job_id)
                 return
 
-        jobs.set_state(self.db, self.hub, job_id, jobs.RUNNING,
-                       started_at=jobs._now(self.db))
+        n = jobs.start_attempt(self.db, self.hub, job_id)
+        jobs.set_state(self.db, self.hub, job_id, jobs.RUNNING)
         extender = None
         if lease_id is not None:
             extender = asyncio.get_running_loop().create_task(
                 self._keep_lease(cluster_key, lease_id, ttl))
-        self.hub.emit("job.command", job_id=job_id, argv=argv, cwd=str(cwd))
+        self.hub.emit("job.command", job_id=job_id, argv=argv, cwd=str(cwd),
+                      attempt=n)
         try:
             rc = await self.runner.run(
                 job_id, argv, cwd,
@@ -302,8 +261,8 @@ class Scheduler:
         except asyncio.CancelledError:
             raise
         except Exception as e:  # spawn failure (bad cwd, missing binary)
-            jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
-                           finished_at=jobs._now(self.db))
+            jobs.end_attempt(self.db, job_id, error=repr(e))
+            jobs.finish(self.db, self.hub, job_id, jobs.FAILED, last_error=repr(e))
             self.hub.emit("job.error", job_id=job_id, error=repr(e))
             self._release(key, job_id)
             return
@@ -311,8 +270,9 @@ class Scheduler:
             if extender is not None:
                 extender.cancel()
             if lease_id is not None:
-                nxt = self.next_queued()
-                if nxt is not None and self._shares_cluster(job, nxt):
+                nxt = self.next_waiting()
+                if nxt is not None and nxt["id"] != job_id \
+                        and self._shares_cluster(job, nxt):
                     # The head of the queue runs on these VMs: keep them up
                     # for it rather than stop now and start again.
                     self.clusters.hold(cluster_key, 600, for_job=nxt["id"])
@@ -325,16 +285,6 @@ class Scheduler:
                                   error=f"lease release failed: {e!r}")
 
         self._finish(job, key, rc)
-
-    def _wait_for_cluster(self, job_id, delay):
-        """A cluster that would not come up leaves the job queued, not failed.
-        Nothing ran, so there is nothing to record: a failed row plus a retry
-        row per attempt would bury the jobs that did run. The cooldown holds
-        dispatch; retry_at only says when the next attempt is due, and the
-        job's retries stay for real failures."""
-        self.db.execute("UPDATE jobs SET retry_at = datetime('now', ?) "
-                        "WHERE id = ?", (f"+{delay} seconds", job_id))
-        jobs.set_state(self.db, self.hub, job_id, jobs.QUEUED)
 
     async def _keep_lease(self, cluster_key, lease_id, ttl_minutes):
         """Renew a job's cluster lease at half-TTL cadence while it runs, so
@@ -350,82 +300,50 @@ class Scheduler:
 
     def _finish(self, job, key, rc):
         job_id = job["id"]
-        now = jobs._now(self.db)
         current = jobs.get(self.db, job_id)
-        if current["state"] == jobs.CANCELED:
+        points = ((current["progress"] or {}).get("points") or {}).get("done", 0)
+        jobs.end_attempt(self.db, job_id, exit_code=rc, points=points)
+        if current["state"] == jobs.DONE:      # canceled while it ran
             self._release(key, job_id)
             return
         if rc == 0:
-            jobs.set_state(self.db, self.hub, job_id, jobs.SUCCEEDED,
-                           exit_code=rc, finished_at=now)
+            jobs.finish(self.db, self.hub, job_id, jobs.OK)
         elif rc == 2:
-            jobs.set_state(self.db, self.hub, job_id, jobs.DEGRADED,
-                           exit_code=rc, finished_at=now)
+            jobs.finish(self.db, self.hub, job_id, jobs.DEGRADED)
         else:
-            self._fail(job_id, exit_code=rc)
+            self._retry_or_fail(job_id, rc)
         self._release(key, job_id)
 
-    def _fail(self, job_id, exit_code=None):
-        """Mark a job failed and, if it has retries left, schedule one. Used
-        for a non-zero exit and for a cluster that would not come up (a zone
-        stockout clears with time, which is what the delay is for)."""
-        current = jobs.get(self.db, job_id)
-        now = jobs._now(self.db)
-        jobs.set_state(self.db, self.hub, job_id, jobs.FAILED,
-                       exit_code=exit_code, finished_at=now)
-        retries_left = current["retries_left"]
-        if retries_left <= 0:
+    def _retry_or_fail(self, job_id, exit_code):
+        """A failed run gets another attempt in the same directory, unless it
+        is out of attempts or the last two died before finishing a point — a
+        missing toolchain or a bad config fails that way every time, and each
+        attempt re-leases the cluster to learn the same thing."""
+        job = jobs.get(self.db, job_id)
+        error = f"exit code {exit_code}"
+        if job["attempts"] >= job["max_attempts"]:
+            jobs.finish(self.db, self.hub, job_id, jobs.FAILED,
+                        last_error=f"{error}; out of attempts")
             return
-        if self._failed_before_a_point(current):
-            self.db.execute("UPDATE jobs SET retries_left = 0 WHERE id = ?",
-                            (job_id,))
-            self.hub.emit("job.retries_stopped", job_id=job_id,
+        if self._dead_on_arrival(job_id):
+            jobs.finish(self.db, self.hub, job_id, jobs.FAILED,
+                        last_error=f"{error}; two attempts produced no points")
+            self.hub.emit("job.gave_up", job_id=job_id,
                           reason="two attempts failed before their first point")
             return
-        delay = int(current["spec"].get("retry_delay_secs",
-                                        jobs.DEFAULT_RETRY_DELAY_SECS))
-        self.db.execute(
-            "UPDATE jobs SET retry_at = datetime('now', ?) WHERE id = ?",
-            (f"+{delay} seconds", job_id))
-        self.hub.emit("job.retry_scheduled", job_id=job_id,
-                      delay_secs=delay, retries_left=retries_left - 1)
-        # `current`, not the dispatch-time snapshot: that predates the
-        # daemon-assigned run_dir, and the retry must resume into it.
-        self._requeues[job_id] = asyncio.get_running_loop().create_task(
-            self._requeue_after(current, delay, retries_left - 1))
+        delay = int(job["spec"].get("retry_delay_secs",
+                                    jobs.DEFAULT_RETRY_DELAY_SECS))
+        jobs.wait_again(self.db, self.hub, job_id, delay, error)
+        self.hub.emit("job.retry_scheduled", job_id=job_id, delay_secs=delay,
+                      attempts_left=job["max_attempts"] - job["attempts"])
 
-    def _failed_before_a_point(self, job) -> bool:
-        """Did this attempt and the one before it both die without finishing
-        a single point? A missing toolchain or a bad config fails that way
-        every time, and each retry re-leases the cluster to learn the same
-        thing; a genuinely flaky run still gets its one retry first."""
-        parent_id = job.get("parent_job_id")
-        if not parent_id or not _no_points(job):
-            return False
-        parent = jobs.get(self.db, parent_id)
-        return parent is not None and _no_points(parent)
-
-    async def _requeue_after(self, job, delay, retries_left):
-        try:
-            await asyncio.sleep(delay)
-        finally:
-            self._requeues.pop(job["id"], None)
-            self.db.execute("UPDATE jobs SET retry_at = NULL WHERE id = ?",
-                            (job["id"],))
-        spec = dict(job["spec"])
-        spec["resume"] = True
-        if job.get("run_dir"):
-            spec["run_dir"] = job["run_dir"]
-        spec["max_retries"] = retries_left
-        new_id = self.db.insert(
-            "INSERT INTO jobs (project_id, spec_json, run_dir, state, priority, "
-            "retries_left, parent_job_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (job["project_id"], json.dumps(spec), spec.get("run_dir"),
-             jobs.QUEUED, job["priority"], retries_left, job["id"]),
-        )
-        self.hub.emit("job.state", job_id=new_id, state=jobs.QUEUED,
-                      parent_job_id=job["id"])
-        self.wake()
+    def _dead_on_arrival(self, job_id) -> bool:
+        """Did the last two attempts both end without a single point? A
+        driver that reports no points at all (points NULL) is left alone."""
+        rows = self.db.query(
+            "SELECT points FROM job_attempts WHERE job_id = ? "
+            "ORDER BY n DESC LIMIT 2", (job_id,))
+        return len(rows) == 2 and all(r["points"] == 0 for r in rows)
 
     def _release(self, key, job_id):
         if self._running_queues.get(key) == job_id:
@@ -442,36 +360,17 @@ class Scheduler:
         job = jobs.get(self.db, job_id)
         if job is None:
             raise KeyError(job_id)
-        if job["state"] == jobs.QUEUED:
-            # retry_at goes with it: a canceled job has no next attempt, and
-            # leaving one behind makes the row refuse to purge.
-            jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED,
-                           finished_at=jobs._now(self.db), retry_at=None)
+        if job["state"] == jobs.DONE:
+            return job["outcome"]
+        if job["state"] == jobs.WAITING:
+            # If a lease is coming up for it, _execute sees this and releases
+            # it instead of spawning.
+            jobs.finish(self.db, self.hub, job_id, jobs.CANCELED)
             return jobs.CANCELED
-        if job["state"] == jobs.STARTING:
-            # The dispatch coroutine sees this after the lease returns and
-            # releases it instead of spawning.
-            jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED,
-                           finished_at=jobs._now(self.db), retry_at=None)
-            return jobs.CANCELED
-        if job["state"] == jobs.RUNNING:
-            jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED,
-                           retry_at=None)
-            await self.runner.cancel(job_id)
-            self.db.execute("UPDATE jobs SET finished_at = datetime('now') "
-                            "WHERE id = ?", (job_id,))
-            return jobs.CANCELED
-        if job["state"] == jobs.FAILED and job["retries_left"] > 0:
-            # Failed but a retry is pending: cancel the timer and end the
-            # chain here, so nothing requeues and `after` gates release.
-            timer = self._requeues.pop(job_id, None)
-            if timer is not None:
-                timer.cancel()
-            self.db.execute("UPDATE jobs SET retries_left = 0, retry_at = NULL "
-                            "WHERE id = ?", (job_id,))
-            jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED)
-            return jobs.CANCELED
-        return job["state"]
+        jobs.end_attempt(self.db, job_id, error="canceled")
+        jobs.finish(self.db, self.hub, job_id, jobs.CANCELED)
+        await self.runner.cancel(job_id)
+        return jobs.CANCELED
 
     def resubmit(self, job_id, resume=True) -> int:
         job = jobs.get(self.db, job_id)
@@ -481,21 +380,10 @@ class Scheduler:
         spec["resume"] = bool(resume)
         if resume and job.get("run_dir"):
             spec["run_dir"] = job["run_dir"]
-        new_id = self.db.insert(
-            "INSERT INTO jobs (project_id, spec_json, run_dir, state, priority, "
-            "retries_left, parent_job_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (job["project_id"], json.dumps(spec), spec.get("run_dir"),
-             jobs.QUEUED, job["priority"], int(spec.get("max_retries", 0)),
-             job["id"]),
-        )
-        self.hub.emit("job.state", job_id=new_id, state=jobs.QUEUED,
-                      parent_job_id=job["id"])
+        project_id = self.db.query_one(
+            "SELECT project_id FROM jobs WHERE id = ?", (job_id,))["project_id"]
+        new_id = jobs.submit(self.db, project_id, spec)
+        self.hub.emit("job.state", job_id=new_id, state=jobs.WAITING,
+                      resubmit_of=job_id)
         self.wake()
         return new_id
-
-
-def _no_points(job) -> bool:
-    """The job reported progress but never finished a point. A driver that
-    emits no events at all reports nothing, and is left to its retries."""
-    progress = job.get("progress")
-    return bool(progress) and not (progress.get("points") or {}).get("done")

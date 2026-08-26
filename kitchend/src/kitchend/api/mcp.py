@@ -110,7 +110,7 @@ def build_mcp(state) -> MCPServer:
                    sweep: dict | None = None, queue: str | None = None,
                    cluster: str | None = None, cluster_ttl_minutes: int = 60,
                    after: int | None = None,
-                   priority: int = 0, max_retries: int = 20,
+                   priority: int = 0, max_attempts: int = 20,
                    est_hours: float | None = None,
                    confirm_cost_usd: float | None = None) -> dict:
         """Queue a job. Give catalog `experiments` OR a one-off `sweep`
@@ -124,13 +124,13 @@ def build_mcp(state) -> MCPServer:
         renewed while the job runs, and released after — a chained job on
         the same cluster inherits it without a VM cycle. A sweep whose
         params name a configured cluster gets this automatically. `after`
-        holds the job until that job's retry chain ends with data
-        (succeeded/degraded); a chain that ends failed/canceled cancels
-        this job instead — chain jobs to cycle clusters between phases
+        holds the job until that job is done with data (ok or
+        degraded); one that ends failed or canceled cancels this job
+        instead — chain jobs to cycle clusters between phases
         (e.g. scaling sweeps per committee size, geo runs per deployment)."""
         project_cfg = _project(project)
         spec = {"project": project, "priority": priority,
-                "max_retries": max_retries}
+                "max_attempts": max_attempts}
         if experiments:
             spec["experiments"] = experiments
         if sweep:
@@ -169,7 +169,8 @@ def build_mcp(state) -> MCPServer:
     @mcp.tool()
     def list_jobs(job_state: str | None = None, limit: int = 20) -> dict:
         """Recent jobs, newest first. job_state filters on
-        queued/running/succeeded/degraded/failed/canceled/interrupted."""
+        waiting/running/done; a done job carries an outcome of
+        ok/degraded/failed/canceled."""
         return {"jobs": jobs.list_jobs(state.db, state=job_state,
                                        limit=limit)}
 
@@ -180,14 +181,14 @@ def build_mcp(state) -> MCPServer:
 
     @mcp.tool()
     async def cancel_job(job_id: int) -> dict:
-        """Cancel a queued or running job (SIGINT first, so the run leaves a
+        """Cancel a waiting or running job (SIGINT first, so the run leaves a
         clean interrupt trail and can be resumed)."""
         return {"job_id": job_id,
                 "state": await state.scheduler.cancel(job_id)}
 
     @mcp.tool()
     def resubmit_job(job_id: int, resume: bool = True) -> dict:
-        """Resubmit a finished/failed/canceled job; resume=True reuses its
+        """Resubmit a done job; resume=True reuses its
         run dir so completed points are skipped."""
         return {"job_id": state.scheduler.resubmit(job_id, resume=resume),
                 "parent": job_id}

@@ -52,32 +52,6 @@ def test_queue_key_precedence():
     assert jobs.queue_key(job) == "p"
 
 
-def test_edit_queued_job(tmp_path):
-    from kitchend.config import Config
-    from kitchend.core.db import Db
-    from kitchend.core.hub import EventHub
-
-    p = _project(tmp_path)
-    config = Config(db_path=tmp_path / "db.sqlite3", projects=(p,))
-    db = Db(config.db_path)
-    hub = EventHub(db)
-    project_id = jobs.ensure_project_row(db, p)
-    job_id = jobs.submit(db, project_id, {"project": "proj",
-                                          "experiments": ["a"], "priority": 0})
-    edited = jobs.update_queued(db, hub, job_id,
-                                {"experiments": ["b", "c"], "priority": 5,
-                                 "max_retries": 2})
-    assert edited["spec"]["experiments"] == ["b", "c"]
-    assert edited["priority"] == 5
-    assert edited["retries_left"] == 2
-
-    # Not editable once past queued.
-    db.execute("UPDATE jobs SET state = 'running' WHERE id = ?", (job_id,))
-    with pytest.raises(ValueError, match="not queued"):
-        jobs.update_queued(db, hub, job_id, {"priority": 9})
-    db.close()
-
-
 def test_delete_job_requires_finished(tmp_path):
     from kitchend.config import ProjectConfig
     from kitchend.core import jobs
@@ -89,8 +63,9 @@ def test_delete_job_requires_finished(tmp_path):
     pid = jobs.ensure_project_row(db, ProjectConfig(name="p", repo_path=tmp_path))
     jid = jobs.submit(db, pid, {"project": "p"})
     with pytest.raises(ValueError, match="cancel it first"):
-        jobs.delete(db, hub, jid)          # still queued
-    db.execute("UPDATE jobs SET state = 'succeeded' WHERE id = ?", (jid,))
+        jobs.delete(db, hub, jid)          # still waiting
+    db.execute("UPDATE jobs SET state = 'done', outcome = 'ok' WHERE id = ?",
+               (jid,))
     jobs.delete(db, hub, jid)
     assert jobs.get(db, jid) is None
     with pytest.raises(KeyError):

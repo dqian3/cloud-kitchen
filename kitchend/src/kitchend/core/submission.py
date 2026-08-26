@@ -83,7 +83,7 @@ def prepare_specs(project_cfg, spec: dict) -> list[dict]:
 def enqueue(db, hub, scheduler, project_cfg, spec: dict) -> int:
     project_id = jobs.ensure_project_row(db, project_cfg)
     job_id = jobs.submit(db, project_id, spec)
-    hub.emit("job.state", job_id=job_id, state=jobs.QUEUED)
+    hub.emit("job.state", job_id=job_id, state=jobs.WAITING)
     scheduler.wake()
     return job_id
 
