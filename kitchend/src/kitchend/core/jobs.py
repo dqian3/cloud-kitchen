@@ -1,5 +1,12 @@
 """Job store: rows in the jobs table plus command construction.
 
+One row per job, for its whole life. A job is `waiting`, `running`, or
+`done`; only a done job has an `outcome`. Retrying does not make a new row —
+it raises `attempts` and puts the job back to waiting — so the queue shows
+one line per thing you asked for, however many times the daemon had to try.
+Each driver invocation is recorded in job_attempts, which is where exit
+codes and errors live.
+
 A job spec (stored verbatim as spec_json):
 
     {
@@ -8,37 +15,38 @@ A job spec (stored verbatim as spec_json):
       "command":     ["python3", "x.py"],      # explicit command (overrides driver)
       "extra_flags": ["--trials", "3"],
       "queue":       "main",                   # serialization key; default = project
-      "run_dir":     null,                     # pinned on retry/resume
+      "run_dir":     null,                     # assigned at first spawn
       "resume":      false,
       "priority":    0,
-      "max_retries": 20,
+      "max_attempts": 20,
       "retry_delay_secs": 120
     }
 
-Exit-code contract (from run_experiment.py): 0 clean → succeeded; 2 degraded
-but data written → degraded, never auto-retried; anything else → failed, with
-bounded resume-retries.
+Exit-code contract (from the drivers): 0 clean → ok; 2 degraded but data
+written → degraded, never retried; anything else → another attempt, resuming
+into the same run dir, until max_attempts.
 """
 
 import json
 from pathlib import Path
 
-# Retries are cheap next to a lost measurement: a failed run resumes into
+# Attempts are cheap next to a lost measurement: a failed run resumes into
 # its directory, and a cluster that would not come up (a zone stockout) is
 # probed again after a short cooldown rather than given up on.
-DEFAULT_MAX_RETRIES = 20
+DEFAULT_MAX_ATTEMPTS = 20
 DEFAULT_RETRY_DELAY_SECS = 120
 
-QUEUED = "queued"
-STARTING = "starting"       # dispatched; its cluster is coming up
-RUNNING = "running"
-SUCCEEDED = "succeeded"
-DEGRADED = "degraded"
-FAILED = "failed"
-CANCELED = "canceled"
-INTERRUPTED = "interrupted"
+WAITING = "waiting"         # in the queue: its turn, a dependency, or a cluster
+RUNNING = "running"         # a driver process is alive
+DONE = "done"
 
-ACTIVE_STATES = (QUEUED, STARTING, RUNNING)
+OK = "ok"
+DEGRADED = "degraded"       # exit 2: data written, not retried
+FAILED = "failed"           # attempts exhausted, or a non-retryable error
+CANCELED = "canceled"
+
+# Outcomes that produced no data worth keeping, so purge may drop the row.
+PURGEABLE_OUTCOMES = (FAILED, CANCELED)
 
 
 def ensure_project_row(db, project_cfg):
@@ -56,11 +64,11 @@ def ensure_project_row(db, project_cfg):
 
 def submit(db, project_id, spec: dict) -> int:
     return db.insert(
-        "INSERT INTO jobs (project_id, spec_json, run_dir, state, priority, retries_left) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (project_id, json.dumps(spec), spec.get("run_dir"), QUEUED,
+        "INSERT INTO jobs (project_id, spec_json, run_dir, state, priority, "
+        "max_attempts) VALUES (?, ?, ?, ?, ?, ?)",
+        (project_id, json.dumps(spec), spec.get("run_dir"), WAITING,
          int(spec.get("priority", 0)),
-         int(spec.get("max_retries", DEFAULT_MAX_RETRIES))),
+         int(spec.get("max_attempts", DEFAULT_MAX_ATTEMPTS))),
     )
 
 
@@ -85,22 +93,28 @@ def list_jobs(db, state=None, limit=100):
     return [_to_dict(r) for r in rows]
 
 
+def attempts(db, job_id):
+    """This job's driver invocations, oldest first."""
+    return [dict(r) for r in db.query(
+        "SELECT n, started_at, finished_at, exit_code, error "
+        "FROM job_attempts WHERE job_id = ? ORDER BY n", (job_id,))]
+
+
 def _to_dict(row):
     d = dict(row)
     d["spec"] = json.loads(d.pop("spec_json"))
-    d.pop("estimate_json", None)
     raw = d.pop("progress_json", None)
     d["progress"] = json.loads(raw) if raw else None
+    d["done"] = d["state"] == DONE
     return d
 
 
 def default_run_dir(project_cfg, job_id):
-    """Daemon-assigned output dir for a job whose spec didn't pin one.
+    """Output dir for a job whose spec didn't pin one: one directory per job.
 
-    Assigning at dispatch — rather than letting the driver invent a dir — is
-    what makes ingest and retry-resume work for every job: the daemon knows
-    where events.jsonl will appear, and a retry resumes into the same
-    directory instead of starting a fresh one.
+    Assigned by the daemon rather than invented by the driver, so ingest
+    knows where events.jsonl will appear; every attempt of this job resumes
+    into the same directory.
     """
     import datetime
     if project_cfg.runs_roots:
@@ -124,12 +138,46 @@ def set_state(db, hub, job_id, state, **fields):
     params.append(job_id)
     db.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE id = ?", params)
     hub.emit("job.state", job_id=job_id, state=state, **{
-        k: v for k, v in fields.items() if k in ("exit_code", "pid", "run_dir")
+        k: v for k, v in fields.items()
+        if k in ("outcome", "pid", "run_dir", "last_error")
     })
 
 
+def finish(db, hub, job_id, outcome, last_error=None):
+    """End a job: done, with the outcome that stuck."""
+    set_state(db, hub, job_id, DONE, outcome=outcome, finished_at=_now(db),
+              next_attempt_at=None, last_error=last_error)
+
+
+def wait_again(db, hub, job_id, delay_secs, last_error=None):
+    """Put a job back in the queue with its next attempt due later. Used for
+    a failed run and for a cluster that would not come up: nothing about the
+    job changed except that it has to wait."""
+    db.execute("UPDATE jobs SET next_attempt_at = datetime('now', ?) "
+               "WHERE id = ?", (f"+{int(delay_secs)} seconds", job_id))
+    set_state(db, hub, job_id, WAITING, last_error=last_error)
+
+
+def start_attempt(db, hub, job_id) -> int:
+    """Record a driver invocation about to start; returns its number."""
+    n = db.query_one("SELECT attempts + 1 AS n FROM jobs WHERE id = ?",
+                     (job_id,))["n"]
+    db.execute("UPDATE jobs SET attempts = ?, started_at = "
+               "COALESCE(started_at, datetime('now')) WHERE id = ?", (n, job_id))
+    db.insert("INSERT INTO job_attempts (job_id, n) VALUES (?, ?)", (job_id, n))
+    hub.emit("job.attempt", job_id=job_id, n=n)
+    return n
+
+
+def end_attempt(db, job_id, exit_code=None, error=None) -> None:
+    db.execute(
+        "UPDATE job_attempts SET finished_at = datetime('now'), "
+        "exit_code = ?, error = ? WHERE job_id = ? AND finished_at IS NULL",
+        (exit_code, error, job_id))
+
+
 def update_queued(db, hub, job_id, updates: dict):
-    """Edit a job that is still queued: spec fields and/or priority.
+    """Edit a job that hasn't finished: spec fields and/or priority.
 
     The check-and-update runs under the DB lock via a conditional UPDATE, so
     a dispatch racing this edit either sees the old spec (job already
@@ -138,95 +186,88 @@ def update_queued(db, hub, job_id, updates: dict):
     job = get(db, job_id)
     if job is None:
         raise KeyError(job_id)
-    if job["state"] != QUEUED:
-        raise ValueError(f"job {job_id} is {job['state']}, not queued")
+    if job["state"] != WAITING:
+        raise ValueError(f"job {job_id} is {job['state']}, not waiting")
     spec = dict(job["spec"])
     priority = updates.pop("priority", None)
     spec.update(updates)
-    # A job that was dispatched once (its cluster would not come up) already
-    # has a daemon-assigned dir on the row, not in the spec: an edit keeps it.
+    # The daemon-assigned dir lives on the row, not in the spec: an edit keeps it.
     params = [json.dumps(spec), spec.get("run_dir") or job.get("run_dir"),
-              int(spec.get("max_retries", DEFAULT_MAX_RETRIES))]
-    sets = "spec_json = ?, run_dir = ?, retries_left = ?"
+              int(spec.get("max_attempts", DEFAULT_MAX_ATTEMPTS))]
+    sets = "spec_json = ?, run_dir = ?, max_attempts = ?"
     if priority is not None:
-        # Re-ranking a job that was waiting on a cluster cancels that wait:
-        # whoever is at the front now is the one that retries.
-        sets += ", priority = ?, retry_at = NULL"
+        # Re-ranking cancels a pending cluster wait: whoever is at the front
+        # now is the one that tries next.
+        sets += ", priority = ?, next_attempt_at = NULL"
         params.append(int(priority))
         spec["priority"] = int(priority)
     params.append(job_id)
     cur = db.execute(
-        f"UPDATE jobs SET {sets} WHERE id = ? AND state = 'queued'", params)
+        f"UPDATE jobs SET {sets} WHERE id = ? AND state = 'waiting'", params)
     if cur.rowcount == 0:
         raise ValueError(f"job {job_id} started while editing; not modified")
-    hub.emit("job.edited", job_id=job_id, state=QUEUED)
+    hub.emit("job.edited", job_id=job_id, state=WAITING)
     return get(db, job_id)
 
 
-PURGEABLE_STATES = (FAILED, CANCELED, INTERRUPTED)
-
-
-def purge(db, hub, states=PURGEABLE_STATES, project_id=None) -> list[int]:
-    """Delete finished jobs in `states` (never one with a retry pending).
-    Ledger runs they produced stay; the ledger marks them as having no
-    job record."""
-    sql = (f"SELECT id FROM jobs WHERE state IN ({','.join('?' * len(states))}) "
-           "AND retry_at IS NULL")
-    params = list(states)
+def purge(db, hub, outcomes=PURGEABLE_OUTCOMES, project_id=None) -> list[int]:
+    """Delete done jobs whose outcome produced nothing worth keeping. Rows
+    only: measurement data is deleted through the ledger, never here."""
+    sql = ("SELECT id FROM jobs WHERE state = 'done' AND outcome IN "
+           f"({','.join('?' * len(outcomes))})")
+    params = list(outcomes)
     if project_id is not None:
         sql += " AND project_id = ?"
         params.append(project_id)
     ids = [r["id"] for r in db.query(sql, params)]
     for job_id in ids:
-        # Detach what points at the row: the audit trail and ledger runs
-        # keep their history, children lose their parent link.
-        db.execute("UPDATE events SET job_id = NULL WHERE job_id = ?", (job_id,))
-        db.execute("UPDATE runs SET job_id = NULL WHERE job_id = ?", (job_id,))
-        db.execute("UPDATE jobs SET parent_job_id = NULL WHERE parent_job_id = ?",
-                   (job_id,))
-        db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+        _detach_and_delete(db, job_id)
     if ids:
-        hub.emit("jobs.purged", ids=ids, states=list(states))
+        hub.emit("jobs.purged", ids=ids, outcomes=list(outcomes))
     return ids
 
 
-def delete(db, hub, job_id: int) -> None:
-    """Delete one finished job and detach what points at it. Active jobs
-    (and ones with a retry pending) must be canceled first."""
+def delete(db, hub, job_id) -> None:
+    """Delete one done job. An unfinished job must be canceled first."""
     job = get(db, job_id)
     if job is None:
         raise KeyError(job_id)
-    if job["state"] in ACTIVE_STATES or job["retry_at"]:
+    if job["state"] != DONE:
         raise ValueError(f"job {job_id} is {job['state']}; cancel it first")
-    db.execute("UPDATE events SET job_id = NULL WHERE job_id = ?", (job_id,))
-    db.execute("UPDATE runs SET job_id = NULL WHERE job_id = ?", (job_id,))
-    db.execute("UPDATE jobs SET parent_job_id = NULL WHERE parent_job_id = ?",
-               (job_id,))
-    db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    _detach_and_delete(db, job_id)
     # The id goes in the payload, not the job_id column: that column is a
     # foreign key into the row we just deleted.
     hub.emit("job.deleted", deleted_job_id=job_id)
 
 
+def _detach_and_delete(db, job_id) -> None:
+    """Drop a job row and what points at it. The audit trail and ledger runs
+    keep their history, with no job to point at."""
+    db.execute("UPDATE events SET job_id = NULL WHERE job_id = ?", (job_id,))
+    db.execute("UPDATE runs SET job_id = NULL WHERE job_id = ?", (job_id,))
+    db.execute("DELETE FROM job_attempts WHERE job_id = ?", (job_id,))
+    db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+
+
 def reorder(db, hub, ids: list[int]) -> None:
-    """Make the queued jobs in `ids` dispatch in that order: priorities are
+    """Make the waiting jobs in `ids` dispatch in that order: priorities are
     assigned N..1 down the list (dispatch is priority DESC, id ASC). Jobs
-    not queued are refused — the running one is not reorderable."""
+    that are running or done are refused."""
     for job_id in ids:
         job = get(db, job_id)
         if job is None:
             raise KeyError(job_id)
-        if job["state"] != QUEUED:
-            raise ValueError(f"job {job_id} is {job['state']}, not queued")
+        if job["state"] != WAITING:
+            raise ValueError(f"job {job_id} is {job['state']}, not waiting")
     n = len(ids)
     for i, job_id in enumerate(ids):
-        db.execute("UPDATE jobs SET priority = ? WHERE id = ? AND state = 'queued'",
+        db.execute("UPDATE jobs SET priority = ? WHERE id = ? AND state = 'waiting'",
                    (n - i, job_id))
     # Only the job at the front waits on a cluster. Anything moved behind it
-    # stops retrying: its pending attempt is dropped and it just sits in the
+    # stops trying: its pending attempt is dropped and it just sits in the
     # queue until its turn comes.
-    db.executemany("UPDATE jobs SET retry_at = NULL "
-                   "WHERE id = ? AND state = 'queued'",
+    db.executemany("UPDATE jobs SET next_attempt_at = NULL "
+                   "WHERE id = ? AND state = 'waiting'",
                    [(job_id,) for job_id in ids[1:]])
     hub.emit("job.reordered", ids=list(ids))
 
@@ -273,10 +314,11 @@ def build_command(project_cfg, spec: dict):
 
 
 def recover_orphans(db, hub):
-    """Mark jobs that were 'running' under a dead daemon as interrupted."""
+    """A job left `running` by a dead daemon has lost its attempt, not its
+    place: the attempt is closed and the job goes back to the queue (or ends
+    if that was its last)."""
     import os
-    for row in db.query("SELECT id, pid FROM jobs WHERE state IN (?, ?)",
-                        (RUNNING, STARTING)):
+    for row in db.query("SELECT id, pid FROM jobs WHERE state = ?", (RUNNING,)):
         pid = row["pid"]
         alive = False
         if pid:
@@ -285,9 +327,18 @@ def recover_orphans(db, hub):
                 alive = True
             except (ProcessLookupError, PermissionError):
                 alive = False
-        if not alive:
-            set_state(db, hub, row["id"], INTERRUPTED,
-                      finished_at=_now(db))
+        if alive:
+            continue
+        end_attempt(db, row["id"], error="daemon died while it ran")
+        job = get(db, row["id"])
+        if job["attempts"] >= job["max_attempts"]:
+            finish(db, hub, row["id"], FAILED,
+                   last_error="daemon died while it ran")
+        else:
+            wait_again(db, hub, row["id"],
+                       int(job["spec"].get("retry_delay_secs",
+                                           DEFAULT_RETRY_DELAY_SECS)),
+                       last_error="daemon died while it ran")
 
 
 def _now(db):
