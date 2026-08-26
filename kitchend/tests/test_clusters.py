@@ -425,3 +425,22 @@ def test_spend_separates_probes_from_runs(env):
     assert out["runs"]["usd"] == 30.00
     assert out["total_usd"] == 34.80
     assert out["by_cluster"]["stub/c"]["vm_minutes"] == 348.0
+
+
+def test_zone_probe_asks_one_vm_per_zone():
+    """A cold start asks each zone the cluster spans for a single VM first,
+    so a stockout costs a handful of VM-minutes, not the whole fleet."""
+    from kitchend.core.clusters import _zone_probe
+
+    class Remote:
+        def zones_of(self, vms):
+            # Six VMs round-robin over three zones, as create_cluster assigns.
+            return {v: f"z{i % 3}" for i, v in enumerate(vms)}
+
+    vms = [f"vm{i}" for i in range(6)]
+    assert _zone_probe(Remote(), vms) == ["vm0", "vm1", "vm2"]
+
+    class NoZones:      # docker/local remotes have no zones: no probe
+        pass
+
+    assert _zone_probe(NoZones(), vms) == []

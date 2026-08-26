@@ -94,6 +94,27 @@ class ManagedCluster:
     hold_for: int | None = None  # the job the hand-off is for
 
 
+def _zone_probe(remote, vms) -> list:
+    """One VM per zone the cluster spans, in a stable order.
+
+    Empty when the remote has no notion of zones (docker, local), which
+    turns the probe off for those.
+    """
+    zones_of = getattr(remote, "zones_of", None)
+    if zones_of is None:
+        return []
+    try:
+        zones = zones_of(vms)
+    except Exception:
+        return []
+    first = {}
+    for vm in vms:
+        zone = zones.get(vm)
+        if zone and zone not in first:
+            first[zone] = vm
+    return sorted(first.values())
+
+
 class ClusterManager:
     REARM_INTERVAL_S = 30 * 60
     TICK_S = 60
@@ -258,7 +279,17 @@ class ClusterManager:
         # addressing, or never needed them). A cluster that cannot fully
         # start cannot run its job; stop_on_partial stops the started subset
         # rather than holding it at cost.
+        # A stockout is a zone-level fact, so ask each zone the cluster spans
+        # for one VM before paying to start the fleet: a zone that cannot
+        # supply one will not supply seventeen, and the answer costs a
+        # handful of VM-minutes instead of a hundred.
+        probe = _zone_probe(mc.remote, vms) if fresh else []
         try:
+            if 1 < len(probe) < len(vms):
+                self.hub.emit("cluster.zone_probe", cluster_id=mc.db_id,
+                              cluster=mc.key, vms=probe)
+                await asyncio.to_thread(start_vms, mc.remote, probe,
+                                        drain_first=False, stop_on_partial=True)
             started = await asyncio.to_thread(start_vms, mc.remote, vms,
                                               drain_first=fresh,
                                               stop_on_partial=True)
