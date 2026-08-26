@@ -13,6 +13,9 @@ Exit-code policy (the drivers' existing contract):
 A cluster that will not come up is not one of those: nothing ran, so the job
 goes back to queued with its next attempt due, and the cluster is held down
 for that delay so the rest of its queue does not probe it in turn.
+
+Retries stop early when two attempts in a row die before finishing a point:
+that is a broken environment, not a flaky run.
 """
 
 import asyncio
@@ -373,6 +376,12 @@ class Scheduler:
         retries_left = current["retries_left"]
         if retries_left <= 0:
             return
+        if self._failed_before_a_point(current):
+            self.db.execute("UPDATE jobs SET retries_left = 0 WHERE id = ?",
+                            (job_id,))
+            self.hub.emit("job.retries_stopped", job_id=job_id,
+                          reason="two attempts failed before their first point")
+            return
         delay = int(current["spec"].get("retry_delay_secs",
                                         jobs.DEFAULT_RETRY_DELAY_SECS))
         self.db.execute(
@@ -384,6 +393,17 @@ class Scheduler:
         # daemon-assigned run_dir, and the retry must resume into it.
         self._requeues[job_id] = asyncio.get_running_loop().create_task(
             self._requeue_after(current, delay, retries_left - 1))
+
+    def _failed_before_a_point(self, job) -> bool:
+        """Did this attempt and the one before it both die without finishing
+        a single point? A missing toolchain or a bad config fails that way
+        every time, and each retry re-leases the cluster to learn the same
+        thing; a genuinely flaky run still gets its one retry first."""
+        parent_id = job.get("parent_job_id")
+        if not parent_id or not _no_points(job):
+            return False
+        parent = jobs.get(self.db, parent_id)
+        return parent is not None and _no_points(parent)
 
     async def _requeue_after(self, job, delay, retries_left):
         try:
@@ -469,3 +489,10 @@ class Scheduler:
                       parent_job_id=job["id"])
         self.wake()
         return new_id
+
+
+def _no_points(job) -> bool:
+    """The job reported progress but never finished a point. A driver that
+    emits no events at all reports nothing, and is left to its retries."""
+    progress = job.get("progress")
+    return bool(progress) and not (progress.get("points") or {}).get("done")

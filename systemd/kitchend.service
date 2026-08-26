@@ -11,6 +11,9 @@ Description=cloud-kitchen experiment daemon
 
 [Service]
 WorkingDirectory=%h/Projects/cloud-kitchen
+# A user unit gets a bare PATH; the drivers shell out to the toolchains a
+# login shell would have found (cargo builds the benchmark binaries).
+Environment=PATH=%h/.cargo/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
 ExecStart=%h/.local/bin/uv run --project kitchend kitchend serve
 Restart=on-failure
 RestartSec=5

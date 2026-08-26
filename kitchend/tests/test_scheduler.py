@@ -338,3 +338,44 @@ def test_lease_handoff_holds_cluster_for_next_job(env):
         assert fake.holds[0] == ("stub/c", b)
 
     asyncio.run(main())
+
+
+def _failed_attempt(db, config, job_id, points_done, parent=None):
+    """Put a job row in the state a finished attempt leaves behind."""
+    import json
+    db.execute("UPDATE jobs SET parent_job_id = ?, progress_json = ? "
+               "WHERE id = ?",
+               (parent, json.dumps({"points": {"done": points_done}}), job_id))
+
+
+def test_retries_stop_after_two_pointless_failures(env):
+    """A run that dies before its first point twice in a row is a broken
+    environment, not a flaky run: the chain ends instead of re-leasing the
+    cluster for a third identical failure."""
+    config, db, hub, runner, scheduler = env
+    first = _submit(db, hub, config, "exit 1", queue="q", max_retries=5)
+    second = _submit(db, hub, config, "exit 1", queue="q", max_retries=5)
+    _failed_attempt(db, config, first, 0)
+    _failed_attempt(db, config, second, 0, parent=first)
+
+    async def main():
+        scheduler._fail(second, exit_code=1)
+
+    asyncio.run(main())
+    row = jobs.get(db, second)
+    assert row["state"] == jobs.FAILED
+    assert row["retries_left"] == 0 and row["retry_at"] is None
+
+
+def test_a_run_that_got_points_still_retries(env):
+    config, db, hub, runner, scheduler = env
+    first = _submit(db, hub, config, "exit 1", queue="q", max_retries=5)
+    second = _submit(db, hub, config, "exit 1", queue="q", max_retries=5)
+    _failed_attempt(db, config, first, 0)
+    _failed_attempt(db, config, second, 3, parent=first)
+
+    async def main():
+        scheduler._fail(second, exit_code=1)
+        assert jobs.get(db, second)["retry_at"] is not None
+
+    asyncio.run(main())
