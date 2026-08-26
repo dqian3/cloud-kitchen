@@ -218,10 +218,17 @@ def migrate(conn: sqlite3.Connection) -> None:
     """
     if conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
         return
-    with conn:
-        for (name,) in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' "
-                "AND name NOT LIKE 'sqlite_%'").fetchall():
-            conn.execute(f"DROP TABLE IF EXISTS {name}")
+    # Foreign keys are enforced on DROP, and the old tables reference each
+    # other; the rebuild replaces every one of them, so turn them off for it.
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        with conn:
+            for (name,) in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name NOT LIKE 'sqlite_%'").fetchall():
+                conn.execute(f"DROP TABLE IF EXISTS {name}")
         conn.executescript(SCHEMA)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.commit()
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
