@@ -391,3 +391,37 @@ def test_subset_lease_starts_only_its_hosts_and_a_wider_one_adds_the_rest(manage
         await mgr.down("stub/main", force=True)
 
     asyncio.run(main())
+
+
+def test_spend_separates_probes_from_runs(env):
+    """A bring-up that never reached `running` cost money and produced
+    nothing: the report has to say so separately."""
+    import json as _json
+    from kitchend.core import jobs, spend
+    config, db, hub, runner, scheduler = env
+    project_id = jobs.ensure_project_row(db, config.project("stub"))
+    cid = db.insert(
+        "INSERT INTO clusters (project_id, name, config_path, vm_count, "
+        "hourly_usd) VALUES (?, 'c', 'c.yaml', 10, 6.0)", (project_id,))
+
+    def ev(kind, ts, **payload):
+        db.execute("INSERT INTO events (ts, type, payload_json) VALUES (?, ?, ?)",
+                   (ts, kind, _json.dumps({"cluster": "stub/c", **payload})))
+
+    # A failed probe: 6 minutes, 8 of 10 VMs started.
+    ev("cluster.state", "2026-01-01 00:00:00", state="starting")
+    ev("cluster.error", "2026-01-01 00:06:00",
+       error="RuntimeError('vm_start failed for 2/10 VM(s): a, b')")
+    ev("cluster.state", "2026-01-01 00:06:00", state="terminated")
+    # A real run: up for 30 minutes on all 10.
+    ev("cluster.state", "2026-01-01 01:00:00", state="starting")
+    ev("cluster.state", "2026-01-01 01:00:00", state="running")
+    ev("cluster.state", "2026-01-01 01:30:00", state="terminated")
+
+    out = spend.report(db)
+    assert out["probes"]["n"] == 1 and out["runs"]["n"] == 1
+    # 8 VMs x 6 min at $6/h = $4.80; 10 VMs x 30 min = $30.00
+    assert out["probes"]["usd"] == 4.80
+    assert out["runs"]["usd"] == 30.00
+    assert out["total_usd"] == 34.80
+    assert out["by_cluster"]["stub/c"]["vm_minutes"] == 348.0

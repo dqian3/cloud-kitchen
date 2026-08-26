@@ -12,6 +12,7 @@
     kitchend cancel JOB_ID              cancel a waiting/running job
     kitchend resubmit JOB_ID            resubmit into the same run dir
     kitchend clusters                   cluster states, VMs, burn
+    kitchend spend [--days N]           what the clusters cost: probes vs runs
 """
 
 import argparse
@@ -203,6 +204,25 @@ def cmd_purge(config, args):
     print(f"purged {len(out['purged'])} job(s): {out['purged']}")
 
 
+def cmd_spend(config, args):
+    out = _api(config, f"/api/spend?days={args.days}")
+    print(f"{'':<26}{'spans':>7}{'VM-min':>10}{'cost':>10}")
+    for label, key in (("probes (nothing ran)", "probes"), ("runs", "runs")):
+        b = out[key]
+        print(f"{label:<26}{b['n']:>7}{b['vm_minutes']:>10.0f}"
+              f"{'$' + format(b['usd'], '.2f'):>10}")
+    for title, section in (("by cluster", "by_cluster"), ("by day", "by_day"),
+                           ("by job", "by_job")):
+        rows = sorted(out[section].items(), key=lambda kv: -kv[1]["usd"])[:12]
+        if not rows:
+            continue
+        print(f"\n{title}")
+        for name, b in rows:
+            print(f"  {name:<24}{b['n']:>7}{b['vm_minutes']:>10.0f}"
+                  f"{'$' + format(b['usd'], '.2f'):>10}")
+    print(f"\ntotal ${out['total_usd']:.2f}")
+
+
 def cmd_clusters(config, args):
     for c in _api(config, "/api/clusters"):
         up = c.get("vms_running")
@@ -271,6 +291,11 @@ def main(argv=None):
 
     sub.add_parser("clusters", help="cluster states, VMs, burn")
 
+    p = sub.add_parser("spend", help="cluster time and cost, probes apart "
+                       "from runs (from the event log; GCP billing is not "
+                       "readable from here)")
+    p.add_argument("--days", type=int, default=7)
+
     p = sub.add_parser("purge", help="delete job rows that produced no data "
                        "(files are never touched; delete runs for that)")
     p.add_argument("--project")
@@ -308,6 +333,7 @@ def main(argv=None):
         "catalog": cmd_catalog, "submit": cmd_submit, "jobs": cmd_jobs,
         "watch": cmd_watch, "log": cmd_log, "cancel": cmd_cancel,
         "resubmit": cmd_resubmit, "clusters": cmd_clusters,
+        "spend": cmd_spend,
         "create": cmd_create, "purge": cmd_purge,
     }[args.cmd]
     try:

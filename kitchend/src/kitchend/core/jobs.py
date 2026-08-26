@@ -230,7 +230,11 @@ def delete(db, hub, job_id) -> None:
 def _detach_and_delete(db, job_id) -> None:
     """Drop a job row and what points at it. The audit trail and ledger runs
     keep their history, with no job to point at."""
-    db.execute("UPDATE events SET job_id = NULL WHERE job_id = ?", (job_id,))
+    # Keep the id in the payload: the row goes, but "which job spent this
+    # cluster time" is exactly what the audit log is for.
+    db.execute("UPDATE events SET job_id = NULL, payload_json = "
+               "json_set(payload_json, '$.job_id', ?) WHERE job_id = ?",
+               (job_id, job_id))
     db.execute("UPDATE runs SET job_id = NULL WHERE job_id = ?", (job_id,))
     db.execute("DELETE FROM job_attempts WHERE job_id = ?", (job_id,))
     db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))

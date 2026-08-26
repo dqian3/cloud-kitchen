@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from kitchend.core import adapters, jobs, ledger, submission
+from kitchend.core import adapters, jobs, ledger, spend, submission
 
 router = APIRouter(prefix="/api")
 
@@ -176,6 +176,19 @@ class ClusterDown(BaseModel):
 class ClusterExtend(BaseModel):
     lease_id: str
     ttl_minutes: int = 60      # ignored by release
+
+
+@router.get("/spend")
+def get_spend(request: Request, days: int = 7):
+    """Cluster time and cost from the event log, probes apart from runs.
+
+    GCP billing is not readable from here and keeps only each VM's latest
+    start/stop, so this is the only record of what the queue has spent."""
+    since = None
+    if days > 0:
+        since = request.app.state.db.query_one(
+            "SELECT datetime('now', ?) AS t", (f"-{int(days)} days",))["t"]
+    return spend.report(request.app.state.db, since=since)
 
 
 @router.get("/clusters")
