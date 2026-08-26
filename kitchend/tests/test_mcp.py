@@ -68,7 +68,7 @@ def test_list_projects_and_submit_free_job(env):
     out = _data(_call(mcp, "submit_job",
                       {"project": "stub", "experiments": ["exit 0"]}))
     job = jobs.get(env[1], out["job_id"])
-    assert job["state"] == jobs.QUEUED
+    assert job["state"] == jobs.WAITING
     assert out["estimate_usd"] is None
 
 
@@ -90,7 +90,7 @@ def test_submit_on_costed_cluster_requires_confirmation(env):
     out = _data(_call(mcp, "submit_job",
                       {**args, "est_hours": 3, "confirm_cost_usd": 6.0}))
     assert out["estimate_usd"] == 6.0
-    assert jobs.get(env[1], out["job_id"])["state"] == jobs.QUEUED
+    assert jobs.get(env[1], out["job_id"])["state"] == jobs.WAITING
 
 
 def test_cluster_up_gate_and_lease(env):

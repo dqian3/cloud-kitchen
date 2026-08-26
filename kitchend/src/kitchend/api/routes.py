@@ -34,11 +34,11 @@ class JobSubmit(BaseModel):
     queue: str | None = None
     cluster: str | None = None     # daemon-managed lease: up before, down after
     cluster_ttl_minutes: int = 60
-    after: int | None = None       # wait for this job's retry chain to finish
+    after: int | None = None       # wait for this job to finish with data
     run_dir: str | None = None
     resume: bool = False
     priority: int = 0
-    max_retries: int = jobs.DEFAULT_MAX_RETRIES
+    max_attempts: int = jobs.DEFAULT_MAX_ATTEMPTS
     retry_delay_secs: int = jobs.DEFAULT_RETRY_DELAY_SECS
 
 
@@ -69,57 +69,22 @@ def get_job(job_id: int, request: Request):
     job = jobs.get(request.app.state.db, job_id)
     if job is None:
         raise HTTPException(404, f"no job {job_id}")
-    return job
-
-
-class JobEdit(BaseModel):
-    experiments: list[str] | None = None
-    command: list[str] | None = None
-    extra_flags: list[str] | None = None
-    queue: str | None = None
-    cluster: str | None = None
-    cluster_ttl_minutes: int | None = None
-    after: int | None = None
-    run_dir: str | None = None
-    resume: bool | None = None
-    priority: int | None = None
-    max_retries: int | None = None
-    retry_delay_secs: int | None = None
-
-
-@router.patch("/jobs/{job_id}")
-def edit_job(job_id: int, body: JobEdit, request: Request):
-    """Edit a job while it is still queued (reorder via priority, change the
-    spec). Running or finished jobs are immutable — cancel/resubmit instead."""
-    app = request.app
-    updates = body.model_dump(exclude_none=True)
-    if not updates:
-        raise HTTPException(422, "no fields to update")
-    try:
-        job = jobs.update_queued(app.state.db, app.state.hub, job_id, updates)
-        # Validate the edited spec still builds a command.
-        jobs.build_command(app.state.config.project(job["project"]), job["spec"])
-    except KeyError:
-        raise HTTPException(404, f"no job {job_id}")
-    except ValueError as e:
-        raise HTTPException(409, str(e))
-    app.state.scheduler.wake()
+    job["attempts_log"] = jobs.attempts(request.app.state.db, job_id)
     return job
 
 
 class Purge(BaseModel):
-    states: list[str] = list(jobs.PURGEABLE_STATES)
+    outcomes: list[str] = list(jobs.PURGEABLE_OUTCOMES)
     project: str | None = None
-    delete_files: bool = True   # a failed run's data is only clutter
 
 
 @router.post("/jobs/purge")
 def purge_jobs(body: Purge, request: Request):
-    """Delete failed/canceled/interrupted jobs: rows, driver logs, ledger
-    runs, and (by default) whatever they wrote under the project's runs
-    roots. Jobs with a pending retry are kept."""
+    """Delete done jobs that produced nothing worth keeping: their rows,
+    attempts, and driver logs. Never their files — measurement data is
+    deleted through the ledger, one run at a time, on purpose."""
     app = request.app
-    bad = [s for s in body.states if s not in jobs.PURGEABLE_STATES]
+    bad = [o for o in body.outcomes if o not in jobs.PURGEABLE_OUTCOMES]
     if bad:
         raise HTTPException(422, f"not purgeable: {bad}")
     project_id = None
@@ -129,27 +94,10 @@ def purge_jobs(body: Purge, request: Request):
                 app.state.db, app.state.config.project(body.project))
         except KeyError as e:
             raise HTTPException(404, str(e))
-    # Read the rows before they go: the run dirs are on them.
-    doomed = [j for j in jobs.list_jobs(app.state.db, limit=1000)
-              if j["state"] in body.states and not j["retry_at"]
-              and (project_id is None or j["project_id"] == project_id)]
-    removed = []
-    if body.delete_files:
-        for j in doomed:
-            try:
-                path = _remove_run_dir(app, j["project"], j.get("run_dir"))
-            except HTTPException:
-                continue        # out of bounds: leave it, keep purging rows
-            if path:
-                removed.append(path)
-            for r in ledger.list_runs(app.state.db, project=j["project"],
-                                      limit=1000):
-                if r.get("job_id") == j["id"]:
-                    ledger.delete_run(app.state.db, r["id"])
-    ids = jobs.purge(app.state.db, app.state.hub, body.states, project_id)
+    ids = jobs.purge(app.state.db, app.state.hub, body.outcomes, project_id)
     for jid in ids:
         (app.state.runner.jobs_dir / f"{jid}.log").unlink(missing_ok=True)
-    return {"purged": ids, "removed_dirs": removed}
+    return {"purged": ids}
 
 
 class Reorder(BaseModel):
@@ -186,21 +134,11 @@ async def cancel_job(job_id: int, request: Request):
 
 
 @router.delete("/jobs/{job_id}")
-def delete_job(job_id: int, request: Request, delete_files: bool = False):
-    """Delete a finished job and its driver log. With delete_files, its run
-    directory (and any ledger runs inside it) go too."""
+def delete_job(job_id: int, request: Request):
+    """Delete a done job and its driver log. Its run directory stays: a
+    directory holds measurements, and those are deleted through the ledger
+    (DELETE /runs/{id}?delete_files=true), where what you name is the data."""
     app = request.app
-    job = jobs.get(app.state.db, job_id)
-    if job is None:
-        raise HTTPException(404, f"no job {job_id}")
-    removed = None
-    if delete_files and job.get("run_dir"):
-        removed = _remove_run_dir(app, job["project"], job["run_dir"])
-        for r in ledger.list_runs(app.state.db, project=job["project"],
-                                  limit=1000):
-            if r.get("job_id") == job_id or \
-                    str(r["run_dir"]).startswith(str(job["run_dir"])):
-                ledger.delete_run(app.state.db, r["id"])
     try:
         jobs.delete(app.state.db, app.state.hub, job_id)
     except KeyError:
@@ -208,7 +146,7 @@ def delete_job(job_id: int, request: Request, delete_files: bool = False):
     except ValueError as e:
         raise HTTPException(409, str(e))
     (app.state.runner.jobs_dir / f"{job_id}.log").unlink(missing_ok=True)
-    return {"ok": True, "removed_dir": removed}
+    return {"ok": True}
 
 
 class Resubmit(BaseModel):

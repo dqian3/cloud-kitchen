@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api.js'
 
+// Job states and the outcomes a done job carries, in one map: the queue
+// shows whichever applies.
 const STATE_COLORS = {
-  queued: 'gray', starting: 'blue', running: 'blue', succeeded: 'green',
-  degraded: 'orange', failed: 'red', canceled: 'gray', interrupted: 'purple',
+  waiting: 'gray', running: 'blue',
+  ok: 'green', degraded: 'orange', failed: 'red', canceled: 'gray',
 }
 
 function Chip({ text, color }) {
@@ -578,14 +580,15 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
     try { await fn(); onChanged() } catch (e) { notify(e.message || e, 'error') }
   }
 
-  const queued = job.state === 'queued'
-  const retrying = job.state === 'failed' && job.retry_at
-  // Queued with a retry_at: its cluster would not come up, so it never ran.
-  const waitingCluster = job.state === 'queued' && job.retry_at
-  // Its own delay can lapse while the cluster is still held down — by its
-  // cooldown, or by one on a cluster sharing the same VMs.
-  const dueNow = waitingCluster &&
-    Date.parse(job.retry_at.replace(' ', 'T') + 'Z') <= Date.now()
+  const waiting = job.state === 'waiting'
+  const done = job.state === 'done'
+  // Waiting with a next attempt due: its last try failed, or its cluster
+  // would not come up. The delay can lapse while the cluster is still held
+  // down — by its own cooldown, or one on a cluster sharing its VMs.
+  const dueAt = waiting && job.next_attempt_at
+  const dueNow = dueAt &&
+    Date.parse(job.next_attempt_at.replace(' ', 'T') + 'Z') <= Date.now()
+  const label = done ? job.outcome : job.state
   const spec = job.spec
 
   return (
@@ -597,21 +600,18 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
         <td>{spec.queue || job.project}
           {spec.cluster && <span title={`daemon-managed lease on ${spec.cluster}`}> ⚙</span>}
         </td>
-        <td><Chip text={retrying ? 'retrying' : waitingCluster ? 'waiting' : job.state}
-                  color={retrying || waitingCluster ? 'orange' : STATE_COLORS[job.state]} />
-          {job.state === 'starting' &&
-            <span className="muted"> {spec.cluster ? `${spec.cluster} coming up` : 'launching'}</span>}
-          {retrying &&
-            <span className="muted" title={`retry at ${job.retry_at} UTC`}>
-              {' '}in {fmtUntil(job.retry_at)} · {job.retries_left} left</span>}
-          {waitingCluster &&
-            <span className="muted" title={`last attempt failed; due ${job.retry_at} UTC`}>
-              {' '}{spec.cluster} unavailable · {dueNow
-                ? 'retrying when it frees up' : `retrying in ${fmtUntil(job.retry_at)}`}</span>}
-          {queued && spec.after &&
-            <span className="muted" title="waits for that job's retry chain">
+        <td><Chip text={label} color={STATE_COLORS[label]} />
+          {job.attempts > 1 && !done &&
+            <span className="muted" title="driver invocations so far">
+              {' '}attempt {job.attempts}/{job.max_attempts}</span>}
+          {dueAt &&
+            <span className="muted" title={`${job.last_error || 'waiting'} · due ${job.next_attempt_at} UTC`}>
+              {' '}{dueNow ? 'retrying when the cluster frees up'
+                           : `retrying in ${fmtUntil(job.next_attempt_at)}`}</span>}
+          {waiting && spec.after &&
+            <span className="muted" title="waits for that job to finish with data">
               {' '}after #{spec.after}</span>}
-          {queued && inherits &&
+          {waiting && inherits &&
             <span className="muted" title="same cluster as the job ahead of it: the VMs are handed over, not cycled">
               {' '}↳ inherits lease</span>}
           {job.state === 'running' && job.progress?.points &&
@@ -622,27 +622,17 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
         </td>
         <td className="muted">{fmtTs(job.created_at)}</td>
         <td onClick={e => e.stopPropagation()}>
-          {queued && !reorder && (
+          {waiting && !reorder && (
             <button className="link" title="run this next"
                     onClick={() => onMove(job.id, 'top')}>top</button>
           )}
-          {queued && reorder && (
+          {waiting && reorder && (
             <>
               <button className="link" onClick={() => onMove(job.id, 'up')}>▲</button>
               <button className="link" onClick={() => onMove(job.id, 'down')}>▼</button>
             </>
           )}
-          {queued && !reorder && (
-            <button className="link" onClick={async () => {
-              const exp = await askText('experiments (space-separated):',
-                (spec.experiments || []).join(' '))
-              if (exp !== null) {
-                act(() => api.editJob(job.id,
-                  { experiments: exp.split(/\s+/).filter(Boolean) }))
-              }
-            }}>edit</button>
-          )}
-          {(queued || job.state === 'starting' || job.state === 'running' || retrying) && (
+          {!done && (
             <button className="link" onClick={() => act(() => api.cancel(job.id))}>
               cancel</button>
           )}
@@ -651,6 +641,8 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
       {open && (
         <tr><td colSpan="6" className="log-cell">
           {job.run_dir && <div className="muted">run dir: <code>{job.run_dir}</code></div>}
+          {job.last_error &&
+            <div className="muted">last attempt: {job.last_error}</div>}
           {job.progress && <ProgressPanel p={job.progress} />}
           <pre className="log">{log || '(no output yet)'}</pre>
         </td></tr>
@@ -721,11 +713,9 @@ function RunEntry({ entry, display, onChanged }) {
         return (a.trial ?? 0) - (b.trial ?? 0)
       })
 
-  const state = job ? job.state : run.status
-  const chipColor = job
-    ? STATE_COLORS[job.state]
-    : { ok: 'green', degraded: 'orange', failed: 'red', running: 'blue',
-        interrupted: 'purple' }[run.status] || 'gray'
+  const state = job ? (job.state === 'done' ? job.outcome : job.state)
+                    : run.status
+  const chipColor = STATE_COLORS[state] || 'gray'
   const what = job
     ? ((job.spec.experiments || []).join(' ') || (job.spec.command || []).slice(1, 3).join(' '))
     : run.experiment
@@ -737,8 +727,8 @@ function RunEntry({ entry, display, onChanged }) {
         <td className="muted">{job ? `#${job.id}` : ''}{run ? ` r${run.id}` : ''}</td>
         <td className="mono">{what}</td>
         <td><Chip text={state || '?'} color={chipColor} />
-          {job && job.exit_code != null && job.exit_code !== 0 &&
-            <span className="muted"> rc={job.exit_code}</span>}
+          {job && job.attempts > 1 &&
+            <span className="muted" title="driver invocations"> ×{job.attempts}</span>}
         </td>
         <td>
           {run
@@ -754,7 +744,7 @@ function RunEntry({ entry, display, onChanged }) {
             <button className="link" title="submit the same job again in a fresh run dir"
                     onClick={() => act(() => api.resubmit(job.id, false))}>rerun</button>
           )}
-          {job && ['degraded', 'failed', 'interrupted', 'canceled'].includes(job.state) && job.run_dir && (
+          {job && ['degraded', 'failed', 'canceled'].includes(job.outcome) && job.run_dir && (
             <button className="link" title="resubmit, resuming into the same run dir"
                     onClick={() => act(() => api.resubmit(job.id, true))}>resume</button>
           )}
@@ -776,8 +766,8 @@ function RunEntry({ entry, display, onChanged }) {
                     // goes on one click; anything that produced measurements
                     // confirms — including an imported run, which has no job
                     // row but is somebody's data.
-                    const failed = ['failed', 'canceled', 'interrupted']
-                      .includes(job ? job.state : run.status)
+                    const failed = ['failed', 'canceled']
+                      .includes(job ? job.outcome : run.status)
                     if (!failed && !await ask(
                           `Delete ${what} and its data in ${job?.run_dir || run?.run_dir}? `
                           + 'The measurements are not recoverable.', true)) return
@@ -1076,14 +1066,12 @@ function Dashboard() {
 
   // Everything below the tabs is scoped to one project.
   const projJobs = jobs.filter(j => j.project === selected)
-  // A failed job with a pending retry is still work in flight: it stays in
-  // the queue until the retry requeues (as a child) or the chain is canceled.
-  const inFlight = j => ['queued', 'starting', 'running'].includes(j.state) ||
-    (j.state === 'failed' && j.retry_at)
+  // Anything not done is work in flight: a job waiting out its next attempt
+  // is still the same job, in the queue.
+  const inFlight = j => j.state !== 'done'
   // Queue shows dispatch order: running/starting first, then queued by
   // priority (high first) and age, then pending retries.
-  const rank = j => j.state === 'running' ? 0 : j.state === 'starting' ? 1
-    : j.state === 'queued' ? 2 : 3
+  const rank = j => j.state === 'running' ? 0 : 1
   const active = projJobs.filter(inFlight).sort((a, b) =>
     rank(a) - rank(b) || (b.priority - a.priority) || (a.id - b.id))
   const done = projJobs.filter(j => !inFlight(j))
@@ -1106,7 +1094,7 @@ function Dashboard() {
 
   const [reorder, setReorder] = useState(false)
   async function moveJob(id, how) {
-    const queued = active.filter(j => j.state === 'queued').map(j => j.id)
+    const queued = active.filter(j => j.state === 'waiting').map(j => j.id)
     const i = queued.indexOf(id)
     if (i < 0) return
     let order = [...queued]
@@ -1126,7 +1114,7 @@ function Dashboard() {
         <nav className="tabs">
           {projects.map(p => {
             const n = jobs.filter(j => j.project === p.name &&
-              ['queued', 'starting', 'running'].includes(j.state)).length
+              j.state !== 'done').length
             return (
               <button key={p.name}
                       className={`tab ${p.name === selected ? 'tab-on' : ''}`}
@@ -1158,7 +1146,7 @@ function Dashboard() {
 
       <section>
         <h2>Queue
-          {active.some(j => j.state === 'queued') && (
+          {active.some(j => j.state === 'waiting') && (
             <button className="link" onClick={() => setReorder(!reorder)}>
               {reorder ? 'done' : 'reorder'}</button>
           )}
@@ -1189,9 +1177,9 @@ function JobTable({ jobs, onChanged, empty, reorder, onMove }) {
   const inherits = new Set()
   for (let i = 1; i < jobs.length; i++) {
     const prev = jobs[i - 1], cur = jobs[i]
-    if (cur.state === 'queued' && cur.spec.cluster &&
+    if (cur.state === 'waiting' && cur.spec.cluster &&
         cur.spec.cluster === prev.spec.cluster &&
-        ['running', 'starting', 'queued'].includes(prev.state)) inherits.add(cur.id)
+        prev.state !== 'done') inherits.add(cur.id)
   }
   return (
     <table>

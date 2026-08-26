@@ -30,11 +30,7 @@ def apply_events(db, project_id, job_id, out_root, events) -> None:
     for event in events:
         etype = event.get("type")
         d = event.get("data") or {}
-        if etype == "experiment.started" and d.get("name"):
-            _ensure_run(db, project_id, job_id,
-                        _sweep_dir(out_root, d["name"]), d["name"],
-                        event.get("ts"))
-        elif etype in ("point.finished", "point.skipped") and d.get("experiment"):
+        if etype in ("point.finished", "point.skipped") and d.get("experiment"):
             sweep_dir = _sweep_dir(out_root, d["experiment"])
             run_id = _ensure_run(db, project_id, job_id, sweep_dir,
                                  d["experiment"], event.get("ts"))
@@ -50,16 +46,16 @@ def apply_events(db, project_id, job_id, out_root, events) -> None:
                           d.get("trial"), metrics, summary_path,
                           keep_existing=keep)
         elif etype == "experiment.finished" and d.get("name"):
-            run_id = _ensure_run(db, project_id, job_id,
-                                 _sweep_dir(out_root, d["name"]), d["name"],
-                                 event.get("ts"))
-            n = db.query_one("SELECT COUNT(*) AS n FROM run_points "
-                             "WHERE run_id = ?", (run_id,))["n"]
-            db.execute("UPDATE runs SET status = ?, n_points = ? WHERE id = ?",
-                       (d.get("status") or "ok", n, run_id))
-        elif etype == "run.interrupted":
-            db.execute("UPDATE runs SET status = 'interrupted' "
-                       "WHERE job_id = ? AND status = 'running'", (job_id,))
+            # No row means the experiment finished without a point: there is
+            # nothing to record, and a run entry with no data is noise.
+            row = db.query_one("SELECT id FROM runs WHERE run_dir = ?",
+                               (_sweep_dir(out_root, d["name"]),))
+            if row:
+                n = db.query_one("SELECT COUNT(*) AS n FROM run_points "
+                                 "WHERE run_id = ?", (row["id"],))["n"]
+                db.execute("UPDATE runs SET status = ?, n_points = ? "
+                           "WHERE id = ?",
+                           (d.get("status") or "ok", n, row["id"]))
 
 
 def _sweep_dir(out_root, experiment) -> str:
@@ -67,17 +63,21 @@ def _sweep_dir(out_root, experiment) -> str:
 
 
 def _ensure_run(db, project_id, job_id, run_dir, experiment, ts) -> int:
+    """The row for a sweep dir, created on its first point. status is a
+    fact about the data (set when the experiment finishes, or by a scan),
+    never about the job: a job that dies mid-sweep leaves the points it
+    finished, not a run stuck in a state."""
     row = db.query_one("SELECT id FROM runs WHERE run_dir = ?", (run_dir,))
     if row:
-        # A resume/retry re-runs into the same dir: repoint at the live job.
-        db.execute("UPDATE runs SET job_id = ?, status = 'running', "
-                   "dir_exists = 1, indexed_at = datetime('now') "
-                   "WHERE id = ?", (job_id, row["id"]))
+        # A resume re-runs into the same dir: note who wrote it last.
+        db.execute("UPDATE runs SET job_id = ?, dir_exists = 1, "
+                   "indexed_at = datetime('now') WHERE id = ?",
+                   (job_id, row["id"]))
         return row["id"]
     return db.insert(
         "INSERT INTO runs (project_id, run_dir, experiment, started_at, "
-        "status, job_id, dir_exists, indexed_at) "
-        "VALUES (?, ?, ?, ?, 'running', ?, 1, datetime('now'))",
+        "job_id, dir_exists, indexed_at) "
+        "VALUES (?, ?, ?, ?, ?, 1, datetime('now'))",
         (project_id, run_dir, experiment, ts, job_id))
 
 
@@ -173,14 +173,17 @@ def _index_sweep_dir(db, project_id, sweep_dir: Path) -> bool | None:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))",
             (project_id, run_dir, sweep_dir.name, started_at, git_commit,
              argv, len(entries), status, job_id))
-    for entry in entries:
+    for i, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
         # Old-driver entries are flat summary dicts with dim tags mixed in;
         # there is no dimension table to split them with, so the whole entry
-        # is the metrics record and rate/trial are lifted for querying.
-        _upsert_point(db, run_id, {}, entry.get("rate"), entry.get("trial"),
-                      entry, None)
+        # is the metrics record and rate/trial are lifted for querying. Its
+        # position in the file is the identity: two entries that differ only
+        # in a dim the ledger cannot name (a payload size) must not collapse
+        # into one, and re-scanning the same file must not duplicate them.
+        _upsert_point(db, run_id, {"i": i},
+                      entry.get("rate"), entry.get("trial"), entry, None)
     return row is None
 
 

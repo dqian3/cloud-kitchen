@@ -19,7 +19,6 @@ export const api = {
   job: (id) => req(`/api/jobs/${id}`),
   jobLog: (id, tail = 200) => req(`/api/jobs/${id}/log?tail=${tail}`),
   submit: (spec) => req('/api/jobs', { method: 'POST', body: JSON.stringify(spec) }),
-  editJob: (id, updates) => req(`/api/jobs/${id}`, { method: 'PATCH', body: JSON.stringify(updates) }),
   purgeJobs: (project) => req('/api/jobs/purge', { method: 'POST', body: JSON.stringify({ project }) }),
   reorderJobs: (ids) => req('/api/jobs/reorder', { method: 'POST', body: JSON.stringify({ ids }) }),
   cancel: (id) => req(`/api/jobs/${id}/cancel`, { method: 'POST', body: '{}' }),

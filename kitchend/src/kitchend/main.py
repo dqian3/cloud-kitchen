@@ -9,7 +9,7 @@
     kitchend jobs [--state S] [-n N]    recent jobs
     kitchend watch JOB_ID               follow a job to completion
     kitchend log JOB_ID [-n N]          tail a job's driver output
-    kitchend cancel JOB_ID              cancel a queued/running job
+    kitchend cancel JOB_ID              cancel a waiting/running job
     kitchend resubmit JOB_ID            resubmit into the same run dir
     kitchend clusters                   cluster states, VMs, burn
 """
@@ -48,9 +48,11 @@ def _fmt_job_line(j):
         or " ".join(j["spec"].get("command") or [])[:60]
     queue = j["spec"].get("queue") or j["project"]
     lease = " ⚙" if j["spec"].get("cluster") else ""
-    state = j["state"]
-    if state == "failed" and j.get("retry_at"):
-        state = f"retry@{j['retry_at'][11:16]}Z"
+    state = j["outcome"] if j["state"] == "done" else j["state"]
+    if j["state"] == "waiting" and j.get("next_attempt_at"):
+        state = f"retry@{j['next_attempt_at'][11:16]}Z"
+    if j.get("attempts", 0) > 1 and j["state"] != "done":
+        state += f" #{j['attempts']}"
     return (f"#{j['id']:<5} {j['project']:<10} {state:<11} "
             f"{queue}{lease}  {what}")
 
@@ -95,7 +97,7 @@ def cmd_catalog(config, args):
 
 def cmd_submit(config, args):
     spec = {"project": args.project, "experiments": args.experiments,
-            "priority": args.priority, "max_retries": args.retries}
+            "priority": args.priority, "max_attempts": args.retries}
     if args.cluster:
         spec["cluster"] = args.cluster
         spec["cluster_ttl_minutes"] = args.ttl
@@ -158,15 +160,15 @@ def cmd_watch(config, args):
         if line != last:
             print(f"\r{time.strftime('%H:%M:%S')}  {line}")
             last = line
-        if j["state"] not in ("queued", "starting", "running"):
+        if j["state"] == "done":
             tail = _api(config, f"/api/jobs/{args.job_id}/log?tail=15")["log"]
             if tail:
                 print("--- last output ---")
                 print(tail)
-            rc = j.get("exit_code")
-            print(f"finished: {j['state']}"
-                  + (f" (exit {rc})" if rc not in (None, 0) else ""))
-            return {"succeeded": 0, "degraded": 2}.get(j["state"], 1)
+            print(f"finished: {j['outcome']} after "
+                  f"{j['attempts']} attempt(s)"
+                  + (f" — {j['last_error']}" if j.get("last_error") else ""))
+            return {"ok": 0, "degraded": 2}.get(j["outcome"], 1)
         time.sleep(args.interval)
 
 
@@ -194,14 +196,11 @@ def cmd_create(config, args):
 
 
 def cmd_purge(config, args):
-    body = {"states": args.states}
+    body = {"outcomes": args.outcomes}
     if args.project:
         body["project"] = args.project
-    body["delete_files"] = not args.keep_files
     out = _api(config, "/api/jobs/purge", body=body)
     print(f"purged {len(out['purged'])} job(s): {out['purged']}")
-    if out.get("removed_dirs"):
-        print(f"removed {len(out['removed_dirs'])} run dir(s)")
 
 
 def cmd_clusters(config, args):
@@ -243,7 +242,8 @@ def main(argv=None):
     p.add_argument("--cluster", help="daemon-managed lease on this cluster")
     p.add_argument("--ttl", type=int, default=60, help="lease TTL minutes")
     p.add_argument("--priority", type=int, default=0)
-    p.add_argument("--retries", type=int, default=20)
+    p.add_argument("--attempts", type=int, default=20, dest="retries",
+                   help="driver invocations before giving up")
     p.add_argument("--after", type=int, default=None,
                    help="run after this job's retry chain succeeds")
     p.add_argument("--flags", nargs="+", default=None,
@@ -271,12 +271,10 @@ def main(argv=None):
 
     sub.add_parser("clusters", help="cluster states, VMs, burn")
 
-    p = sub.add_parser("purge", help="delete failed/canceled/interrupted jobs")
+    p = sub.add_parser("purge", help="delete job rows that produced no data "
+                       "(files are never touched; delete runs for that)")
     p.add_argument("--project")
-    p.add_argument("--states", nargs="+",
-                   default=["failed", "canceled", "interrupted"])
-    p.add_argument("--keep-files", action="store_true", dest="keep_files",
-                   help="keep what the purged jobs wrote on disk")
+    p.add_argument("--outcomes", nargs="+", default=["failed", "canceled"])
 
     p = sub.add_parser("create", help="provision a cluster's VMs (creates "
                        "instances; retries while a zone is out of capacity)")

@@ -96,7 +96,7 @@ def list_jobs(db, state=None, limit=100):
 def attempts(db, job_id):
     """This job's driver invocations, oldest first."""
     return [dict(r) for r in db.query(
-        "SELECT n, started_at, finished_at, exit_code, error "
+        "SELECT n, started_at, finished_at, exit_code, points, error "
         "FROM job_attempts WHERE job_id = ? ORDER BY n", (job_id,))]
 
 
@@ -169,45 +169,14 @@ def start_attempt(db, hub, job_id) -> int:
     return n
 
 
-def end_attempt(db, job_id, exit_code=None, error=None) -> None:
+def end_attempt(db, job_id, exit_code=None, error=None, points=None) -> None:
+    """Close the open attempt. `points` is what it finished, which is how
+    the scheduler tells a flaky run from a broken environment."""
     db.execute(
         "UPDATE job_attempts SET finished_at = datetime('now'), "
-        "exit_code = ?, error = ? WHERE job_id = ? AND finished_at IS NULL",
-        (exit_code, error, job_id))
-
-
-def update_queued(db, hub, job_id, updates: dict):
-    """Edit a job that hasn't finished: spec fields and/or priority.
-
-    The check-and-update runs under the DB lock via a conditional UPDATE, so
-    a dispatch racing this edit either sees the old spec (job already
-    running — the edit is refused) or the new one.
-    """
-    job = get(db, job_id)
-    if job is None:
-        raise KeyError(job_id)
-    if job["state"] != WAITING:
-        raise ValueError(f"job {job_id} is {job['state']}, not waiting")
-    spec = dict(job["spec"])
-    priority = updates.pop("priority", None)
-    spec.update(updates)
-    # The daemon-assigned dir lives on the row, not in the spec: an edit keeps it.
-    params = [json.dumps(spec), spec.get("run_dir") or job.get("run_dir"),
-              int(spec.get("max_attempts", DEFAULT_MAX_ATTEMPTS))]
-    sets = "spec_json = ?, run_dir = ?, max_attempts = ?"
-    if priority is not None:
-        # Re-ranking cancels a pending cluster wait: whoever is at the front
-        # now is the one that tries next.
-        sets += ", priority = ?, next_attempt_at = NULL"
-        params.append(int(priority))
-        spec["priority"] = int(priority)
-    params.append(job_id)
-    cur = db.execute(
-        f"UPDATE jobs SET {sets} WHERE id = ? AND state = 'waiting'", params)
-    if cur.rowcount == 0:
-        raise ValueError(f"job {job_id} started while editing; not modified")
-    hub.emit("job.edited", job_id=job_id, state=WAITING)
-    return get(db, job_id)
+        "exit_code = ?, error = ?, points = ? "
+        "WHERE job_id = ? AND finished_at IS NULL",
+        (exit_code, error, points, job_id))
 
 
 def purge(db, hub, outcomes=PURGEABLE_OUTCOMES, project_id=None) -> list[int]:

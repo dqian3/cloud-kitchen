@@ -63,7 +63,9 @@ def test_refeed_and_resume_are_idempotent(env, tmp_path):
     ]
     ledger.apply_events(db, project_id, job_id, str(out_root), first)
     run = ledger.list_runs(db)[0]
-    assert run["status"] == "interrupted"
+    # The point it finished is recorded; status stays open, because status
+    # describes the data and this sweep has not finished producing it.
+    assert run["status"] is None and len(ledger.get_run(db, run["id"])["points"]) == 1
 
     # The resumed job re-reads the whole file: its predecessor's events plus
     # its own skip (metrics ride along) and finish. No duplicate rows, and
@@ -118,10 +120,15 @@ def test_tags_notes_and_filters(env, tmp_path):
     config, db, hub, runner, scheduler = env
     out_root = tmp_path / "rd"
     project_id, job_id = _job(db, config, out_root)
+    # A run enters the ledger when it produces a point, not when it starts.
     ledger.apply_events(db, project_id, job_id, str(out_root), [
         _ev("experiment.started", name="exp-a"),
+        _ev("point.finished", experiment="exp-a", dims={}, rate=1, trial=0,
+            rel_dir="r1", status="ok", metrics={"throughput_msgs_per_sec": 1}),
         _ev("experiment.finished", name="exp-a", status="ok", detail=""),
         _ev("experiment.started", name="exp-b"),
+        _ev("point.finished", experiment="exp-b", dims={}, rate=1, trial=0,
+            rel_dir="r1", status="ok", metrics={"throughput_msgs_per_sec": 1}),
         _ev("experiment.finished", name="exp-b", status="ok", detail=""),
     ])
     runs = ledger.list_runs(db)

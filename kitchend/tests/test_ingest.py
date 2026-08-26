@@ -146,14 +146,14 @@ def test_dispatch_assigns_run_dir(env):
         deadline = time.monotonic() + 10
         try:
             while time.monotonic() < deadline:
-                if jobs.get(db, job_id)["state"] not in jobs.ACTIVE_STATES:
+                if jobs.get(db, job_id)["state"] == jobs.DONE:
                     break
                 await asyncio.sleep(0.05)
         finally:
             scheduler.stop()
             task.cancel()
         job = jobs.get(db, job_id)
-        assert job["state"] == jobs.SUCCEEDED
+        assert job["outcome"] == jobs.OK
         assert job["run_dir"] and f"kitchen-job{job_id}-" in job["run_dir"]
         # The assigned dir lives under the project's repo (no runs_roots
         # configured on the stub → <repo>/runs).
@@ -169,28 +169,28 @@ def test_retry_resumes_into_assigned_run_dir(env):
         project_id = jobs.ensure_project_row(db, config.project("stub"))
         job_id = jobs.submit(db, project_id,
                              {"project": "stub", "experiments": ["exit 1"],
-                              "queue": "a", "max_retries": 1,
+                              "queue": "a", "max_attempts": 2,
                               "retry_delay_secs": 0})
         task = asyncio.get_running_loop().create_task(scheduler.loop())
         scheduler.wake()
         deadline = time.monotonic() + 10
-        child = None
         try:
             while time.monotonic() < deadline:
-                rows = db.query("SELECT id FROM jobs WHERE parent_job_id = ?",
-                                (job_id,))
-                if rows:
-                    child = jobs.get(db, rows[0]["id"])
-                    if child["state"] not in jobs.ACTIVE_STATES:
-                        break
+                if jobs.get(db, job_id)["state"] == jobs.DONE:
+                    break
                 await asyncio.sleep(0.05)
         finally:
             scheduler.stop()
             task.cancel()
-        parent = jobs.get(db, job_id)
-        assert parent["run_dir"]
-        # The retry resumes into the dir the daemon assigned to the parent.
-        assert child["spec"]["run_dir"] == parent["run_dir"]
-        assert child["spec"]["resume"] is True
+        job = jobs.get(db, job_id)
+        assert job["attempts"] == 2 and job["run_dir"]
+        # Both attempts ran the same job, in the dir the daemon assigned it;
+        # the second one resumed.
+        cmds = [json.loads(r["payload_json"]) for r in db.query(
+            "SELECT payload_json FROM events WHERE type = 'job.command' "
+            "AND job_id = ? ORDER BY id", (job_id,))]
+        assert len(cmds) == 2
+        assert all(job["run_dir"] in c["argv"] for c in cmds)
+        assert "--resume" in cmds[1]["argv"]
 
     asyncio.run(main())
