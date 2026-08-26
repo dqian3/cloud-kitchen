@@ -75,6 +75,9 @@ def prepare_specs(project_cfg, spec: dict) -> list[dict]:
                     f"configured; known: {[c.name for c in project_cfg.clusters]}")
             if not s.get("queue"):
                 s["queue"] = f"{project_cfg.name}/{cluster}"
+        # Stamp the label once, here, so the queue reads the same in the UI,
+        # the CLI and MCP — and never as a wall of argv.
+        s["name"] = jobs.label(s, project_cfg)
         # Validate now so a bad spec fails at submit, not at dispatch.
         jobs.build_command(project_cfg, s)
     return specs

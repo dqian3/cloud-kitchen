@@ -27,6 +27,7 @@ def list_experiments(project: str, request: Request):
 
 class JobSubmit(BaseModel):
     project: str
+    name: str | None = None        # what to call it in the queue
     experiments: list[str] = Field(default_factory=list)
     command: list[str] | None = None
     sweep: dict | None = None      # ad-hoc sweep params → adapter.oneoff()
@@ -174,7 +175,7 @@ class ClusterDown(BaseModel):
 
 class ClusterExtend(BaseModel):
     lease_id: str
-    ttl_minutes: int
+    ttl_minutes: int = 60      # ignored by release
 
 
 @router.get("/clusters")
@@ -205,6 +206,24 @@ async def cluster_down(project: str, name: str, body: ClusterDown, request: Requ
     except RuntimeError as e:
         raise HTTPException(409, str(e))
     return {"ok": True}
+
+
+@router.post("/clusters/{project}/{name}/release")
+def cluster_release(project: str, name: str, body: ClusterExtend,
+                    request: Request):
+    """Give back one lease without stopping the cluster. A lease taken by
+    hand otherwise locks the queue out of those VMs until it expires, and
+    forcing the cluster down to break that would throw away VMs that are
+    already running."""
+    app = request.app
+    try:
+        app.state.clusters.release(f"{project}/{name}", body.lease_id)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    app.state.scheduler.wake()      # a job may have been waiting on it
+    return {"ok": True, "released": body.lease_id}
 
 
 @router.post("/clusters/{project}/{name}/extend")

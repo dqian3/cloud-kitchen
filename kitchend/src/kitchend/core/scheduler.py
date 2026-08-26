@@ -127,6 +127,14 @@ class Scheduler:
                 continue
             if cluster_key and self._cooling(cluster_key):
                 continue
+            # Someone else's lease on a cluster sharing these VMs: waiting is
+            # right, but it is not this job's failure and costs it nothing.
+            overlapping = getattr(self.clusters, "overlapping_active", None)
+            busy = overlapping(cluster_key) if cluster_key and overlapping else []
+            if busy:
+                self._note(job, f"waiting for {busy[0]}, which holds these "
+                                "VMs under another lease")
+                continue
             if cluster_key:
                 self._cluster_jobs[cluster_key] = job["id"]
             self._running_queues[key] = job["id"]
@@ -135,13 +143,30 @@ class Scheduler:
             if len(self._running_queues) >= self.config.max_concurrent_queues:
                 break
 
+    def _note(self, job, reason) -> None:
+        """Record why a job is sitting in the queue, without touching its
+        attempts. Written only when it changes: dispatch runs every 5s."""
+        if job.get("last_error") != reason:
+            self.db.execute("UPDATE jobs SET last_error = ? WHERE id = ?",
+                            (reason, job["id"]))
+            self.hub.emit("job.blocked", job_id=job["id"], reason=reason)
+
     def _cooling(self, cluster_key) -> bool:
         """Is this cluster, or one sharing its VMs, inside a bring-up
         cooldown? Expired entries are dropped as they are seen."""
         now = time.monotonic()
+        is_up = getattr(self.clusters, "is_up", None)
         for key, until in list(self._cluster_cooldown.items()):
             if until <= now:
                 del self._cluster_cooldown[key]
+                continue
+            if is_up and is_up(key):
+                # It came up after all — someone started it by hand, or a
+                # lease on a cluster sharing its VMs did. The cooldown says
+                # "this will not start", and that is no longer true.
+                del self._cluster_cooldown[key]
+                self.hub.emit("cluster.cooldown_cleared", cluster=key,
+                              reason="cluster is up")
                 continue
             overlaps = getattr(self.clusters, "overlaps", None)
             if key == cluster_key or (overlaps and overlaps(cluster_key, key)):

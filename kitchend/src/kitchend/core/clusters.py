@@ -182,6 +182,18 @@ class ClusterManager:
         except (KeyError, OSError, ValueError):
             return False
 
+    def is_up(self, key: str) -> bool:
+        """Are this cluster's VMs running — under one of our leases or not?
+        A cluster somebody else started is still up, and a scheduler holding
+        a cooldown against it should stop waiting."""
+        try:
+            mc = self._get(key)
+        except (KeyError, ValueError):
+            return False
+        row = self.db.query_one("SELECT state FROM clusters WHERE id = ?",
+                                (mc.db_id,))
+        return bool(row) and row["state"] in ("running", "unmanaged")
+
     def overlapping_active(self, key: str) -> list[str]:
         return [other.key for other in self.clusters.values()
                 if other.task is not None and not other.task.done()

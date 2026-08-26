@@ -13,6 +13,7 @@ Example:
     driver_cwd = "scripts/benchmarks"          # relative to repo_path
     output_dir_flag = "--output-dir"
     resume_flag = "--resume"
+    name_flag = "--name"                 # what the driver calls the run
     gcp_project = "nyu-rdg-fy26-as11800-2203"
     tunnel_through_iap = true
     publish_root = "data/figures"        # served read-only at /pub/aspen-bft/
@@ -58,6 +59,9 @@ class ProjectConfig:
     driver_cwd: str = "."
     output_dir_flag: str = "--output-dir"
     resume_flag: str = "--resume"
+    # The flag a driver takes its run's name in. A job submitted as a raw
+    # command gets its label from it, so the queue shows a name and not argv.
+    name_flag: str = "--name"
     gcp_project: str | None = None
     tunnel_through_iap: bool = False
     # A directory (relative to repo_path) the daemon serves as static files
@@ -100,6 +104,7 @@ def load_config(path: Path | None = None) -> Config:
             driver_cwd=p.get("driver_cwd", "."),
             output_dir_flag=p.get("output_dir_flag", "--output-dir"),
             resume_flag=p.get("resume_flag", "--resume"),
+            name_flag=p.get("name_flag", "--name"),
             gcp_project=p.get("gcp_project"),
             tunnel_through_iap=bool(p.get("tunnel_through_iap", False)),
             publish_root=p.get("publish_root"),

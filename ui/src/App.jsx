@@ -595,8 +595,8 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
     <>
       <tr className="job-row" onClick={() => setOpen(!open)}>
         <td>{job.id}</td>
-        <td className="mono">{(spec.experiments || []).join(' ') ||
-          (spec.command || []).join(' ')}</td>
+        <td className="mono" title={(spec.command || []).join(' ')}>
+          {spec.name || (spec.experiments || []).join(' ') || 'job'}</td>
         <td>{spec.queue || job.project}
           {spec.cluster && <span title={`daemon-managed lease on ${spec.cluster}`}> ⚙</span>}
         </td>
@@ -717,7 +717,7 @@ function RunEntry({ entry, display, onChanged }) {
                     : run.status
   const chipColor = STATE_COLORS[state] || 'gray'
   const what = job
-    ? ((job.spec.experiments || []).join(' ') || (job.spec.command || []).slice(1, 3).join(' '))
+    ? (job.spec.name || (job.spec.experiments || []).join(' ') || 'job')
     : run.experiment
   const when = job ? (job.finished_at || job.created_at) : run.started_at
 

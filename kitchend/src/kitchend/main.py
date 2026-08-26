@@ -44,8 +44,8 @@ def _api(config, path, body=None, method=None):
 
 
 def _fmt_job_line(j):
-    what = " ".join(j["spec"].get("experiments") or []) \
-        or " ".join(j["spec"].get("command") or [])[:60]
+    what = j["spec"].get("name") \
+        or " ".join(j["spec"].get("experiments") or []) or "job"
     queue = j["spec"].get("queue") or j["project"]
     lease = " ⚙" if j["spec"].get("cluster") else ""
     state = j["outcome"] if j["state"] == "done" else j["state"]

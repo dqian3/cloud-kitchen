@@ -125,6 +125,24 @@ def default_run_dir(project_cfg, job_id):
     return root / f"kitchen-job{job_id}-{stamp}"
 
 
+def label(spec: dict, project_cfg=None) -> str:
+    """What to call this job in a queue: the name it was submitted under, or
+    the experiments it runs, or the name its driver was given. A raw argv is
+    the last resort, and never the whole of it."""
+    if spec.get("name"):
+        return spec["name"]
+    if spec.get("experiments"):
+        return " ".join(spec["experiments"])
+    argv = [str(a) for a in spec.get("command") or ()]
+    flag = getattr(project_cfg, "name_flag", "--name")
+    if flag and flag in argv:
+        i = argv.index(flag)
+        if i + 1 < len(argv):
+            return argv[i + 1]
+    script = next((a for a in argv if a.endswith(".py")), None)
+    return script or (argv[0] if argv else "job")
+
+
 def queue_key(job: dict) -> str:
     return job["spec"].get("queue") or job["spec"].get("cluster") or job["project"]
 
