@@ -83,6 +83,10 @@ class ManagedCluster:
     session_id: int | None = None
     last_status: dict | None = None     # None until the first gcloud poll
     last_rearm: float = 0.0
+    # VMs that would not start last time: the next bring-up asks for these
+    # alone first, so a zone still short of capacity costs one API call
+    # instead of starting (and stopping) everything else.
+    short_vms: list[str] = field(default_factory=list)
     create_task: asyncio.Task | None = None
     create_log: list = field(default_factory=list)   # captured output lines
     create_rc: int | None = None                     # last run's exit code
@@ -258,11 +262,18 @@ class ClusterManager:
         # addressing, or never needed them). A cluster that cannot fully
         # start cannot run its job; stop_on_partial stops the started subset
         # rather than holding it at cost.
+        probe = [v for v in mc.short_vms if v in set(vms)]
         try:
+            if probe and len(probe) < len(vms):
+                self.hub.emit("cluster.probe", cluster_id=mc.db_id,
+                              cluster=mc.key, vms=probe)
+                await asyncio.to_thread(start_vms, mc.remote, probe,
+                                        drain_first=False, stop_on_partial=True)
             started = await asyncio.to_thread(start_vms, mc.remote, vms,
                                               drain_first=fresh,
                                               stop_on_partial=True)
         except Exception as e:
+            mc.short_vms = list(getattr(e, "failed_vms", None) or mc.short_vms)
             self.hub.emit("cluster.error", cluster_id=mc.db_id,
                           cluster=mc.key, error=repr(e))
             lease.release()
@@ -275,6 +286,7 @@ class ClusterManager:
             raise RuntimeError(
                 f"cluster {key} failed to start (the VMs that did come "
                 f"up were stopped again): {e}") from e
+        mc.short_vms = []
         if fresh:
             mc.keepalive = KeepAlive(mc.remote, vms, state=mc.state,
                                      stop_on_exit=False)
