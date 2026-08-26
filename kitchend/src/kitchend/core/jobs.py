@@ -163,6 +163,12 @@ def update_queued(db, hub, job_id, updates: dict):
     return get(db, job_id)
 
 
+def pending_retry(job) -> bool:
+    """Is another attempt actually coming? Only a failed job retries; a
+    retry_at left on any other state is stale and must not pin the row."""
+    return job["state"] == FAILED and bool(job["retry_at"])
+
+
 PURGEABLE_STATES = (FAILED, CANCELED, INTERRUPTED)
 
 
@@ -196,7 +202,7 @@ def delete(db, hub, job_id: int) -> None:
     job = get(db, job_id)
     if job is None:
         raise KeyError(job_id)
-    if job["state"] in ACTIVE_STATES or job["retry_at"]:
+    if job["state"] in ACTIVE_STATES or pending_retry(job):
         raise ValueError(f"job {job_id} is {job['state']}; cancel it first")
     db.execute("UPDATE events SET job_id = NULL WHERE job_id = ?", (job_id,))
     db.execute("UPDATE runs SET job_id = NULL WHERE job_id = ?", (job_id,))

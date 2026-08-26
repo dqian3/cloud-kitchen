@@ -130,12 +130,22 @@ def purge_jobs(body: Purge, request: Request):
         except KeyError as e:
             raise HTTPException(404, str(e))
     # Read the rows before they go: the run dirs are on them.
-    doomed = [j for j in jobs.list_jobs(app.state.db, limit=1000)
-              if j["state"] in body.states and not j["retry_at"]
+    all_jobs = jobs.list_jobs(app.state.db, limit=1000)
+    doomed = [j for j in all_jobs
+              if j["state"] in body.states and not jobs.pending_retry(j)
               and (project_id is None or j["project_id"] == project_id)]
-    removed = []
+    doomed_ids = {j["id"] for j in doomed}
+    # A retry resumes into its predecessor's directory, so purging the
+    # predecessor must not delete data a surviving job owns — least of all
+    # one that is writing to it right now.
+    kept_dirs = {j["run_dir"] for j in all_jobs
+                 if j["id"] not in doomed_ids and j["run_dir"]}
+    removed, kept = [], []
     if body.delete_files:
         for j in doomed:
+            if j.get("run_dir") in kept_dirs:
+                kept.append(j["run_dir"])
+                continue
             try:
                 path = _remove_run_dir(app, j["project"], j.get("run_dir"))
             except HTTPException:
@@ -149,7 +159,7 @@ def purge_jobs(body: Purge, request: Request):
     ids = jobs.purge(app.state.db, app.state.hub, body.states, project_id)
     for jid in ids:
         (app.state.runner.jobs_dir / f"{jid}.log").unlink(missing_ok=True)
-    return {"purged": ids, "removed_dirs": removed}
+    return {"purged": ids, "removed_dirs": removed, "kept_dirs": kept}
 
 
 class Reorder(BaseModel):

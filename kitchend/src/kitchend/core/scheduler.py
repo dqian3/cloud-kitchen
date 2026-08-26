@@ -443,17 +443,20 @@ class Scheduler:
         if job is None:
             raise KeyError(job_id)
         if job["state"] == jobs.QUEUED:
+            # retry_at goes with it: a canceled job has no next attempt, and
+            # leaving one behind makes the row refuse to purge.
             jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED,
-                           finished_at=jobs._now(self.db))
+                           finished_at=jobs._now(self.db), retry_at=None)
             return jobs.CANCELED
         if job["state"] == jobs.STARTING:
             # The dispatch coroutine sees this after the lease returns and
             # releases it instead of spawning.
             jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED,
-                           finished_at=jobs._now(self.db))
+                           finished_at=jobs._now(self.db), retry_at=None)
             return jobs.CANCELED
         if job["state"] == jobs.RUNNING:
-            jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED)
+            jobs.set_state(self.db, self.hub, job_id, jobs.CANCELED,
+                           retry_at=None)
             await self.runner.cancel(job_id)
             self.db.execute("UPDATE jobs SET finished_at = datetime('now') "
                             "WHERE id = ?", (job_id,))
