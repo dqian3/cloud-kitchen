@@ -200,7 +200,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
   const [freeText, setFreeText] = useState('')
   const [flags, setFlags] = useState('')
   const [priority, setPriority] = useState(0)
-  const [retries, setRetries] = useState(20)
+  const [attempts, setAttempts] = useState(20)
   const [after, setAfter] = useState('')          // chain: wait for job #
   const [managedCluster, setManagedCluster] = useState('')  // daemon lease
   const [err, setErr] = useState(null)
@@ -276,7 +276,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
     e.preventDefault()
     setErr(null)
     try {
-      const common = { project, priority: +priority, max_retries: +retries }
+      const common = { project, priority: +priority, max_attempts: +attempts }
       if (after) common.after = +after
       if (oneoff) {
         const sweep = buildSweep()
@@ -330,8 +330,8 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
                onChange={e => setFlags(e.target.value)} />
         <label>prio <input type="number" value={priority}
                onChange={e => setPriority(e.target.value)} /></label>
-        <label>retries <input type="number" value={retries} min="0"
-               onChange={e => setRetries(e.target.value)} /></label>
+        <label>attempts <input type="number" value={attempts} min="1"
+               onChange={e => setAttempts(e.target.value)} /></label>
         <button type="submit">
           queue job{!oneoff && selected.length > 1 ? ` (${selected.length})` : ''}
         </button>
@@ -1070,7 +1070,7 @@ function Dashboard() {
   // is still the same job, in the queue.
   const inFlight = j => j.state !== 'done'
   // Queue shows dispatch order: running/starting first, then queued by
-  // priority (high first) and age, then pending retries.
+  // priority (high first) and age.
   const rank = j => j.state === 'running' ? 0 : 1
   const active = projJobs.filter(inFlight).sort((a, b) =>
     rank(a) - rank(b) || (b.priority - a.priority) || (a.id - b.id))
