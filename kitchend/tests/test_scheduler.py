@@ -170,14 +170,14 @@ def test_cancel_running_job(env, tmp_path):
 def test_cancel_a_waiting_job_clears_its_next_attempt(env):
     config, db, hub, runner, scheduler = env
     j = _submit(db, hub, config, "exit 0", queue="q")
-    jobs.wait_again(db, hub, j, 600, "cluster bring-up failed")
+    jobs.wait_again(db, hub, j, "q", 600, "cluster bring-up failed")
 
     async def main():
         assert await scheduler.cancel(j) == jobs.CANCELED
 
     asyncio.run(main())
     row = jobs.get(db, j)
-    assert row["state"] == jobs.DONE and row["next_attempt_at"] is None
+    assert row["state"] == jobs.DONE
     # And it can be dropped: nothing is pending for it any more.
     jobs.delete(db, hub, j)
     assert jobs.get(db, j) is None

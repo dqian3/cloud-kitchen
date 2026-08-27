@@ -223,9 +223,9 @@ def test_cluster_bringup_failure_cools_the_cluster_down(env):
     asyncio.run(main())
 
 
-def test_reorder_stops_a_deprioritized_job_waiting(env):
-    """Only the front of the queue waits on a cluster: a job moved behind
-    another drops its pending attempt."""
+def test_a_queue_waits_as_one(env):
+    """The delay belongs to the queue: one job runs at a time, so every job
+    in it waits out the same attempt rather than starting its own."""
     config, db, hub, runner, scheduler = env
     scheduler.clusters = FakeClusters(fail_up=True)
 
@@ -236,9 +236,12 @@ def test_reorder_stops_a_deprioritized_job_waiting(env):
                         queue="stub/main")
         await _run_until(scheduler,
                          lambda: jobs.get(db, waiting)["next_attempt_at"])
+        # The wait is the queue's now, so reordering does not clear it: both
+        # jobs sit behind the same delay, which is the point.
         jobs.reorder(db, hub, [other, waiting])
-        assert jobs.get(db, waiting)["next_attempt_at"] is None
         assert _state(db, waiting) == jobs.WAITING
+        assert jobs.get(db, other)["next_attempt_at"] == \
+            jobs.get(db, waiting)["next_attempt_at"]
 
     asyncio.run(main())
 

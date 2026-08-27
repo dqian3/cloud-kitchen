@@ -64,7 +64,6 @@ SCHEMA = """
         priority INTEGER NOT NULL DEFAULT 0,
         attempts INTEGER NOT NULL DEFAULT 0,
         max_attempts INTEGER NOT NULL DEFAULT 20,
-        next_attempt_at TEXT,                    -- waiting only: not before this
         last_error TEXT,
         pid INTEGER,
         events_offset INTEGER NOT NULL DEFAULT 0,
@@ -75,6 +74,16 @@ SCHEMA = """
         finished_at TEXT
     );
     CREATE INDEX idx_jobs_state ON jobs(state, cluster_id);
+
+    -- A queue's own wait. One job runs per queue, so the delay after a failed
+    -- attempt belongs to the queue, not to each job in it: with a timer per
+    -- job, every job that reached the front started its own wait for the same
+    -- condition.
+    CREATE TABLE queues (
+        key TEXT PRIMARY KEY,
+        next_attempt_at TEXT,
+        last_error TEXT
+    );
 
     -- One row per driver invocation: the retry history, without the rows.
     CREATE TABLE job_attempts (
@@ -156,7 +165,7 @@ SCHEMA = """
     );
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class Db:

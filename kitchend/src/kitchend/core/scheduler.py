@@ -43,32 +43,22 @@ class Scheduler:
         self._wake = asyncio.Event()
         self._stopped = False
         self._restore_cooldowns()
-        # Only the front of the queue waits on a cluster (see jobs.reorder):
-        # hold that invariant across a restart too.
-        self.db.execute(
-            "UPDATE jobs SET next_attempt_at = NULL WHERE state = ? AND id "
-            "NOT IN (SELECT id FROM jobs WHERE state = ? "
-            "        ORDER BY priority DESC, id ASC LIMIT 1)",
-            (jobs.WAITING, jobs.WAITING))
 
     def _restore_cooldowns(self):
-        """Rebuild the cluster cooldowns from the jobs a previous process
+        """Rebuild the cluster cooldowns from the queues a previous process
         left waiting, so a restart does not re-probe a cluster that has just
         failed to come up."""
         for row in self.db.query(
-                "SELECT j.spec_json, p.name AS project, "
-                "CAST((julianday(j.next_attempt_at) - julianday('now')) * 86400 "
-                "AS INTEGER) AS left_s FROM jobs j "
-                "JOIN projects p ON p.id = j.project_id "
-                "WHERE j.state = ? AND j.next_attempt_at IS NOT NULL",
-                (jobs.WAITING,)):
-            cluster = (json.loads(row["spec_json"]) or {}).get("cluster")
+                "SELECT q.key, CAST((julianday(q.next_attempt_at) "
+                "- julianday('now')) * 86400 AS INTEGER) AS left_s "
+                "FROM queues q WHERE q.next_attempt_at IS NOT NULL"):
             left = int(row["left_s"] or 0)
-            if not cluster or left <= 0:
+            if left <= 0:
                 continue
-            key = f"{row['project']}/{cluster}"
-            self._cluster_cooldown[key] = max(
-                self._cluster_cooldown.get(key, 0), time.monotonic() + left)
+            # A queue key is the cluster it serializes on, when it has one.
+            self._cluster_cooldown[row["key"]] = max(
+                self._cluster_cooldown.get(row["key"], 0),
+                time.monotonic() + left)
 
     def wake(self):
         self._wake.set()
@@ -94,16 +84,18 @@ class Scheduler:
     def _dispatch(self):
         if len(self._running_queues) >= self.config.max_concurrent_queues:
             return
+        # A queue waiting out a failed attempt holds every job in it: one runs
+        # at a time, so the delay is the queue's. Outlives a restart, unlike
+        # the in-memory cooldown that holds clusters sharing VMs.
+        waiting_queues = {k for k, due in jobs.queue_waits(self.db).items()
+                          if due > self._now()}
         for row in self.db.query(
             "SELECT j.id FROM jobs j WHERE j.state = ? "
-            # next_attempt_at: a failed run waiting out its delay, or a
-            # cluster that would not come up. Outlives a restart, unlike the
-            # in-memory cooldown that holds the rest of the queue.
-            "AND (j.next_attempt_at IS NULL "
-            "     OR j.next_attempt_at <= datetime('now')) "
             "ORDER BY j.priority DESC, j.id ASC", (jobs.WAITING,)
         ):
             job = jobs.get(self.db, row["id"])
+            if jobs.queue_key(job) in waiting_queues:
+                continue
             gate = self._after_gate(job)
             if gate == "wait":
                 continue
@@ -142,6 +134,9 @@ class Scheduler:
                 self._execute(job, key))
             if len(self._running_queues) >= self.config.max_concurrent_queues:
                 break
+
+    def _now(self) -> str:
+        return self.db.query_one("SELECT datetime('now') AS t")["t"]
 
     def _note(self, job, reason) -> None:
         """Record why a job is sitting in the queue, without touching its
@@ -267,7 +262,7 @@ class Scheduler:
                 self.hub.emit("cluster.cooldown", cluster=cluster_key,
                               job_id=job_id, delay_secs=delay)
                 # No attempt is spent: nothing ran.
-                jobs.wait_again(self.db, self.hub, job_id, delay, error)
+                jobs.wait_again(self.db, self.hub, job_id, key, delay, error)
                 return
             self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
                           action="leased", lease=lease_id)
@@ -276,6 +271,7 @@ class Scheduler:
                 self.clusters.release(cluster_key, lease_id)
                 return
 
+        jobs.clear_queue_wait(self.db, key)
         n = jobs.start_attempt(self.db, self.hub, job_id)
         jobs.set_state(self.db, self.hub, job_id, jobs.RUNNING)
         extender = None
@@ -364,7 +360,8 @@ class Scheduler:
             return
         delay = int(job["spec"].get("retry_delay_secs",
                                     jobs.DEFAULT_RETRY_DELAY_SECS))
-        jobs.wait_again(self.db, self.hub, job_id, delay, error)
+        jobs.wait_again(self.db, self.hub, job_id, jobs.queue_key(job),
+                        delay, error)
         self.hub.emit("job.retry_scheduled", job_id=job_id, delay_secs=delay,
                       attempts_left=job["max_attempts"] - job["attempts"])
 
@@ -417,8 +414,7 @@ class Scheduler:
             raise KeyError(job_id)
         if job["state"] != jobs.WAITING:
             raise ValueError(f"job {job_id} is {job['state']}, not waiting")
-        self.db.execute("UPDATE jobs SET next_attempt_at = NULL WHERE id = ?",
-                        (job_id,))
+        jobs.clear_queue_wait(self.db, jobs.queue_key(job))
         dropped = []
         cluster = job["spec"].get("cluster")
         if cluster:
