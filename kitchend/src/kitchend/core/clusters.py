@@ -83,6 +83,9 @@ class ManagedCluster:
     session_id: int | None = None
     last_status: dict | None = None     # None until the first gcloud poll
     last_rearm: float = 0.0
+    # What would not start last time. The next bring-up asks for these
+    # first; a successful start clears them.
+    short_vms: list[str] = field(default_factory=list)
     create_task: asyncio.Task | None = None
     create_log: list = field(default_factory=list)   # captured output lines
     create_rc: int | None = None                     # last run's exit code
@@ -94,25 +97,33 @@ class ManagedCluster:
     hold_for: int | None = None  # the job the hand-off is for
 
 
-def _zone_probe(remote, vms) -> list:
-    """One VM per zone the cluster spans, in a stable order.
+def _probe_set(remote, vms, short=()) -> list:
+    """What to ask for before starting the fleet.
 
-    Empty when the remote has no notion of zones (docker, local), which
-    turns the probe off for those.
+    Two rules, in order. The VMs that would not start last time come first —
+    whatever was short is the most likely thing to still be short. Then one
+    VM per zone those do not already cover, because a stockout is a
+    zone-level fact and a different zone may have gone short since.
+
+    Empty when the remote has no notion of zones and nothing failed before
+    (docker, local), which turns the probe off for those.
     """
+    wanted = [v for v in vms if v in set(short)]
     zones_of = getattr(remote, "zones_of", None)
     if zones_of is None:
-        return []
+        return wanted
     try:
         zones = zones_of(vms)
     except Exception:
-        return []
-    first = {}
+        return wanted
+    probe = list(wanted)
+    covered = {zones.get(v) for v in probe}
     for vm in vms:
         zone = zones.get(vm)
-        if zone and zone not in first:
-            first[zone] = vm
-    return sorted(first.values())
+        if zone and zone not in covered:
+            covered.add(zone)
+            probe.append(vm)
+    return probe
 
 
 class ClusterManager:
@@ -279,21 +290,22 @@ class ClusterManager:
         # addressing, or never needed them). A cluster that cannot fully
         # start cannot run its job; stop_on_partial stops the started subset
         # rather than holding it at cost.
-        # A stockout is a zone-level fact, so ask each zone the cluster spans
-        # for one VM before paying to start the fleet: a zone that cannot
-        # supply one will not supply seventeen, and the answer costs a
-        # handful of VM-minutes instead of a hundred.
-        probe = _zone_probe(mc.remote, vms) if fresh else []
+        # Ask before paying: the VMs that failed last time, plus one per
+        # zone, cost a handful of VM-minutes where starting the fleet to
+        # rediscover a stockout costs hundreds.
+        probe = _probe_set(mc.remote, vms, mc.short_vms) if fresh else []
         try:
             if 1 < len(probe) < len(vms):
-                self.hub.emit("cluster.zone_probe", cluster_id=mc.db_id,
-                              cluster=mc.key, vms=probe)
+                self.hub.emit("cluster.probe", cluster_id=mc.db_id,
+                              cluster=mc.key, vms=probe,
+                              short_last_time=list(mc.short_vms))
                 await asyncio.to_thread(start_vms, mc.remote, probe,
                                         drain_first=False, stop_on_partial=True)
             started = await asyncio.to_thread(start_vms, mc.remote, vms,
                                               drain_first=fresh,
                                               stop_on_partial=True)
         except Exception as e:
+            mc.short_vms = list(getattr(e, "failed_vms", None) or mc.short_vms)
             self.hub.emit("cluster.error", cluster_id=mc.db_id,
                           cluster=mc.key, error=repr(e))
             lease.release()
@@ -306,6 +318,7 @@ class ClusterManager:
             raise RuntimeError(
                 f"cluster {key} failed to start (the VMs that did come "
                 f"up were stopped again): {e}") from e
+        mc.short_vms = []
         if fresh:
             mc.keepalive = KeepAlive(mc.remote, vms, state=mc.state,
                                      stop_on_exit=False)

@@ -343,10 +343,14 @@ class GCloudRemote(Remote):
                     print(f"[{vm}] {e}")
                     failures.append((vm, e))
         if failures:
-            raise RuntimeError(
+            err = RuntimeError(
                 f"vm_start failed for {len(failures)}/{len(vm_names)} VM(s): "
                 + ", ".join(vm for vm, _ in failures)
             )
+            # Named, not just described: the caller's retry policy asks for
+            # these before starting anything else.
+            err.failed_vms = [vm for vm, _ in failures]
+            raise err
 
     def vm_status(self, vm_names):
         """Return {vm_name: status} for each VM (e.g. 'RUNNING', 'TERMINATED')."""

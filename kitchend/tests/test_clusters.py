@@ -427,10 +427,10 @@ def test_spend_separates_probes_from_runs(env):
     assert out["by_cluster"]["stub/c"]["vm_minutes"] == 348.0
 
 
-def test_zone_probe_asks_one_vm_per_zone():
+def test_probe_asks_one_vm_per_zone():
     """A cold start asks each zone the cluster spans for a single VM first,
     so a stockout costs a handful of VM-minutes, not the whole fleet."""
-    from kitchend.core.clusters import _zone_probe
+    from kitchend.core.clusters import _probe_set
 
     class Remote:
         def zones_of(self, vms):
@@ -438,9 +438,29 @@ def test_zone_probe_asks_one_vm_per_zone():
             return {v: f"z{i % 3}" for i, v in enumerate(vms)}
 
     vms = [f"vm{i}" for i in range(6)]
-    assert _zone_probe(Remote(), vms) == ["vm0", "vm1", "vm2"]
+    assert _probe_set(Remote(), vms) == ["vm0", "vm1", "vm2"]
 
     class NoZones:      # docker/local remotes have no zones: no probe
         pass
 
-    assert _zone_probe(NoZones(), vms) == []
+    assert _probe_set(NoZones(), vms) == []
+
+
+def test_probe_asks_for_what_failed_last_time_first():
+    """Whatever was short is the likeliest thing to still be short, so it
+    leads the probe — and the zone sweep still covers the rest, in case a
+    different zone went short meanwhile."""
+    from kitchend.core.clusters import _probe_set
+
+    class Remote:
+        def zones_of(self, vms):
+            return {v: f"z{i % 3}" for i, v in enumerate(vms)}
+
+    vms = [f"vm{i}" for i in range(6)]
+    probe = _probe_set(Remote(), vms, short=["vm4"])
+    assert probe[0] == "vm4"                     # asked for first
+    assert set(probe) == {"vm4", "vm0", "vm2"}   # z1 already covered by vm4
+    # A remote with no zones still honours the failed-first half.
+    class NoZones:
+        pass
+    assert _probe_set(NoZones(), vms, short=["vm4"]) == ["vm4"]
