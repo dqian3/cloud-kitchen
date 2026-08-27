@@ -97,33 +97,15 @@ class ManagedCluster:
     hold_for: int | None = None  # the job the hand-off is for
 
 
-def _probe_set(remote, vms, short=()) -> list:
-    """What to ask for before starting the fleet.
-
-    Two rules, in order. The VMs that would not start last time come first —
-    whatever was short is the most likely thing to still be short. Then one
-    VM per zone those do not already cover, because a stockout is a
-    zone-level fact and a different zone may have gone short since.
-
-    Empty when the remote has no notion of zones and nothing failed before
-    (docker, local), which turns the probe off for those.
+def _probe_set(vms, short=()) -> list:
+    """The VMs to ask for before starting the fleet: the ones that would not
+    start last time. Whatever was short is the likeliest thing to still be
+    short, and asking costs a couple of VM-minutes where starting everything
+    to rediscover it costs hundreds. Empty on a first bring-up, which starts
+    the fleet outright.
     """
-    wanted = [v for v in vms if v in set(short)]
-    zones_of = getattr(remote, "zones_of", None)
-    if zones_of is None:
-        return wanted
-    try:
-        zones = zones_of(vms)
-    except Exception:
-        return wanted
-    probe = list(wanted)
-    covered = {zones.get(v) for v in probe}
-    for vm in vms:
-        zone = zones.get(vm)
-        if zone and zone not in covered:
-            covered.add(zone)
-            probe.append(vm)
-    return probe
+    short = set(short)
+    return [v for v in vms if v in short]
 
 
 class ClusterManager:
@@ -290,12 +272,12 @@ class ClusterManager:
         # addressing, or never needed them). A cluster that cannot fully
         # start cannot run its job; stop_on_partial stops the started subset
         # rather than holding it at cost.
-        # Ask before paying: the VMs that failed last time, plus one per
-        # zone, cost a handful of VM-minutes where starting the fleet to
-        # rediscover a stockout costs hundreds.
-        probe = _probe_set(mc.remote, vms, mc.short_vms) if fresh else []
+        # Ask before paying: the VMs that failed last time cost a couple of
+        # VM-minutes to retry, where starting the fleet to rediscover the
+        # same shortage costs hundreds.
+        probe = _probe_set(vms, mc.short_vms) if fresh else []
         try:
-            if 1 < len(probe) < len(vms):
+            if probe and len(probe) < len(vms):
                 self.hub.emit("cluster.probe", cluster_id=mc.db_id,
                               cluster=mc.key, vms=probe,
                               short_last_time=list(mc.short_vms))

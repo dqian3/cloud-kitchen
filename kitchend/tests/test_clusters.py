@@ -393,6 +393,20 @@ def test_subset_lease_starts_only_its_hosts_and_a_wider_one_adds_the_rest(manage
     asyncio.run(main())
 
 
+def test_probe_asks_for_what_failed_last_time():
+    """A cold start after a failure asks for the VMs that would not start,
+    and only starts the fleet once they answer. A first bring-up, with
+    nothing to go on, starts outright."""
+    from kitchend.core.clusters import _probe_set
+
+    vms = [f"vm{i}" for i in range(6)]
+    assert _probe_set(vms) == []                       # nothing failed yet
+    assert _probe_set(vms, short=["vm4", "vm1"]) == ["vm1", "vm4"]
+    # Only VMs this lease actually wants: a subset lease does not drag in
+    # the rest of the fleet just because they were short.
+    assert _probe_set(["vm0", "vm1"], short=["vm4", "vm1"]) == ["vm1"]
+
+
 def test_spend_separates_probes_from_runs(env):
     """A bring-up that never reached `running` cost money and produced
     nothing: the report has to say so separately."""
@@ -427,40 +441,3 @@ def test_spend_separates_probes_from_runs(env):
     assert out["by_cluster"]["stub/c"]["vm_minutes"] == 348.0
 
 
-def test_probe_asks_one_vm_per_zone():
-    """A cold start asks each zone the cluster spans for a single VM first,
-    so a stockout costs a handful of VM-minutes, not the whole fleet."""
-    from kitchend.core.clusters import _probe_set
-
-    class Remote:
-        def zones_of(self, vms):
-            # Six VMs round-robin over three zones, as create_cluster assigns.
-            return {v: f"z{i % 3}" for i, v in enumerate(vms)}
-
-    vms = [f"vm{i}" for i in range(6)]
-    assert _probe_set(Remote(), vms) == ["vm0", "vm1", "vm2"]
-
-    class NoZones:      # docker/local remotes have no zones: no probe
-        pass
-
-    assert _probe_set(NoZones(), vms) == []
-
-
-def test_probe_asks_for_what_failed_last_time_first():
-    """Whatever was short is the likeliest thing to still be short, so it
-    leads the probe — and the zone sweep still covers the rest, in case a
-    different zone went short meanwhile."""
-    from kitchend.core.clusters import _probe_set
-
-    class Remote:
-        def zones_of(self, vms):
-            return {v: f"z{i % 3}" for i, v in enumerate(vms)}
-
-    vms = [f"vm{i}" for i in range(6)]
-    probe = _probe_set(Remote(), vms, short=["vm4"])
-    assert probe[0] == "vm4"                     # asked for first
-    assert set(probe) == {"vm4", "vm0", "vm2"}   # z1 already covered by vm4
-    # A remote with no zones still honours the failed-first half.
-    class NoZones:
-        pass
-    assert _probe_set(NoZones(), vms, short=["vm4"]) == ["vm4"]

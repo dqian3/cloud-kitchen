@@ -111,12 +111,6 @@ class GCloudRemote(Remote):
             if len(parts) == 2:
                 self._zone_cache[parts[0]] = parts[1]
 
-    def zones_of(self, vm_names):
-        """{vm_name: zone} for these VMs, discovering unknown ones in one call."""
-        vm_names = list(vm_names)
-        self._discover_all(vm_names)
-        return {v: self._zone_cache.get(v) for v in vm_names}
-
     def get_instance_ids(self, vm_names):
         """{vm_name: GCE instance id}. Empty entries for VMs that don't exist.
 
