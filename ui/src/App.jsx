@@ -601,6 +601,9 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
           {job.attempts > 1 && !done &&
             <span className="muted" title="driver invocations so far">
               {' '}attempt {job.attempts}/{job.max_attempts}</span>}
+          {job.bringing_up &&
+            <span className="muted" title="the daemon is starting or creating its VMs">
+              {' '}bringing up {job.bringing_up.split('/').pop()}…</span>}
           {retryIn != null &&
             <span className="muted" title={job.last_error || 'waiting'}>
               {' '}retrying in {retryIn}s</span>}

@@ -88,6 +88,9 @@ class ManagedCluster:
     short_vms: list[str] = field(default_factory=list)
     create_task: asyncio.Task | None = None
     create_log: list = field(default_factory=list)   # captured output lines
+    # Creation run from inside a bring-up has no create_task to watch, but
+    # its output is worth the same as a manual create's.
+    creating_for_lease: bool = False
     create_rc: int | None = None                     # last run's exit code
     create_attempt: int = 0
     create_max_attempts: int = 0
@@ -440,7 +443,14 @@ class ClusterManager:
         missing = [v for v in vms if statuses.get(v, "NOT_FOUND") == "NOT_FOUND"]
         if not missing:
             return []
-        await self._run_create_once(mc)
+        mc.create_log = []
+        mc.creating_for_lease = True
+        self.hub.emit("cluster.creating", cluster_id=mc.db_id, cluster=mc.key,
+                      vms=missing, reason="missing for a lease")
+        try:
+            await self._run_create_once(mc)
+        finally:
+            mc.creating_for_lease = False
         after = await asyncio.to_thread(mc.remote.vm_status, vms)
         made = [v for v in missing if after.get(v, "NOT_FOUND") != "NOT_FOUND"]
         if len(made) < len(missing):
@@ -597,7 +607,9 @@ class ClusterManager:
                 burn = mc.hourly_usd * len(held)
             elif mc.hourly_usd is not None and running:
                 burn = mc.hourly_usd * running
-            creating = mc.create_task is not None and not mc.create_task.done()
+            creating = (mc.creating_for_lease
+                        or (mc.create_task is not None
+                            and not mc.create_task.done()))
             try:
                 est_hourly = self.estimate_hourly(mc.key)
             except Exception:

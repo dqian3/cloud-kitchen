@@ -116,6 +116,15 @@ class Scheduler:
             if len(self._running_queues) >= self.config.max_concurrent_queues:
                 break
 
+    def bringing_up(self, job_id):
+        """The cluster this job is waiting on the daemon to bring up, if it
+        is the one doing so. A bring-up is the cluster's business, not a job
+        state, but the queue should still say what it is waiting for."""
+        for key, held in self._cluster_jobs.items():
+            if held == job_id:
+                return key
+        return None
+
     def wait_seconds(self, job_id):
         """Seconds until this job may try again, or None if it may now."""
         until = self._wait_until.get(job_id)

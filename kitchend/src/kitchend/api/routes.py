@@ -66,6 +66,7 @@ def list_jobs(request: Request, state: str | None = None, limit: int = 100):
     sched = request.app.state.scheduler
     for job in out:
         job["retry_in_s"] = sched.wait_seconds(job["id"])
+        job["bringing_up"] = sched.bringing_up(job["id"])
     return out
 
 
@@ -76,6 +77,7 @@ def get_job(job_id: int, request: Request):
         raise HTTPException(404, f"no job {job_id}")
     job["attempts_log"] = jobs.attempts(request.app.state.db, job_id)
     job["retry_in_s"] = request.app.state.scheduler.wait_seconds(job_id)
+    job["bringing_up"] = request.app.state.scheduler.bringing_up(job_id)
     return job
 
 
