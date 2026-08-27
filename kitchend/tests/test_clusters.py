@@ -482,3 +482,27 @@ def test_up_gives_up_when_a_vm_cannot_be_created(manager):
             await mgr.up("stub/main", ttl_minutes=60)
 
     asyncio.run(main())
+
+
+def test_failed_create_does_not_leak_the_lease(manager):
+    """A bring-up that cannot create its VMs must hand the lease back: one
+    leaked per retry left the cluster stuck in 'starting' forever."""
+    mgr, mc, db = manager
+    mc.create_cmd = ("true",)
+    mc.remote.vm_states = {"r0": "TERMINATED"}      # r1, c0 do not exist
+
+    async def creates_nothing(managed):
+        return
+
+    mgr._run_create_once = creates_nothing
+
+    async def main():
+        for _ in range(3):
+            with pytest.raises(RuntimeError, match="could not be created"):
+                await mgr.up("stub/main", ttl_minutes=60)
+        assert mc.state.live_leases() == []
+        assert mc.lease_handles == {}
+        row = db.query_one("SELECT state FROM clusters WHERE id = ?", (mc.db_id,))
+        assert row["state"] == "terminated"
+
+    asyncio.run(main())

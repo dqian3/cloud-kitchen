@@ -280,7 +280,13 @@ class ClusterManager:
         # A VM that does not exist yet cannot be started: create the missing
         # ones first, so a lease is one operation — have this cluster up —
         # rather than the caller knowing whether it was ever provisioned.
-        missing = await self._create_missing(mc, vms)
+        try:
+            missing = await self._create_missing(mc, vms)
+        except Exception:
+            # The lease is already held at this point: give it back, or every
+            # retry leaks one and the cluster never leaves 'starting'.
+            self._release_failed_lease(mc, lease, fresh)
+            raise
         if missing:
             self.hub.emit("cluster.created_missing", cluster_id=mc.db_id,
                           cluster=mc.key, vms=missing)
@@ -303,13 +309,7 @@ class ClusterManager:
             mc.short_vms = list(getattr(e, "failed_vms", None) or mc.short_vms)
             self.hub.emit("cluster.error", cluster_id=mc.db_id,
                           cluster=mc.key, error=repr(e))
-            lease.release()
-            mc.lease_handles.pop(lease.info.id, None)
-            self.db.execute(
-                "UPDATE cluster_leases SET released_at = datetime('now') "
-                "WHERE holder_id = ?", (lease.info.id,))
-            if fresh:
-                self._set_db_state(mc, "terminated")
+            self._release_failed_lease(mc, lease, fresh)
             raise RuntimeError(
                 f"cluster {key} failed to start (the VMs that did come "
                 f"up were stopped again): {e}") from e
@@ -429,6 +429,16 @@ class ClusterManager:
         self.hub.emit("cluster.create.canceled", cluster_id=mc.db_id,
                       cluster=mc.key, attempt=mc.create_attempt,
                       missing=len(mc.create_missing))
+
+    def _release_failed_lease(self, mc: ManagedCluster, lease, fresh):
+        """Hand back a lease whose bring-up did not get off the ground."""
+        lease.release()
+        mc.lease_handles.pop(lease.info.id, None)
+        self.db.execute(
+            "UPDATE cluster_leases SET released_at = datetime('now') "
+            "WHERE holder_id = ?", (lease.info.id,))
+        if fresh:
+            self._set_db_state(mc, "terminated")
 
     async def _create_missing(self, mc: ManagedCluster, vms) -> list:
         """Create any of `vms` that do not exist, and return their names.
