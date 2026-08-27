@@ -733,6 +733,12 @@ function RunEntry({ entry, display, onChanged }) {
         <td>
           {run
             ? <>{run.n_points ?? 0} pts
+                {detail?.mixed_build &&
+                  <span className="chip chip-orange" title={
+                    (detail.builds || []).map(b =>
+                      `${b.started_at} ${String(b.git_commit).slice(0, 8)}`
+                      + (b.git_dirty ? ' (dirty)' : '')).join('\n')
+                  }> mixed build</span>}
                 {!run.dir_exists && <span className="muted" title="run directory deleted; metrics kept in the ledger"> · dir gone</span>}</>
             : <span className="muted" title="no ledger entry: the job produced no summaries">no results</span>}
           {!job && <span className="muted" title="indexed from disk; no daemon job record"> · no job record</span>}

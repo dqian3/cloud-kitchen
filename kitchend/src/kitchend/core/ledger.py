@@ -276,7 +276,36 @@ def get_run(db, run_id):
         "metrics": json.loads(r["metrics_json"]),
     } for r in db.query(
         "SELECT * FROM run_points WHERE run_id = ? ORDER BY id", (run_id,))]
+    run["builds"] = builds_of(run["run_dir"])
+    # More than one build behind one curve: resume keeps the points already
+    # on disk, so an attempt after a rebuild measures the rest with different
+    # binaries and says nothing about it.
+    run["mixed_build"] = len({b["git_commit"] for b in run["builds"]}) > 1
     return run
+
+
+def builds_of(run_dir) -> list:
+    """Every invocation that wrote into this run dir, with the build it ran.
+
+    Read from provenance.jsonl rather than stored: the ledger keeps the first
+    commit it saw, and a resumed run's later attempts are exactly what that
+    misses.
+    """
+    out = []
+    try:
+        lines = (Path(run_dir) / "provenance.jsonl").read_text().splitlines()
+    except OSError:
+        return out
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        out.append({"started_at": rec.get("started_at"),
+                    "git_commit": rec.get("git_commit"),
+                    "git_branch": rec.get("git_branch"),
+                    "git_dirty": bool(rec.get("git_dirty"))})
+    return out
 
 
 def _run_to_dict(row):

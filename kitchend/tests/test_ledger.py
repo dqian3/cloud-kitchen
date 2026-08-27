@@ -186,3 +186,29 @@ def test_deletable_dir_only_inside_runs_roots(tmp_path):
     f = repo / "data" / "runs" / "f.txt"; f.write_text("x")
     assert ledger.deletable_dir(cfg, str(f)) is None
     assert ledger.deletable_dir(cfg, "") is None
+
+
+def test_run_detail_names_every_build_behind_it(env, tmp_path):
+    """A run resumed after a rebuild carries points from two binaries; the
+    ledger stores only the first commit, so the detail view reads them all
+    back from provenance and says the run is mixed."""
+    config, db, hub, scheduler_or_runner, scheduler = env
+    out_root = tmp_path / "rd"
+    project_id, job_id = _job(db, config, out_root)
+    ledger.apply_events(db, project_id, job_id, str(out_root), [
+        _ev("point.finished", experiment="exp", dims={}, rate=1000, trial=0,
+            rel_dir="rate_1000/trial_0", status="ok",
+            metrics={"throughput_msgs_per_sec": 900}),
+    ])
+    sweep_dir = out_root / "exp"
+    sweep_dir.mkdir(parents=True, exist_ok=True)
+    (sweep_dir / "provenance.jsonl").write_text(
+        '{"started_at": "2026-01-01T00:00:00", "git_commit": "aaa", '
+        '"git_branch": "main", "git_dirty": false}\n'
+        '{"started_at": "2026-01-01T06:00:00", "git_commit": "bbb", '
+        '"git_branch": "main", "git_dirty": true}\n')
+
+    run = ledger.get_run(db, ledger.list_runs(db)[0]["id"])
+    assert [b["git_commit"] for b in run["builds"]] == ["aaa", "bbb"]
+    assert run["builds"][1]["git_dirty"] is True
+    assert run["mixed_build"] is True
