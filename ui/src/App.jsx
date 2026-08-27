@@ -558,7 +558,7 @@ function ProgressPanel({ p }) {
   )
 }
 
-function JobRow({ job, onChanged, reorder, onMove, inherits }) {
+function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
   const { notify, askText } = useUI()
   const [open, setOpen] = useState(false)
   const [log, setLog] = useState('')
@@ -585,7 +585,9 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
   // Waiting with a next attempt due: its last try failed, or its cluster
   // would not come up. The delay can lapse while the cluster is still held
   // down — by its own cooldown, or one on a cluster sharing its VMs.
-  const dueAt = waiting && job.next_attempt_at
+  // The wait is the queue's: showing it on every job in the queue reads as
+  // two dozen jobs each retrying, when one of them is.
+  const dueAt = waiting && queueHead && job.next_attempt_at
   const dueNow = dueAt &&
     Date.parse(job.next_attempt_at.replace(' ', 'T') + 'Z') <= Date.now()
   const label = done ? job.outcome : job.state
@@ -1199,9 +1201,19 @@ function JobTable({ jobs, onChanged, empty, reorder, onMove }) {
         <th>state</th><th>created</th><th></th>
       </tr></thead>
       <tbody>
-        {jobs.map(j => <JobRow key={j.id} job={j} onChanged={onChanged}
-                               reorder={reorder} onMove={onMove}
-                               inherits={inherits.has(j.id)} />)}
+        {(() => {
+          // First waiting job of each queue: the one the queue's wait is about.
+          const heads = new Set()
+          const seen = new Set()
+          for (const j of jobs) {
+            const q = j.queue || j.project
+            if (j.state === 'waiting' && !seen.has(q)) { seen.add(q); heads.add(j.id) }
+          }
+          return jobs.map(j => <JobRow key={j.id} job={j} onChanged={onChanged}
+                                      reorder={reorder} onMove={onMove}
+                                      queueHead={heads.has(j.id)}
+                                      inherits={inherits.has(j.id)} />)
+        })()}
       </tbody>
     </table>
   )

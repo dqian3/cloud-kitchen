@@ -541,8 +541,16 @@ class ClusterManager:
             self._set_db_state(mc, "terminated")
         return statuses
 
+    TRANSITIONAL_VM_STATES = ("STOPPING", "STAGING", "PROVISIONING", "SUSPENDING")
+
     def poll_interval(self, mc: ManagedCluster) -> float:
         if mc.create_task is not None and not mc.create_task.done():
+            return self.POLL_TRANSITIONAL_S
+        # What the VMs are doing outranks what the row says: a cluster marked
+        # terminated whose VMs are still STOPPING is mid-transition, and
+        # polling it every ten minutes leaves the UI showing VMs long gone.
+        if any(st in self.TRANSITIONAL_VM_STATES
+               for st in (mc.last_status or {}).values()):
             return self.POLL_TRANSITIONAL_S
         row = self.db.query_one("SELECT state FROM clusters WHERE id = ?",
                                 (mc.db_id,))
