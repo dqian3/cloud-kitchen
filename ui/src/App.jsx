@@ -558,6 +558,22 @@ function ProgressPanel({ p }) {
   )
 }
 
+// The daemon reports the retry wait as a snapshot taken when the job list was
+// fetched. Polling is far slower than a second, so the number has to be run
+// down locally or it looks stuck; each fetch resyncs it.
+function useCountdown(seconds) {
+  const [left, setLeft] = useState(seconds)
+  useEffect(() => {
+    if (seconds == null) { setLeft(null); return }
+    const deadline = Date.now() + seconds * 1000
+    setLeft(seconds)
+    const t = setInterval(
+      () => setLeft(Math.max(0, Math.round((deadline - Date.now()) / 1000))), 1000)
+    return () => clearInterval(t)
+  }, [seconds])
+  return left
+}
+
 function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
   const { notify, askText } = useUI()
   const [open, setOpen] = useState(false)
@@ -584,7 +600,8 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
   const done = job.state === 'done'
   // The wait belongs to the job that earned it and holds the queue behind
   // it, so it is shown once, on the head.
-  const retryIn = waiting && queueHead ? job.retry_in_s : null
+  const retryIn = useCountdown(
+    waiting && queueHead && job.retry_in_s != null ? job.retry_in_s : null)
   const label = done ? job.outcome : job.state
   const spec = job.spec
 
@@ -606,7 +623,7 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
                 {' '}bringing up {job.bringing_up.split('/').pop()}…</span>
             : retryIn != null &&
               <span className="muted" title={job.last_error || 'waiting'}>
-                {' '}retrying in {retryIn}s</span>}
+                {' '}{retryIn > 0 ? `retrying in ${retryIn}s` : 'retrying…'}</span>}
           {waiting && spec.after &&
             <span className="muted" title="waits for that job to finish with data">
               {' '}after #{spec.after}</span>}
