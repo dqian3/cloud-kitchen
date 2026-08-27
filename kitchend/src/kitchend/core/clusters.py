@@ -457,19 +457,51 @@ class ClusterManager:
         mc.creating_for_lease = True
         self.hub.emit("cluster.creating", cluster_id=mc.db_id, cluster=mc.key,
                       vms=missing, reason="missing for a lease")
+        # A created VM boots running. If the rest of the fleet cannot be
+        # created, this bring-up is over and none of them are wanted, so
+        # they are stopped here: the caller only hands back the lease, and
+        # a VM nothing is holding still bills.
         try:
-            await self._run_create_once(mc)
-        finally:
-            mc.creating_for_lease = False
-        after = await asyncio.to_thread(mc.remote.vm_status, vms)
-        made = [v for v in missing if after.get(v, "NOT_FOUND") != "NOT_FOUND"]
-        if len(made) < len(missing):
-            still = sorted(set(missing) - set(made))
-            raise RuntimeError(
-                f"cluster {mc.key} is missing {len(still)} VM(s) that could "
-                f"not be created: {', '.join(still[:6])}"
-                + (" …" if len(still) > 6 else ""))
+            try:
+                await self._run_create_once(mc)
+            finally:
+                mc.creating_for_lease = False
+            after = await asyncio.to_thread(mc.remote.vm_status, vms)
+            made = [v for v in missing if after.get(v, "NOT_FOUND") != "NOT_FOUND"]
+            if len(made) < len(missing):
+                still = sorted(set(missing) - set(made))
+                raise RuntimeError(
+                    f"cluster {mc.key} is missing {len(still)} VM(s) that could "
+                    f"not be created: {', '.join(still[:6])}"
+                    + (" …" if len(still) > 6 else ""))
+        except Exception:
+            await self._stop_created(mc, missing)
+            raise
         return made
+
+    async def _stop_created(self, mc: ManagedCluster, vms) -> None:
+        """Stop the VMs a failed bring-up created. Only ones it created: they
+        were absent when it started, so nothing else can be holding them.
+
+        Cleanup never replaces the bring-up's own error, so a failure here is
+        reported and swallowed; the dead-man switch remains the backstop.
+        """
+        if not vms:
+            return
+        try:
+            statuses = await asyncio.to_thread(mc.remote.vm_status, vms)
+            live = [v for v in vms if statuses.get(v, "NOT_FOUND")
+                    not in ("NOT_FOUND", "TERMINATED", "STOPPING")]
+            if not live:
+                return
+            self.hub.emit("cluster.stopping_created", cluster_id=mc.db_id,
+                          cluster=mc.key, vms=live,
+                          reason="bring-up failed; they were never leased")
+            await asyncio.to_thread(mc.remote.vm_stop, live)
+        except Exception as e:
+            self.hub.emit("cluster.error", cluster_id=mc.db_id, cluster=mc.key,
+                          error=f"could not stop VMs created for a failed "
+                                f"bring-up: {e!r}")
 
     async def _run_create_once(self, mc: ManagedCluster):
         try:

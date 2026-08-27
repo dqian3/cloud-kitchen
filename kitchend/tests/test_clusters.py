@@ -197,6 +197,32 @@ def test_failed_start_stops_partial_and_releases_lease(manager):
     asyncio.run(main())
 
 
+def test_failed_create_stops_the_vms_it_made(manager):
+    """A bring-up that creates part of the fleet and then cannot create the
+    rest must not leave the part it made running: nothing holds those VMs,
+    and they bill until the dead-man switch fires an hour later."""
+    mgr, mc, db = manager
+    mc.create_cmd = ("true",)
+
+    async def half_a_fleet(_mc):
+        mc.remote.vm_states["r0"] = "RUNNING"   # created VMs boot running
+        mc.remote.vm_states["r1"] = "RUNNING"
+        # c0 stays absent: the zone had nothing left.
+
+    mgr._run_create_once = half_a_fleet
+
+    async def main():
+        with pytest.raises(RuntimeError, match="could not be created"):
+            await mgr.up("stub/main", ttl_minutes=60)
+        assert mc.remote.vm_states["r0"] == "TERMINATED"
+        assert mc.remote.vm_states["r1"] == "TERMINATED"
+        assert mc.state.live_leases() == []
+        snap = [s for s in mgr.snapshot() if s["key"] == "stub/main"][0]
+        assert snap["state"] == "terminated"
+
+    asyncio.run(main())
+
+
 def test_poll_status_flags_unmanaged_vms(manager):
     mgr, mc, db = manager
     mc.remote.vm_states = {"r0": "RUNNING", "r1": "RUNNING", "c0": "TERMINATED"}
