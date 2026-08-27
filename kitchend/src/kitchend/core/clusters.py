@@ -133,11 +133,13 @@ class ClusterManager:
 
     def _build_registry(self):
         for p in self.config.projects:
-            settings = RemoteSettings(
-                gcp_project=p.gcp_project,
-                tunnel_through_iap=p.tunnel_through_iap,
-            )
             for c in p.clusters:
+                # A cluster may live in its own GCP project: a fleet rebuilt
+                # elsewhere moves without dragging its siblings along.
+                settings = RemoteSettings(
+                    gcp_project=c.gcp_project or p.gcp_project,
+                    tunnel_through_iap=p.tunnel_through_iap,
+                )
                 key = f"{p.name}/{c.name}"
                 config_path = p.repo_path / c.config
                 row = self.db.query_one(

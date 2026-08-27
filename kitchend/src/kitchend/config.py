@@ -14,7 +14,7 @@ Example:
     output_dir_flag = "--output-dir"
     resume_flag = "--resume"
     name_flag = "--name"                 # what the driver calls the run
-    gcp_project = "nyu-rdg-fy26-as11800-2203"
+    gcp_project = "nyu-rdg-fy26-as11800-2203"   # per-cluster override below
     tunnel_through_iap = true
     publish_root = "data/figures"        # served read-only at /pub/aspen-bft/
 
@@ -47,6 +47,11 @@ class ClusterConfig:
     # tested setup script. Unset = the daemon can only start/stop existing
     # VMs for this cluster.
     create_cmd: tuple[str, ...] = ()
+    # GCP project this cluster's VMs live in, when it is not the project's
+    # own. A fleet can be rebuilt in a different GCP project (a zone with no
+    # capacity is a property of the project's region, and creation there can
+    # place VMs where starting them cannot) without moving the rest.
+    gcp_project: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,7 @@ def load_config(path: Path | None = None) -> Config:
                     config=c["config"],
                     hourly_usd=c.get("hourly_usd"),
                     create_cmd=tuple(c.get("create_cmd", ())),
+                    gcp_project=c.get("gcp_project"),
                 )
                 for c in p.get("clusters", [])
             ),
