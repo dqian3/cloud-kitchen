@@ -403,6 +403,35 @@ class Scheduler:
         await self.runner.cancel(job_id)
         return jobs.CANCELED
 
+    def retry_now(self, job_id) -> dict:
+        """Try a waiting job again immediately.
+
+        Clears the job's own delay and any cluster cooldown that would hold
+        it back — including one set on a cluster sharing its VMs, since that
+        is what the wait is made of. Asking explicitly is a statement that
+        the condition behind the wait has changed (capacity returned, a fleet
+        was rebuilt), which the daemon cannot know on its own.
+        """
+        job = jobs.get(self.db, job_id)
+        if job is None:
+            raise KeyError(job_id)
+        if job["state"] != jobs.WAITING:
+            raise ValueError(f"job {job_id} is {job['state']}, not waiting")
+        self.db.execute("UPDATE jobs SET next_attempt_at = NULL WHERE id = ?",
+                        (job_id,))
+        dropped = []
+        cluster = job["spec"].get("cluster")
+        if cluster:
+            key = f"{job['project']}/{cluster}"
+            overlaps = getattr(self.clusters, "overlaps", None)
+            for held in list(self._cluster_cooldown):
+                if held == key or (overlaps and overlaps(key, held)):
+                    del self._cluster_cooldown[held]
+                    dropped.append(held)
+        self.hub.emit("job.retry_now", job_id=job_id, cooldowns_cleared=dropped)
+        self.wake()
+        return {"id": job_id, "cooldowns_cleared": dropped}
+
     def resubmit(self, job_id, resume=True) -> int:
         job = jobs.get(self.db, job_id)
         if job is None:

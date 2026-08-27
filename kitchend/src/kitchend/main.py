@@ -11,6 +11,7 @@
     kitchend log JOB_ID [-n N]          tail a job's driver output
     kitchend cancel JOB_ID              cancel a waiting/running job
     kitchend resubmit JOB_ID            resubmit into the same run dir
+    kitchend retry JOB_ID               stop waiting, try it now
     kitchend clusters                   cluster states, VMs, burn
     kitchend spend [--days N]           what the clusters cost: probes vs runs
 """
@@ -182,6 +183,13 @@ def cmd_cancel(config, args):
     print(f"#{args.job_id} canceled")
 
 
+def cmd_retry(config, args):
+    out = _api(config, f"/api/jobs/{args.job_id}/retry", body={})
+    cleared = out.get("cooldowns_cleared") or []
+    print(f"#{args.job_id} due now"
+          + (f"; cooldown cleared on {', '.join(cleared)}" if cleared else ""))
+
+
 def cmd_resubmit(config, args):
     out = _api(config, f"/api/jobs/{args.job_id}/resubmit",
                body={"resume": not args.fresh})
@@ -284,6 +292,10 @@ def main(argv=None):
     p = sub.add_parser("cancel", help="cancel a queued/running job")
     p.add_argument("job_id", type=int)
 
+    p = sub.add_parser("retry", help="try a waiting job now: drop its delay "
+                       "and any cluster cooldown holding it")
+    p.add_argument("job_id", type=int)
+
     p = sub.add_parser("resubmit", help="resubmit a finished job")
     p.add_argument("job_id", type=int)
     p.add_argument("--fresh", action="store_true",
@@ -332,7 +344,8 @@ def main(argv=None):
     handler = {
         "catalog": cmd_catalog, "submit": cmd_submit, "jobs": cmd_jobs,
         "watch": cmd_watch, "log": cmd_log, "cancel": cmd_cancel,
-        "resubmit": cmd_resubmit, "clusters": cmd_clusters,
+        "resubmit": cmd_resubmit, "retry": cmd_retry,
+        "clusters": cmd_clusters,
         "spend": cmd_spend,
         "create": cmd_create, "purge": cmd_purge,
     }[args.cmd]

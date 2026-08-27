@@ -150,6 +150,18 @@ def delete_job(job_id: int, request: Request):
     return {"ok": True}
 
 
+@router.post("/jobs/{job_id}/retry")
+def retry_job(job_id: int, request: Request):
+    """Try a waiting job again now: drop its delay and any cluster cooldown
+    holding it. For when the reason it was waiting has gone away."""
+    try:
+        return request.app.state.scheduler.retry_now(job_id)
+    except KeyError:
+        raise HTTPException(404, f"no job {job_id}")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
 class Resubmit(BaseModel):
     resume: bool = True
 

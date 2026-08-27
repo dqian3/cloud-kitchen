@@ -626,6 +626,11 @@ function JobRow({ job, onChanged, reorder, onMove, inherits }) {
             <button className="link" title="run this next"
                     onClick={() => onMove(job.id, 'top')}>top</button>
           )}
+          {dueAt && !reorder && (
+            <button className="link"
+                    title="stop waiting: drop the delay and any cluster cooldown"
+                    onClick={() => act(() => api.retryNow(job.id))}>retry now</button>
+          )}
           {waiting && reorder && (
             <>
               <button className="link" onClick={() => onMove(job.id, 'up')}>▲</button>

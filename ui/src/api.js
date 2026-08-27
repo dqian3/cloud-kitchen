@@ -22,6 +22,7 @@ export const api = {
   purgeJobs: (project) => req('/api/jobs/purge', { method: 'POST', body: JSON.stringify({ project }) }),
   reorderJobs: (ids) => req('/api/jobs/reorder', { method: 'POST', body: JSON.stringify({ ids }) }),
   cancel: (id) => req(`/api/jobs/${id}/cancel`, { method: 'POST', body: '{}' }),
+  retryNow: (id) => req(`/api/jobs/${id}/retry`, { method: 'POST' }),
   resubmit: (id, resume = true) =>
     req(`/api/jobs/${id}/resubmit`, { method: 'POST', body: JSON.stringify({ resume }) }),
   sweeps: (project) => req(`/api/sweeps?project=${encodeURIComponent(project)}`),

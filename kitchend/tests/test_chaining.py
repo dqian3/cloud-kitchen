@@ -300,3 +300,33 @@ def test_lease_released_on_cancel(env):
         task.cancel()
 
     asyncio.run(main())
+
+
+def test_retry_now_drops_the_wait_and_the_cooldown(env):
+    """Asking explicitly says the reason for the wait has gone — a fleet
+    rebuilt, capacity returned — which the daemon cannot see for itself."""
+    config, db, hub, runner, scheduler = env
+    fake = FakeClusters(fail_up=True)
+    scheduler.clusters = fake
+
+    async def main():
+        j = _submit(db, hub, config, "exit 0", cluster="main",
+                    queue="stub/main", retry_delay_secs=3600)
+        await _run_until(scheduler, lambda: jobs.get(db, j)["next_attempt_at"])
+        assert scheduler._cooling("stub/main")
+
+        out = scheduler.retry_now(j)
+        assert jobs.get(db, j)["next_attempt_at"] is None
+        assert out["cooldowns_cleared"] == ["stub/main"]
+        assert not scheduler._cooling("stub/main")
+
+        # A job that is not waiting has nothing to retry.
+        jobs.finish(db, hub, j, jobs.OK)
+        try:
+            scheduler.retry_now(j)
+        except ValueError as e:
+            assert "not waiting" in str(e)
+        else:
+            raise AssertionError("retry_now on a done job should be refused")
+
+    asyncio.run(main())
