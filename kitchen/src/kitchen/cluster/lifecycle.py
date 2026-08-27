@@ -25,6 +25,14 @@ def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120):
     )
 
 
+def unarmed(results) -> list:
+    """The VMs whose dead-man command did not land, from an arm_shutdown
+    result. run_on_all reports a failure as the exception it caught, so a
+    caller that ignores the return value cannot tell armed from unarmed."""
+    return sorted(vm for vm, out in (results or {}).items()
+                  if isinstance(out, Exception))
+
+
 def wait_drained(remote, vms, timeout_s=600, poll_s=10):
     """Block until no VM is mid-shutdown (STOPPING/SUSPENDING).
 

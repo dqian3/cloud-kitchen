@@ -15,6 +15,7 @@ from .lifecycle import (
     arm_shutdown_cmd,
     start_vms,
     stop_vms,
+    unarmed,
     wait_drained,
 )
 from .state import ClusterState, Lease, LeaseInfo
@@ -22,6 +23,7 @@ from .state import ClusterState, Lease, LeaseInfo
 __all__ = [
     "parse_chronyc_offset", "sync_clocks",
     "KeepAlive", "AlreadyRunning",
-    "arm_shutdown", "arm_shutdown_cmd", "start_vms", "stop_vms", "wait_drained",
+    "arm_shutdown", "arm_shutdown_cmd", "start_vms", "stop_vms", "unarmed",
+    "wait_drained",
     "ClusterState", "Lease", "LeaseInfo",
 ]

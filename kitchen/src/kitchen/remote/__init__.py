@@ -45,6 +45,14 @@ def load_remote(config, settings: RemoteSettings | None = None):
         # a different account, e.g. one whose VMs do have public addresses --
         # but it does not have to, and checked-in configs deliberately do not.
         project = _cfg_get(config, "project") or settings.gcp_project
+        if not project:
+            # Never fall through to gcloud's ambient project: the VMs named in
+            # this config exist in one project, and picking up whatever the
+            # CLI happens to be pointed at finds either nothing or, worse,
+            # someone else's fleet with the same names.
+            raise ValueError(
+                "no GCP project for this cluster: set `project:` in the "
+                "cluster config, or KITCHEN_GCP_PROJECT in the environment")
         iap = _cfg_get(config, "tunnel_through_iap")
         if iap is None:
             iap = settings.tunnel_through_iap

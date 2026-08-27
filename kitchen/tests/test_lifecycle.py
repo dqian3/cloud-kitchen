@@ -105,3 +105,9 @@ def test_partial_start_arms_deadman_by_default():
     # armed on the started subset so it self-stops.
     assert r.vm_states["a"] == "RUNNING"
     assert len(r.ssh_calls(r"shutdown -h \+60")) == 1
+
+
+def test_unarmed_names_only_the_failures():
+    assert lifecycle.unarmed({"a": "", "b": RuntimeError("ssh failed")}) == ["b"]
+    assert lifecycle.unarmed({"a": ""}) == []
+    assert lifecycle.unarmed(None) == []
