@@ -274,6 +274,14 @@ class ClusterManager:
         # addressing, or never needed them). A cluster that cannot fully
         # start cannot run its job; stop_on_partial stops the started subset
         # rather than holding it at cost.
+        # A VM that does not exist yet cannot be started: create the missing
+        # ones first, so a lease is one operation — have this cluster up —
+        # rather than the caller knowing whether it was ever provisioned.
+        missing = await self._create_missing(mc, vms)
+        if missing:
+            self.hub.emit("cluster.created_missing", cluster_id=mc.db_id,
+                          cluster=mc.key, vms=missing)
+
         # Ask before paying: the VMs that failed last time cost a couple of
         # VM-minutes to retry, where starting the fleet to rediscover the
         # same shortage costs hundreds.
@@ -418,6 +426,30 @@ class ClusterManager:
         self.hub.emit("cluster.create.canceled", cluster_id=mc.db_id,
                       cluster=mc.key, attempt=mc.create_attempt,
                       missing=len(mc.create_missing))
+
+    async def _create_missing(self, mc: ManagedCluster, vms) -> list:
+        """Create any of `vms` that do not exist, and return their names.
+
+        The provisioning script skips VMs that are already there, so this is
+        the same command a manual create runs; it just fires only when
+        something is actually absent.
+        """
+        if not mc.create_cmd:
+            return []
+        statuses = await asyncio.to_thread(mc.remote.vm_status, vms)
+        missing = [v for v in vms if statuses.get(v, "NOT_FOUND") == "NOT_FOUND"]
+        if not missing:
+            return []
+        await self._run_create_once(mc)
+        after = await asyncio.to_thread(mc.remote.vm_status, vms)
+        made = [v for v in missing if after.get(v, "NOT_FOUND") != "NOT_FOUND"]
+        if len(made) < len(missing):
+            still = sorted(set(missing) - set(made))
+            raise RuntimeError(
+                f"cluster {mc.key} is missing {len(still)} VM(s) that could "
+                f"not be created: {', '.join(still[:6])}"
+                + (" …" if len(still) > 6 else ""))
+        return made
 
     async def _run_create_once(self, mc: ManagedCluster):
         try:

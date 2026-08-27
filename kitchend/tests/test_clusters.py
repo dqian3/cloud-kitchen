@@ -157,8 +157,10 @@ def test_create_guards(manager):
         # No create_cmd configured -> refused.
         with pytest.raises(ValueError, match="no create_cmd"):
             await mgr.create("stub/main")
-        # Refused while the cluster is up under daemon management.
+        # Refused while the cluster is up under daemon management. The VMs
+        # exist, so bringing it up does not try to create anything.
         mc.create_cmd = ("true",)
+        mc.remote.vm_states = {v: "TERMINATED" for v in ("r0", "r1", "c0")}
         await mgr.up("stub/main", ttl_minutes=60)
         with pytest.raises(RuntimeError, match="up under daemon management"):
             await mgr.create("stub/main")
@@ -441,3 +443,42 @@ def test_spend_separates_probes_from_runs(env):
     assert out["by_cluster"]["stub/c"]["vm_minutes"] == 348.0
 
 
+
+
+def test_up_creates_the_vms_that_do_not_exist(manager):
+    """A lease is one operation — have this cluster up — so a VM that was
+    never provisioned is created rather than reported missing."""
+    mgr, mc, db = manager
+    mc.create_cmd = ("true",)
+    mc.remote.vm_states = {"r0": "TERMINATED"}      # r1 and c0 do not exist
+    made = {}
+
+    async def fake_create(managed):
+        made["ran"] = True
+        managed.remote.vm_states.update({"r1": "TERMINATED", "c0": "TERMINATED"})
+
+    mgr._run_create_once = fake_create
+
+    async def main():
+        await mgr.up("stub/main", ttl_minutes=60)
+        assert made.get("ran")
+        assert mc.remote.vm_states == {v: "RUNNING" for v in ("r0", "r1", "c0")}
+
+    asyncio.run(main())
+
+
+def test_up_gives_up_when_a_vm_cannot_be_created(manager):
+    mgr, mc, db = manager
+    mc.create_cmd = ("true",)
+    mc.remote.vm_states = {"r0": "TERMINATED"}
+
+    async def fake_create(managed):     # creates nothing
+        return
+
+    mgr._run_create_once = fake_create
+
+    async def main():
+        with pytest.raises(RuntimeError, match="could not be created"):
+            await mgr.up("stub/main", ttl_minutes=60)
+
+    asyncio.run(main())
