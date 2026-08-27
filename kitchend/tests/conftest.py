@@ -16,7 +16,6 @@ def env(tmp_path):
     config = Config(
         db_path=tmp_path / "db.sqlite3",
         jobs_dir=tmp_path / "jobs",
-        max_concurrent_queues=2,
         projects=(project,),
     )
     db = Db(config.db_path)

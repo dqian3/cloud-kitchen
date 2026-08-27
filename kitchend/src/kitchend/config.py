@@ -82,7 +82,6 @@ class Config:
     bind_port: int = 8321
     db_path: Path = STATE_DIR / "kitchend.sqlite3"
     jobs_dir: Path = STATE_DIR / "jobs"
-    max_concurrent_queues: int = 1     # one job at a time
     projects: tuple[ProjectConfig, ...] = field(default=())
 
     def project(self, name: str) -> ProjectConfig:
@@ -131,6 +130,5 @@ def load_config(path: Path | None = None) -> Config:
         bind_port=int(raw.get("bind_port", 8321)),
         db_path=Path(raw.get("db_path", STATE_DIR / "kitchend.sqlite3")).expanduser(),
         jobs_dir=Path(raw.get("jobs_dir", STATE_DIR / "jobs")).expanduser(),
-        max_concurrent_queues=int(raw.get("max_concurrent_queues", 1)),
         projects=projects,
     )
