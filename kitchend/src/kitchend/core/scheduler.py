@@ -103,7 +103,12 @@ class Scheduler:
         """The cluster this job is waiting on the daemon to bring up, if it
         is the one doing so. A bring-up is the cluster's business, not a job
         state, but the queue should still say what it is waiting for."""
-        return self._bringing_up if self._running == job_id else None
+        if self._running != job_id:
+            return None
+        # Only while it is actually getting the cluster: once the driver
+        # spawns, the job is running and the cluster is just up.
+        job = jobs.get(self.db, job_id)
+        return self._bringing_up if job and job["state"] == jobs.WAITING else None
 
     def wait_seconds(self, job_id):
         """Seconds until this job may try again, or None if it may now."""
