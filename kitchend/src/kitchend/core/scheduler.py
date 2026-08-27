@@ -1,8 +1,8 @@
-"""The queue: per-queue FIFO, one running job per queue, bounded attempts.
+"""The queue: one job at a time, in priority order, with bounded attempts.
 
-A job's queue key is spec.queue (or spec.cluster, or the project name), so two
-jobs that would fight over the same cluster serialize while different clusters
-run in parallel, capped by max_concurrent_queues.
+One queue, not one per cluster: the clusters share VMs, so a second job could
+not run anyway, and a queue each meant two heads retrying the same stockout on
+their own timers.
 
 A job stays one row from submit to done. Exit-code policy (the drivers'
 existing contract):
@@ -33,9 +33,9 @@ class Scheduler:
         self.hub = hub
         self.runner = runner
         self.clusters = clusters                      # ClusterManager, for
-        self._tasks: dict[int, asyncio.Task] = {}     # spec.cluster leases
-        self._running_queues: dict[str, int] = {}     # queue key -> job_id
-        self._cluster_jobs: dict[str, int] = {}       # leased cluster -> job_id
+        self._tasks: dict[int, asyncio.Task] = {}
+        self._running: int | None = None               # the job that owns it
+        self._bringing_up: str | None = None           # its cluster, if any
         # A job that could not have its cluster waits before trying again.
         # Only the head runs, so the wait is the head's: nothing else was
         # going to probe anyway, and a restart costs one attempt.
@@ -65,9 +65,16 @@ class Scheduler:
     # --- dispatch ---
 
     def _dispatch(self):
-        if len(self._running_queues) >= self.config.max_concurrent_queues:
+        """Run the front of the queue, if anything can run.
+
+        One queue, one job at a time. The head owns the daemon: if it is
+        waiting out a failed attempt, nothing else tries — the clusters share
+        VMs, so a job behind it would only ask the same question. A job whose
+        `after` dependency has not finished is skipped rather than blocking,
+        since it cannot run at all yet.
+        """
+        if self._running is not None:
             return
-        held = set()        # queues whose head is waiting
         for row in self.db.query(
             "SELECT j.id FROM jobs j WHERE j.state = ? "
             "ORDER BY j.priority DESC, j.id ASC", (jobs.WAITING,)
@@ -83,47 +90,20 @@ class Scheduler:
                 self.hub.emit("job.dependency_canceled", job_id=job["id"],
                               after=job["spec"].get("after"))
                 continue
-            key = jobs.queue_key(job)
-            if key in self._running_queues or key in held:
-                continue
             if self._waiting(job["id"]):
-                # Jobs come in priority order, so this is the queue's head:
-                # its wait holds the queue. Nothing behind it should probe a
-                # cluster that just refused the job in front.
-                held.add(key)
-                continue
-            # Clusters that share VMs (main inside n51) must not be leased
-            # by two jobs at once, whatever queues they sit on.
-            cluster_key = (f"{job['project']}/{job['spec']['cluster']}"
-                           if job["spec"].get("cluster") else None)
-            if cluster_key and self.clusters is not None and any(
-                    self.clusters.overlaps(cluster_key, held)
-                    for held in self._cluster_jobs):
-                continue
-            # Someone else's lease on a cluster sharing these VMs: waiting is
-            # right, but it is not this job's failure and costs it nothing.
-            overlapping = getattr(self.clusters, "overlapping_active", None)
-            busy = overlapping(cluster_key) if cluster_key and overlapping else []
-            if busy:
-                self._note(job, f"waiting for {busy[0]}, which holds these "
-                                "VMs under another lease")
-                continue
-            if cluster_key:
-                self._cluster_jobs[cluster_key] = job["id"]
-            self._running_queues[key] = job["id"]
+                return          # the head is waiting: so is everything else
+            self._running = job["id"]
+            self._bringing_up = (f"{job['project']}/{job['spec']['cluster']}"
+                                 if job["spec"].get("cluster") else None)
             self._tasks[job["id"]] = asyncio.get_running_loop().create_task(
-                self._execute(job, key))
-            if len(self._running_queues) >= self.config.max_concurrent_queues:
-                break
+                self._execute(job, jobs.queue_key(job)))
+            return
 
     def bringing_up(self, job_id):
         """The cluster this job is waiting on the daemon to bring up, if it
         is the one doing so. A bring-up is the cluster's business, not a job
         state, but the queue should still say what it is waiting for."""
-        for key, held in self._cluster_jobs.items():
-            if held == job_id:
-                return key
-        return None
+        return self._bringing_up if self._running == job_id else None
 
     def wait_seconds(self, job_id):
         """Seconds until this job may try again, or None if it may now."""
@@ -359,11 +339,9 @@ class Scheduler:
         return len(rows) == 2 and all(r["points"] == 0 for r in rows)
 
     def _release(self, key, job_id):
-        if self._running_queues.get(key) == job_id:
-            del self._running_queues[key]
-        for ck, jid in list(self._cluster_jobs.items()):
-            if jid == job_id:
-                del self._cluster_jobs[ck]
+        if self._running == job_id:
+            self._running = None
+            self._bringing_up = None
         self._tasks.pop(job_id, None)
         self.wake()
 
