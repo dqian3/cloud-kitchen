@@ -661,6 +661,14 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
       </tr>
       {open && (
         <tr><td colSpan="6" className="log-cell">
+          <div className="muted">queue {spec.queue || job.project}
+            {spec.cluster && <> · lease on {spec.cluster}</>}
+            {spec.cluster_ttl_minutes && <> · ttl {spec.cluster_ttl_minutes}m</>}
+            {' '}· up to {job.max_attempts} attempts, {spec.retry_delay_secs}s apart
+            {spec.resume && <> · resuming</>}
+          </div>
+          <div className="mono wrap">{(spec.command || []).join(' ') ||
+            (spec.experiments || []).join(' ') || '(no command)'}</div>
           {job.run_dir && <div className="muted">run dir: <code>{job.run_dir}</code></div>}
           {job.last_error &&
             <div className="muted">last attempt: {job.last_error}</div>}
@@ -813,7 +821,7 @@ function RunEntry({ entry, display, onChanged }) {
             <div className="muted">job #{job.id} · queue {job.spec.queue || job.project}
               {job.spec.cluster && <> · lease on {job.spec.cluster}</>}
               {job.run_dir && <> · dir <code>{job.run_dir}</code></>}
-              <div className="mono">{(job.spec.command || []).join(' ') ||
+              <div className="mono wrap">{(job.spec.command || []).join(' ') ||
                 (job.spec.experiments || []).join(' ')}</div>
             </div>
           )}

@@ -13,6 +13,7 @@ body { margin: 0; background: var(--bg); color: var(--fg);
 header { display: flex; align-items: baseline; gap: 0.75rem; }
 h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
 .muted { color: var(--muted); } .mono { font-family: ui-monospace, monospace; }
+.wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
 .error { color: var(--red); }
 .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .dot-on { background: var(--green); } .dot-off { background: var(--red); }
