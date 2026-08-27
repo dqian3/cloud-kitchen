@@ -51,8 +51,6 @@ def _fmt_job_line(j):
     queue = j["spec"].get("queue") or j["project"]
     lease = " ⚙" if j["spec"].get("cluster") else ""
     state = j["outcome"] if j["state"] == "done" else j["state"]
-    if j["state"] == "waiting" and j.get("next_attempt_at"):
-        state = f"retry@{j['next_attempt_at'][11:16]}Z"
     if j.get("attempts", 0) > 1 and j["state"] != "done":
         state += f" #{j['attempts']}"
     return (f"#{j['id']:<5} {j['project']:<10} {state:<11} "
@@ -184,10 +182,8 @@ def cmd_cancel(config, args):
 
 
 def cmd_retry(config, args):
-    out = _api(config, f"/api/jobs/{args.job_id}/retry", body={})
-    cleared = out.get("cooldowns_cleared") or []
-    print(f"#{args.job_id} due now"
-          + (f"; cooldown cleared on {', '.join(cleared)}" if cleared else ""))
+    _api(config, f"/api/jobs/{args.job_id}/retry", body={})
+    print(f"#{args.job_id} due now")
 
 
 def cmd_resubmit(config, args):

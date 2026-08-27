@@ -158,7 +158,7 @@ def test_cluster_bringup_failure_costs_no_attempt(env):
 
         def waited():
             row = jobs.get(db, j)
-            return row["state"] == jobs.WAITING and row["next_attempt_at"]
+            return row["state"] == jobs.WAITING and scheduler._waiting(j)
 
         await _run_until(scheduler, waited)
         row = jobs.get(db, j)
@@ -180,48 +180,39 @@ def test_cluster_bringup_failure_retries_the_same_job(env):
                     queue="stub/main", retry_delay_secs=1)
 
         def waited_then_ran():
-            if jobs.get(db, j)["next_attempt_at"]:
+            if scheduler._waiting(j):
                 fake.fail_up = False   # capacity returned
             return _state(db, j) == jobs.DONE
 
         await _run_until(scheduler, waited_then_ran)
         assert _outcome(db, j) == jobs.OK
         assert jobs.get(db, j)["attempts"] == 1     # only the run that ran
-        assert jobs.get(db, j)["next_attempt_at"] is None
+        assert not scheduler._waiting(j)
 
     asyncio.run(main())
 
 
-def test_cluster_bringup_failure_cools_the_cluster_down(env):
-    """After one job finds the cluster will not come up, the jobs behind it
-    wait out the cooldown rather than each paying a partial start to learn
-    the same thing."""
+def test_only_the_head_retries(env):
+    """The wait belongs to the job that earned it. The job behind it is not
+    dispatched either — one runs at a time — so nothing else probes a cluster
+    that just refused."""
     config, db, hub, runner, scheduler = env
     fake = FakeClusters(fail_up=True)
     scheduler.clusters = fake
 
     async def main():
         first = _submit(db, hub, config, "exit 0", cluster="main",
-                        queue="stub/main", retry_delay_secs=2)
+                        queue="stub/main", retry_delay_secs=600)
         second = _submit(db, hub, config, "exit 0", cluster="main",
                          queue="stub/main")
-        held_at = {}
-
-        def phases():
-            if jobs.get(db, first)["next_attempt_at"] and "t" not in held_at:
-                held_at["t"] = time.monotonic()
-                fake.fail_up = False       # capacity is back immediately...
-            if "t" in held_at and time.monotonic() - held_at["t"] < 1.0:
-                # ...but inside the cooldown neither job may be dispatched.
-                assert _state(db, second) == jobs.WAITING
-                assert fake.calls == []
-            return _outcome(db, second) == jobs.OK
-
-        await _run_until(scheduler, phases)
-        assert time.monotonic() - held_at["t"] >= 2.0
+        await _run_until(scheduler, lambda: scheduler._waiting(first))
+        fake.calls.clear()
+        await asyncio.sleep(0.4)
+        assert scheduler._waiting(first)          # the head waits
+        assert not scheduler._waiting(second)     # the one behind never tried
+        assert fake.calls == []                   # and nothing probed
 
     asyncio.run(main())
-
 
 def test_a_queue_waits_as_one(env):
     """The delay belongs to the queue: one job runs at a time, so every job
@@ -235,33 +226,12 @@ def test_a_queue_waits_as_one(env):
         other = _submit(db, hub, config, "exit 0", cluster="main",
                         queue="stub/main")
         await _run_until(scheduler,
-                         lambda: jobs.get(db, waiting)["next_attempt_at"])
+                         lambda: scheduler._waiting(waiting))
         # The wait is the queue's now, so reordering does not clear it: both
         # jobs sit behind the same delay, which is the point.
         jobs.reorder(db, hub, [other, waiting])
         assert _state(db, waiting) == jobs.WAITING
-        assert jobs.get(db, other)["next_attempt_at"] == \
-            jobs.get(db, waiting)["next_attempt_at"]
-
-    asyncio.run(main())
-
-
-def test_restart_keeps_the_cluster_cooling(env):
-    """A daemon restart rebuilds the cooldown from the waiting job, so the
-    cluster that just failed is not probed again on startup."""
-    from kitchend.core.scheduler import Scheduler
-    config, db, hub, runner, scheduler = env
-    fake = FakeClusters(fail_up=True)
-    scheduler.clusters = fake
-
-    async def main():
-        j = _submit(db, hub, config, "exit 0", cluster="main",
-                    queue="stub/main", retry_delay_secs=600)
-        await _run_until(scheduler,
-                         lambda: jobs.get(db, j)["next_attempt_at"])
-        fresh = Scheduler(config, db, hub, runner, clusters=fake)
-        assert fresh._cooling("stub/main")
-        assert jobs.get(db, j)["next_attempt_at"] is not None  # still the front
+        assert scheduler._waiting(waiting)
 
     asyncio.run(main())
 
@@ -305,7 +275,7 @@ def test_lease_released_on_cancel(env):
     asyncio.run(main())
 
 
-def test_retry_now_drops_the_wait_and_the_cooldown(env):
+def test_retry_now_drops_the_wait(env):
     """Asking explicitly says the reason for the wait has gone — a fleet
     rebuilt, capacity returned — which the daemon cannot see for itself."""
     config, db, hub, runner, scheduler = env
@@ -315,13 +285,10 @@ def test_retry_now_drops_the_wait_and_the_cooldown(env):
     async def main():
         j = _submit(db, hub, config, "exit 0", cluster="main",
                     queue="stub/main", retry_delay_secs=3600)
-        await _run_until(scheduler, lambda: jobs.get(db, j)["next_attempt_at"])
-        assert scheduler._cooling("stub/main")
+        await _run_until(scheduler, lambda: scheduler._waiting(j))
 
-        out = scheduler.retry_now(j)
-        assert jobs.get(db, j)["next_attempt_at"] is None
-        assert out["cooldowns_cleared"] == ["stub/main"]
-        assert not scheduler._cooling("stub/main")
+        scheduler.retry_now(j)
+        assert not scheduler._waiting(j)
 
         # A job that is not waiting has nothing to retry.
         jobs.finish(db, hub, j, jobs.OK)

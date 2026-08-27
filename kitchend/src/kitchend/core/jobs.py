@@ -80,12 +80,9 @@ def get(db, job_id):
 
 
 def _with_queue(db, job):
-    """Attach the job's queue and that queue's wait, so a caller sees why it
-    is sitting there without knowing how queue keys are derived."""
+    """Attach the job's queue, so a caller sees how it serializes without
+    knowing how queue keys are derived."""
     job["queue"] = queue_key(job)
-    row = db.query_one("SELECT next_attempt_at FROM queues WHERE key = ?",
-                       (job["queue"],))
-    job["next_attempt_at"] = row["next_attempt_at"] if row else None
     return job
 
 
@@ -100,14 +97,7 @@ def list_jobs(db, state=None, limit=100):
             "SELECT j.*, p.name AS project FROM jobs j "
             "JOIN projects p ON p.id = j.project_id "
             "ORDER BY j.id DESC LIMIT ?", (limit,))
-    waits = queue_waits(db)
-    out = []
-    for r in rows:
-        job = _to_dict(r)
-        job["queue"] = queue_key(job)
-        job["next_attempt_at"] = waits.get(job["queue"])
-        out.append(job)
-    return out
+    return [_with_queue(db, _to_dict(r)) for r in rows]
 
 
 def attempts(db, job_id):
@@ -184,31 +174,12 @@ def finish(db, hub, job_id, outcome, last_error=None):
               last_error=last_error)
 
 
-def wait_again(db, hub, job_id, queue, delay_secs, last_error=None):
-    """Put a job back in the queue, and make the queue wait.
-
-    One job runs per queue, so the delay after a failed attempt is the
-    queue's, not the job's: a timer per job had every job that reached the
-    front start its own wait for the same condition.
-    """
-    db.execute(
-        "INSERT INTO queues (key, next_attempt_at, last_error) "
-        "VALUES (?, datetime('now', ?), ?) ON CONFLICT(key) DO UPDATE SET "
-        "next_attempt_at = excluded.next_attempt_at, "
-        "last_error = excluded.last_error",
-        (queue, f"+{int(delay_secs)} seconds", last_error))
+def wait_again(db, hub, job_id, last_error=None):
+    """Put a job back in the queue. The wait itself is the scheduler's, held
+    per cluster in memory: only the job at the head runs, so the delay is
+    about the cluster it could not have, and a restart costs one probe
+    rather than a table to keep in step."""
     set_state(db, hub, job_id, WAITING, last_error=last_error)
-
-
-def queue_waits(db) -> dict:
-    """{queue key: next_attempt_at} for queues that are waiting."""
-    return {r["key"]: r["next_attempt_at"] for r in db.query(
-        "SELECT key, next_attempt_at FROM queues "
-        "WHERE next_attempt_at IS NOT NULL")}
-
-
-def clear_queue_wait(db, queue) -> None:
-    db.execute("UPDATE queues SET next_attempt_at = NULL WHERE key = ?", (queue,))
 
 
 def start_attempt(db, hub, job_id) -> int:
@@ -355,9 +326,7 @@ def recover_orphans(db, hub):
             finish(db, hub, row["id"], FAILED,
                    last_error="daemon died while it ran")
         else:
-            wait_again(db, hub, row["id"], queue_key(job),
-                       int(job["spec"].get("retry_delay_secs",
-                                           DEFAULT_RETRY_DELAY_SECS)),
+            wait_again(db, hub, row["id"],
                        last_error="daemon died while it ran")
 
 

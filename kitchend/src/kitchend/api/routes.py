@@ -62,7 +62,11 @@ def submit_job(body: JobSubmit, request: Request):
 
 @router.get("/jobs")
 def list_jobs(request: Request, state: str | None = None, limit: int = 100):
-    return jobs.list_jobs(request.app.state.db, state=state, limit=limit)
+    out = jobs.list_jobs(request.app.state.db, state=state, limit=limit)
+    sched = request.app.state.scheduler
+    for job in out:
+        job["retry_in_s"] = sched.wait_seconds(job["id"])
+    return out
 
 
 @router.get("/jobs/{job_id}")
@@ -71,6 +75,7 @@ def get_job(job_id: int, request: Request):
     if job is None:
         raise HTTPException(404, f"no job {job_id}")
     job["attempts_log"] = jobs.attempts(request.app.state.db, job_id)
+    job["retry_in_s"] = request.app.state.scheduler.wait_seconds(job_id)
     return job
 
 

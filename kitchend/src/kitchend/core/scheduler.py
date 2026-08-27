@@ -36,29 +36,12 @@ class Scheduler:
         self._tasks: dict[int, asyncio.Task] = {}     # spec.cluster leases
         self._running_queues: dict[str, int] = {}     # queue key -> job_id
         self._cluster_jobs: dict[str, int] = {}       # leased cluster -> job_id
-        # A cluster that failed to come up (a zone stockout) is held for the
-        # waiting job's delay, so the queue behind it does not burn one
-        # partial start per job discovering the same thing.
-        self._cluster_cooldown: dict[str, float] = {}  # cluster key -> monotonic
+        # A job that could not have its cluster waits before trying again.
+        # Only the head runs, so the wait is the head's: nothing else was
+        # going to probe anyway, and a restart costs one attempt.
+        self._wait_until: dict[int, float] = {}        # job id -> monotonic
         self._wake = asyncio.Event()
         self._stopped = False
-        self._restore_cooldowns()
-
-    def _restore_cooldowns(self):
-        """Rebuild the cluster cooldowns from the queues a previous process
-        left waiting, so a restart does not re-probe a cluster that has just
-        failed to come up."""
-        for row in self.db.query(
-                "SELECT q.key, CAST((julianday(q.next_attempt_at) "
-                "- julianday('now')) * 86400 AS INTEGER) AS left_s "
-                "FROM queues q WHERE q.next_attempt_at IS NOT NULL"):
-            left = int(row["left_s"] or 0)
-            if left <= 0:
-                continue
-            # A queue key is the cluster it serializes on, when it has one.
-            self._cluster_cooldown[row["key"]] = max(
-                self._cluster_cooldown.get(row["key"], 0),
-                time.monotonic() + left)
 
     def wake(self):
         self._wake.set()
@@ -84,18 +67,12 @@ class Scheduler:
     def _dispatch(self):
         if len(self._running_queues) >= self.config.max_concurrent_queues:
             return
-        # A queue waiting out a failed attempt holds every job in it: one runs
-        # at a time, so the delay is the queue's. Outlives a restart, unlike
-        # the in-memory cooldown that holds clusters sharing VMs.
-        waiting_queues = {k for k, due in jobs.queue_waits(self.db).items()
-                          if due > self._now()}
+        held = set()        # queues whose head is waiting
         for row in self.db.query(
             "SELECT j.id FROM jobs j WHERE j.state = ? "
             "ORDER BY j.priority DESC, j.id ASC", (jobs.WAITING,)
         ):
             job = jobs.get(self.db, row["id"])
-            if jobs.queue_key(job) in waiting_queues:
-                continue
             gate = self._after_gate(job)
             if gate == "wait":
                 continue
@@ -107,7 +84,13 @@ class Scheduler:
                               after=job["spec"].get("after"))
                 continue
             key = jobs.queue_key(job)
-            if key in self._running_queues:
+            if key in self._running_queues or key in held:
+                continue
+            if self._waiting(job["id"]):
+                # Jobs come in priority order, so this is the queue's head:
+                # its wait holds the queue. Nothing behind it should probe a
+                # cluster that just refused the job in front.
+                held.add(key)
                 continue
             # Clusters that share VMs (main inside n51) must not be leased
             # by two jobs at once, whatever queues they sit on.
@@ -116,8 +99,6 @@ class Scheduler:
             if cluster_key and self.clusters is not None and any(
                     self.clusters.overlaps(cluster_key, held)
                     for held in self._cluster_jobs):
-                continue
-            if cluster_key and self._cooling(cluster_key):
                 continue
             # Someone else's lease on a cluster sharing these VMs: waiting is
             # right, but it is not this job's failure and costs it nothing.
@@ -135,6 +116,23 @@ class Scheduler:
             if len(self._running_queues) >= self.config.max_concurrent_queues:
                 break
 
+    def wait_seconds(self, job_id):
+        """Seconds until this job may try again, or None if it may now."""
+        until = self._wait_until.get(job_id)
+        if until is None:
+            return None
+        left = until - time.monotonic()
+        return round(left) if left > 0 else None
+
+    def _waiting(self, job_id) -> bool:
+        until = self._wait_until.get(job_id)
+        if until is None:
+            return False
+        if until <= time.monotonic():
+            del self._wait_until[job_id]
+            return False
+        return True
+
     def _now(self) -> str:
         return self.db.query_one("SELECT datetime('now') AS t")["t"]
 
@@ -145,28 +143,6 @@ class Scheduler:
             self.db.execute("UPDATE jobs SET last_error = ? WHERE id = ?",
                             (reason, job["id"]))
             self.hub.emit("job.blocked", job_id=job["id"], reason=reason)
-
-    def _cooling(self, cluster_key) -> bool:
-        """Is this cluster, or one sharing its VMs, inside a bring-up
-        cooldown? Expired entries are dropped as they are seen."""
-        now = time.monotonic()
-        is_up = getattr(self.clusters, "is_up", None)
-        for key, until in list(self._cluster_cooldown.items()):
-            if until <= now:
-                del self._cluster_cooldown[key]
-                continue
-            if is_up and is_up(key):
-                # It came up after all — someone started it by hand, or a
-                # lease on a cluster sharing its VMs did. The cooldown says
-                # "this will not start", and that is no longer true.
-                del self._cluster_cooldown[key]
-                self.hub.emit("cluster.cooldown_cleared", cluster=key,
-                              reason="cluster is up")
-                continue
-            overlaps = getattr(self.clusters, "overlaps", None)
-            if key == cluster_key or (overlaps and overlaps(cluster_key, key)):
-                return True
-        return False
 
     def next_waiting(self):
         """The job that dispatches next (priority DESC, id ASC), or None."""
@@ -258,11 +234,11 @@ class Scheduler:
                 self.hub.emit("job.error", job_id=job_id, error=error)
                 delay = int(spec.get("retry_delay_secs",
                                      jobs.DEFAULT_RETRY_DELAY_SECS))
-                self._cluster_cooldown[cluster_key] = time.monotonic() + delay
-                self.hub.emit("cluster.cooldown", cluster=cluster_key,
-                              job_id=job_id, delay_secs=delay)
                 # No attempt is spent: nothing ran.
-                jobs.wait_again(self.db, self.hub, job_id, key, delay, error)
+                self._wait_until[job_id] = time.monotonic() + delay
+                self.hub.emit("job.waiting", job_id=job_id, delay_secs=delay,
+                              cluster=cluster_key)
+                jobs.wait_again(self.db, self.hub, job_id, error)
                 return
             self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
                           action="leased", lease=lease_id)
@@ -271,7 +247,7 @@ class Scheduler:
                 self.clusters.release(cluster_key, lease_id)
                 return
 
-        jobs.clear_queue_wait(self.db, key)
+        self._wait_until.pop(job_id, None)
         n = jobs.start_attempt(self.db, self.hub, job_id)
         jobs.set_state(self.db, self.hub, job_id, jobs.RUNNING)
         extender = None
@@ -360,8 +336,8 @@ class Scheduler:
             return
         delay = int(job["spec"].get("retry_delay_secs",
                                     jobs.DEFAULT_RETRY_DELAY_SECS))
-        jobs.wait_again(self.db, self.hub, job_id, jobs.queue_key(job),
-                        delay, error)
+        self._wait_until[job_id] = time.monotonic() + delay
+        jobs.wait_again(self.db, self.hub, job_id, error)
         self.hub.emit("job.retry_scheduled", job_id=job_id, delay_secs=delay,
                       attempts_left=job["max_attempts"] - job["attempts"])
 
@@ -403,9 +379,8 @@ class Scheduler:
     def retry_now(self, job_id) -> dict:
         """Try a waiting job again immediately.
 
-        Clears the job's own delay and any cluster cooldown that would hold
-        it back — including one set on a cluster sharing its VMs, since that
-        is what the wait is made of. Asking explicitly is a statement that
+        Drops the wait its last attempt earned. Asking explicitly is a
+        statement that
         the condition behind the wait has changed (capacity returned, a fleet
         was rebuilt), which the daemon cannot know on its own.
         """
@@ -414,19 +389,10 @@ class Scheduler:
             raise KeyError(job_id)
         if job["state"] != jobs.WAITING:
             raise ValueError(f"job {job_id} is {job['state']}, not waiting")
-        jobs.clear_queue_wait(self.db, jobs.queue_key(job))
-        dropped = []
-        cluster = job["spec"].get("cluster")
-        if cluster:
-            key = f"{job['project']}/{cluster}"
-            overlaps = getattr(self.clusters, "overlaps", None)
-            for held in list(self._cluster_cooldown):
-                if held == key or (overlaps and overlaps(key, held)):
-                    del self._cluster_cooldown[held]
-                    dropped.append(held)
-        self.hub.emit("job.retry_now", job_id=job_id, cooldowns_cleared=dropped)
+        self._wait_until.pop(job_id, None)
+        self.hub.emit("job.retry_now", job_id=job_id)
         self.wake()
-        return {"id": job_id, "cooldowns_cleared": dropped}
+        return {"id": job_id}
 
     def resubmit(self, job_id, resume=True) -> int:
         job = jobs.get(self.db, job_id)

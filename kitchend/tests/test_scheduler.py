@@ -167,10 +167,10 @@ def test_cancel_running_job(env, tmp_path):
     asyncio.run(main())
 
 
-def test_cancel_a_waiting_job_clears_its_next_attempt(env):
+def test_cancel_a_waiting_job(env):
     config, db, hub, runner, scheduler = env
     j = _submit(db, hub, config, "exit 0", queue="q")
-    jobs.wait_again(db, hub, j, "q", 600, "cluster bring-up failed")
+    jobs.wait_again(db, hub, j, "cluster bring-up failed")
 
     async def main():
         assert await scheduler.cancel(j) == jobs.CANCELED
@@ -191,8 +191,7 @@ def test_recover_orphans_returns_the_job_to_the_queue(env):
     jobs.start_attempt(db, hub, j)
     jobs.set_state(db, hub, j, jobs.RUNNING, pid=999_999)
     jobs.recover_orphans(db, hub)
-    row = jobs.get(db, j)
-    assert row["state"] == jobs.WAITING and row["next_attempt_at"]
+    assert jobs.get(db, j)["state"] == jobs.WAITING
     assert jobs.attempts(db, j)[-1]["error"] == "daemon died while it ran"
 
     spent = _submit(db, hub, config, "true", queue="q", max_attempts=1)
@@ -263,7 +262,7 @@ def test_a_run_that_got_points_keeps_its_attempts(env):
 
     async def main():
         await _run_until(db, scheduler,
-                         lambda: jobs.get(db, j)["next_attempt_at"] is not None)
+                         lambda: scheduler._waiting(j))
         row = jobs.get(db, j)
         assert row["state"] == jobs.WAITING and row["attempts"] == 1
         assert jobs.attempts(db, j)[0]["points"] == 3

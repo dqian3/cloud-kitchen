@@ -582,14 +582,9 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
 
   const waiting = job.state === 'waiting'
   const done = job.state === 'done'
-  // Waiting with a next attempt due: its last try failed, or its cluster
-  // would not come up. The delay can lapse while the cluster is still held
-  // down — by its own cooldown, or one on a cluster sharing its VMs.
-  // The wait is the queue's: showing it on every job in the queue reads as
-  // two dozen jobs each retrying, when one of them is.
-  const dueAt = waiting && queueHead && job.next_attempt_at
-  const dueNow = dueAt &&
-    Date.parse(job.next_attempt_at.replace(' ', 'T') + 'Z') <= Date.now()
+  // The wait belongs to the job that earned it and holds the queue behind
+  // it, so it is shown once, on the head.
+  const retryIn = waiting && queueHead ? job.retry_in_s : null
   const label = done ? job.outcome : job.state
   const spec = job.spec
 
@@ -606,10 +601,9 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
           {job.attempts > 1 && !done &&
             <span className="muted" title="driver invocations so far">
               {' '}attempt {job.attempts}/{job.max_attempts}</span>}
-          {dueAt &&
-            <span className="muted" title={`${job.last_error || 'waiting'} · due ${job.next_attempt_at} UTC`}>
-              {' '}{dueNow ? 'retrying when the cluster frees up'
-                           : `retrying in ${fmtUntil(job.next_attempt_at)}`}</span>}
+          {retryIn != null &&
+            <span className="muted" title={job.last_error || 'waiting'}>
+              {' '}retrying in {retryIn}s</span>}
           {waiting && spec.after &&
             <span className="muted" title="waits for that job to finish with data">
               {' '}after #{spec.after}</span>}
@@ -628,7 +622,7 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
             <button className="link" title="run this next"
                     onClick={() => onMove(job.id, 'top')}>top</button>
           )}
-          {dueAt && !reorder && (
+          {retryIn != null && !reorder && (
             <button className="link"
                     title="stop waiting: drop the delay and any cluster cooldown"
                     onClick={() => act(() => api.retryNow(job.id))}>retry now</button>
