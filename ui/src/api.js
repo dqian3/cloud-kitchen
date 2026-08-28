@@ -23,6 +23,8 @@ export const api = {
   reorderJobs: (ids) => req('/api/jobs/reorder', { method: 'POST', body: JSON.stringify({ ids }) }),
   cancel: (id) => req(`/api/jobs/${id}/cancel`, { method: 'POST', body: '{}' }),
   retryNow: (id) => req(`/api/jobs/${id}/retry`, { method: 'POST' }),
+  setPaused: (paused) => req('/api/pause', {
+    method: 'POST', body: JSON.stringify({ paused }) }),
   resubmit: (id, resume = true) =>
     req(`/api/jobs/${id}/resubmit`, { method: 'POST', body: JSON.stringify({ resume }) }),
   sweeps: (project) => req(`/api/sweeps?project=${encodeURIComponent(project)}`),
@@ -53,9 +55,4 @@ export const api = {
   clusterCreate: (key) => req(`/api/clusters/${key}/create`, { method: 'POST', body: '{}' }),
   clusterCreateCancel: (key) => req(`/api/clusters/${key}/create/cancel`, { method: 'POST', body: '{}' }),
   daemonLog: (limit = 200) => req(`/api/logs?limit=${limit}`),
-  clusterExtend: (key, leaseId, ttl) =>
-    req(`/api/clusters/${key}/extend`, {
-      method: 'POST',
-      body: JSON.stringify({ lease_id: leaseId, ttl_minutes: ttl }),
-    }),
 }

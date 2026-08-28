@@ -4,7 +4,10 @@ import { api } from './api.js'
 // Job states and the outcomes a done job carries, in one map: the queue
 // shows whichever applies.
 const STATE_COLORS = {
-  waiting: 'gray', running: 'blue',
+  // `starting` is not a stored state: a job stays `waiting` while its cluster
+  // comes up, which read as idle when the daemon was in fact busy on its
+  // behalf. The daemon reports the cluster through bringing_up; this names it.
+  waiting: 'gray', starting: 'purple', running: 'blue',
   ok: 'green', degraded: 'orange', failed: 'red', canceled: 'gray',
 }
 
@@ -110,21 +113,15 @@ function ClusterCard({ c, onAction }) {
           {c.session_cost_usd != null &&
             <span className="muted"> · total ${c.session_cost_usd}</span>}
         </div>
-        {c.hold_for != null && (
-          <div className="muted" title="kept up past its last lease for the next job on this cluster">
-            held for job #{c.hold_for}
+        {c.kept_for_next && (
+          <div className="muted" title="no job holds it right now; the scheduler is keeping it up for the next job on this cluster">
+            kept up for the next job
           </div>
         )}
-        {c.leases.length > 0 && (
-          <ul className="leases">
-            {c.leases.map(l => (
-              <li key={l.id}>
-                lease <code>{l.id}</code> ({l.purpose}) —
-                {' '}{Math.floor(l.expires_in_s / 60)}m left
-                <button className="link" onClick={() => onAction('extend', c, l)}>extend</button>
-              </li>
-            ))}
-          </ul>
+        {c.used_by && (
+          <div className="muted" title="the job or user this cluster is running for">
+            in use by {c.used_by}
+          </div>
         )}
         {c.vms && Object.keys(c.vms).length > 0 && (
           <ul className="vm-list">
@@ -152,7 +149,7 @@ function ClusterCard({ c, onAction }) {
         )}
         {(c.state === 'running' || c.state === 'unmanaged') && (
           <button title={c.state === 'unmanaged'
-                   ? 'stop the VMs running outside daemon leases'
+                   ? 'stop the VMs running outside the daemon'
                    : undefined}
                   onClick={() => onAction('down', c)}>down</button>
         )}
@@ -180,12 +177,21 @@ function ClusterCard({ c, onAction }) {
         </div>
       )}
       {c.create && (c.create.running || c.create.log_tail?.length > 0) && (
-        <details className="raw" open={c.create.running}>
+        // Open on failure, not only while running: a create that exited
+        // non-zero left its reason folded away behind a summary that said
+        // only "exited 1", which is the least useful moment to hide it.
+        <details className="logs"
+                 open={c.create.running || (c.create.rc != null && c.create.rc !== 0)}>
           <summary>
-            create log{c.create.rc != null && !c.create.running &&
-              ` (exited ${c.create.rc})`}
+            provisioning log
+            {c.create.running && <span className="muted"> · running</span>}
+            {c.create.rc != null && !c.create.running &&
+              (c.create.rc === 0
+                ? <span className="muted"> · ok</span>
+                : <span className="error"> · failed (exit {c.create.rc})</span>)}
+            <span className="muted"> · {(c.create.log_tail || []).length} lines</span>
           </summary>
-          <pre>{(c.create.log_tail || []).join('\n') || '(no output yet)'}</pre>
+          <pre className="log">{(c.create.log_tail || []).join('\n') || '(no output yet)'}</pre>
         </details>
       )}
     </div>
@@ -202,7 +208,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
   const [priority, setPriority] = useState(0)
   const [attempts, setAttempts] = useState(20)
   const [after, setAfter] = useState('')          // chain: wait for job #
-  const [managedCluster, setManagedCluster] = useState('')  // daemon lease
+  const [managedCluster, setManagedCluster] = useState('')  // daemon-owned
   const [err, setErr] = useState(null)
   // One-off sweep mode: generic params the project adapter translates.
   const [oneoff, setOneoff] = useState(false)
@@ -307,7 +313,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
                  onChange={e => setOneoff(e.target.checked)} /> one-off
         </label>
         {(clusters || []).length > 0 && (
-          <label title="daemon-managed lease: cluster up before the job, released after — a chained job on the same cluster inherits it without a VM cycle">
+          <label title="daemon-owned: the cluster comes up before the job, and stays up if the next queued job wants it">
             cluster
             <select value={managedCluster}
                     onChange={e => setManagedCluster(e.target.value)}>
@@ -454,7 +460,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
                 <label key={e.name}
                        className={`exp ${disabled ? 'exp-disabled' : ''} ${e.group ? 'exp-variant' : ''}`}
                        title={e.native
-                         ? `${e.description}\n\nnative: runs on the SweepEngine as its own job; the daemon leases ${e.queue} around it`
+                         ? `${e.description}\n\nnative: runs on the SweepEngine as its own job; the daemon owns ${e.queue} around it`
                          : e.description}>
                   <input type="checkbox" disabled={disabled}
                          checked={selected.includes(e.name)}
@@ -574,14 +580,43 @@ function useCountdown(seconds) {
   return left
 }
 
-function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
+// The gist of a failure, for a row that has no space for the whole thing.
+// Prefers the reason the provisioner gave (appended after an em dash) over
+// the wrapper text, which is the same on every bring-up failure and says
+// nothing about which one this is.
+function shortError(e) {
+  if (!e) return ''
+  // Unwrap RuntimeError('...') first, so splitting later cannot leave its
+  // closing quote behind.
+  const inner = e.match(/RuntimeError\((?:'|")([\s\S]+?)(?:'|")\)/)
+  let t = (inner ? inner[1] : e).replace(/^cluster bring-up failed:\s*/, '')
+  // Prefer the provisioner's own reason over our wrapper text, which reads
+  // the same on every bring-up failure.
+  if (t.includes(' — ')) t = t.split(' — ').pop()
+  // Drop a leading "cluster X failed to start (why): " preamble.
+  const after = t.match(/\):\s*([\s\S]+)$/)
+  if (after) t = after[1]
+  t = t.trim()
+  return t.length > 90 ? t.slice(0, 90) + '…' : t
+}
+
+function JobRow({ job, onChanged, reorder, onMove, queueHead }) {
   const { notify, askText } = useUI()
   const [open, setOpen] = useState(false)
   const [log, setLog] = useState('')
+  const [tall, setTall] = useState(false)
   const timer = useRef(null)
+  const logRef = useRef(null)
+
+  // Follow a live log rather than leaving the reader at the top of a file
+  // that is still being written.
+  useEffect(() => {
+    const el = logRef.current
+    if (el && job.state === 'running') el.scrollTop = el.scrollHeight
+  }, [log, job.state])
 
   const fetchLog = useCallback(async () => {
-    try { setLog((await api.jobLog(job.id)).log) } catch { /* ignore */ }
+    try { setLog((await api.jobLog(job.id, 500)).log) } catch { /* ignore */ }
   }, [job.id])
 
   useEffect(() => {
@@ -602,7 +637,8 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
   // it, so it is shown once, on the head.
   const retryIn = useCountdown(
     waiting && queueHead && job.retry_in_s != null ? job.retry_in_s : null)
-  const label = done ? job.outcome : job.state
+  const label = done ? job.outcome
+    : (job.bringing_up ? 'starting' : job.state)
   const spec = job.spec
 
   return (
@@ -611,30 +647,47 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
         <td>{job.id}</td>
         <td className="mono" title={(spec.command || []).join(' ')}>
           {spec.name || (spec.experiments || []).join(' ') || 'job'}</td>
-        <td>{spec.queue || job.project}
-          {spec.cluster && <span title={`daemon-managed lease on ${spec.cluster}`}> ⚙</span>}
-        </td>
+        <td>{spec.queue || job.project}</td>
+        <td className="mono">{spec.cluster || <span className="muted">—</span>}</td>
         <td><Chip text={label} color={STATE_COLORS[label]} />
           {job.attempts > 1 && !done &&
             <span className="muted" title="driver invocations so far">
               {' '}attempt {job.attempts}/{job.max_attempts}</span>}
-          {job.bringing_up
-            ? <span className="muted" title="the daemon is starting or creating its VMs">
-                {' '}bringing up {job.bringing_up.split('/').pop()}…</span>
-            : retryIn != null &&
-              <span className="muted" title={job.last_error || 'waiting'}>
-                {' '}{retryIn > 0 ? `retrying in ${retryIn}s` : 'retrying…'}</span>}
+          {/* The chip says `starting` and the cluster column names which one,
+              so the old "bringing up <cluster>…" text said it a third time. */}
+          {!job.bringing_up && retryIn != null &&
+            <span className="muted" title={job.last_error || 'waiting'}>
+              {' '}{retryIn > 0 ? `retrying in ${retryIn}s` : 'retrying…'}</span>}
+          {waiting && job.last_error && (
+            // Without this a job blocked for hours reads exactly like one
+            // retrying normally: the reason was only in a tooltip.
+            <span className="error" title={job.last_error}>
+              {' '}· {shortError(job.last_error)}</span>
+          )}
           {waiting && spec.after &&
             <span className="muted" title="waits for that job to finish with data">
               {' '}after #{spec.after}</span>}
-          {waiting && inherits &&
-            <span className="muted" title="same cluster as the job ahead of it: the VMs are handed over, not cycled">
-              {' '}↳ inherits lease</span>}
-          {job.state === 'running' && job.progress?.points &&
-            <span className="muted"> {job.progress.points.done}
-              {(job.progress.totals_final?.points_total ?? job.progress.est_points)
-                ? `/${job.progress.totals_final?.points_total ?? job.progress.est_points}`
-                : ''} pts</span>}
+          {job.state === 'running' && job.progress?.points && (() => {
+            const p = job.progress.points
+            const total = job.progress.totals_final?.points_total
+              ?? job.progress.est_points
+            // `done` counts attempted points, failures included: a sweep
+            // whose every point errored read the same as a finished one.
+            // The measured count is the headline; the rest is shown when
+            // it is not zero, so a failing run says so on the row.
+            return (
+              <>
+                <span className="muted"> {p.ok ?? p.done}
+                  {total ? `/${total}` : ''} pts</span>
+                {p.failed > 0 &&
+                  <span className="chip chip-red" title="points that errored">
+                    {p.failed} failed</span>}
+                {p.dead > 0 &&
+                  <span className="chip chip-orange" title="points whose run died">
+                    {p.dead} dead</span>}
+              </>
+            )
+          })()}
         </td>
         <td className="muted">{fmtTs(job.created_at)}</td>
         <td onClick={e => e.stopPropagation()}>
@@ -642,9 +695,14 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
             <button className="link" title="run this next"
                     onClick={() => onMove(job.id, 'top')}>top</button>
           )}
-          {retryIn != null && !reorder && (
+          {waiting && !reorder && (
+            // Not gated on the countdown: an attempt takes most of the retry
+            // delay, so the countdown -- and with it this button -- was
+            // visible for only a few seconds of each cycle. The daemon
+            // refuses a retry while the cluster is already coming up, and
+            // says so, which is better than the button not being there.
             <button className="link"
-                    title="stop waiting: drop the delay and any cluster cooldown"
+                    title="stop waiting: try this job's cluster again now"
                     onClick={() => act(() => api.retryNow(job.id))}>retry now</button>
           )}
           {waiting && reorder && (
@@ -660,10 +718,9 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
         </td>
       </tr>
       {open && (
-        <tr><td colSpan="6" className="log-cell">
+        <tr><td colSpan="7" className="log-cell">
           <div className="muted">queue {spec.queue || job.project}
             {spec.cluster && <> · lease on {spec.cluster}</>}
-            {spec.cluster_ttl_minutes && <> · ttl {spec.cluster_ttl_minutes}m</>}
             {' '}· up to {job.max_attempts} attempts, {spec.retry_delay_secs}s apart
             {spec.resume && <> · resuming</>}
           </div>
@@ -671,9 +728,19 @@ function JobRow({ job, onChanged, reorder, onMove, inherits, queueHead }) {
             (spec.experiments || []).join(' ') || '(no command)'}</div>
           {job.run_dir && <div className="muted">run dir: <code>{job.run_dir}</code></div>}
           {job.last_error &&
-            <div className="muted">last attempt: {job.last_error}</div>}
+            <div className="error wrap">last error: {job.last_error}</div>}
           {job.progress && <ProgressPanel p={job.progress} />}
-          <pre className="log">{log || '(no output yet)'}</pre>
+          <div className="log-head">
+            <strong>driver output</strong>
+            <span className="muted">
+              {log ? `${log.split('\n').length} lines` : 'nothing yet'}
+              {job.state === 'running' && ' · live'}
+            </span>
+            <button className="link" onClick={() => setTall(t => !t)}>
+              {tall ? 'shorter' : 'taller'}</button>
+          </div>
+          <pre className={`log${tall ? ' log-tall' : ''}`} ref={logRef}>
+            {log || '(no output yet)'}</pre>
         </td></tr>
       )}
     </>
@@ -712,7 +779,7 @@ function RunEntry({ entry, display, onChanged }) {
   useEffect(() => {
     if (!open) return
     if (run) api.run(run.id).then(setDetail).catch(() => {})
-    if (job) api.jobLog(job.id, 60).then(r => setLog(r.log)).catch(() => {})
+    if (job) api.jobLog(job.id, 500).then(r => setLog(r.log)).catch(() => {})
   }, [open, run?.id, job?.id])
 
   // `refresh: false` for actions that remove the run — re-reading it would
@@ -889,9 +956,13 @@ function RunEntry({ entry, display, onChanged }) {
             </>
           )}
           {job && (
-            <details className="raw" open={!run}>
-              <summary>driver output{log === '' ? ' (none)' : ''}</summary>
-              <pre className="log">{log || '(no output)'}</pre>
+            <details className="logs" open={!run}>
+              <summary>
+                driver output
+                <span className="muted">
+                  {' · '}{log ? `${log.split('\n').length} lines` : 'none'}</span>
+              </summary>
+              <pre className="log log-tall">{log || '(no output)'}</pre>
             </details>
           )}
         </td></tr>
@@ -1039,8 +1110,9 @@ function Dashboard() {
 
   const reload = useCallback(async () => {
     try {
-      const [j, c, r] = await Promise.all([api.jobs(), api.clusters(), api.runs()])
-      setJobs(j); setClusters(c); setRuns(r)
+      const [j, c, r, h] = await Promise.all([
+        api.jobs(), api.clusters(), api.runs(), api.health()])
+      setJobs(j); setClusters(c); setRuns(r); setHealth(h)
     } catch { /* daemon down; the SSE handler flips the dot */ }
   }, [])
 
@@ -1091,9 +1163,6 @@ function Dashboard() {
         notify(`provisioning ${c.key}`)
       } else if (kind === 'create-cancel') {
         await api.clusterCreateCancel(c.key)
-      } else if (kind === 'extend') {
-        const m = await askText('extend lease by minutes:', '120')
-        if (m) await api.clusterExtend(c.key, lease.id, +m)
       }
       reload()
     } catch (e) { notify(e.message || e, 'error') }
@@ -1117,9 +1186,14 @@ function Dashboard() {
   // Finished jobs joined to their ledger runs, plus runs with no job.
   const runByJob = {}
   for (const r of projRuns) if (r.job_id) runByJob[r.job_id] = r
+  // A run whose job is still queued belongs here too: a job that measured
+  // points and went back to waiting (a resume, a partial sweep) had its data
+  // in neither list -- not a finished job, not an orphan run -- so it simply
+  // did not appear.
+  const doneIds = new Set(done.map(j => j.id))
   const entries = [
     ...done.map(j => ({ job: j, run: runByJob[j.id] || null })),
-    ...projRuns.filter(r => !r.job_id || !projJobs.some(j => j.id === r.job_id))
+    ...projRuns.filter(r => !r.job_id || !doneIds.has(r.job_id))
       .map(r => ({ job: null, run: r })),
   ].sort((a, b) => {
     const ta = a.job ? (a.job.finished_at || a.job.created_at) : a.run.started_at
@@ -1166,6 +1240,21 @@ function Dashboard() {
         <span className={`dot ${connected ? 'dot-on' : 'dot-off'}`}
               title={connected ? 'live' : 'disconnected'} />
         {health && <span className="muted">v{health.version}</span>}
+        {health && (
+          <button className="link"
+                  title={health.paused
+                    ? 'start jobs again'
+                    : 'stop starting jobs; anything running is left alone'}
+                  onClick={async () => {
+                    try {
+                      setHealth(await api.setPaused(!health.paused)
+                        .then(r => ({ ...health, paused: r.paused })))
+                    } catch (e) { notify(e.message || e, 'error') }
+                  }}>
+            {health.paused ? '▶ resume queue' : '❚❚ pause queue'}</button>
+        )}
+        {health?.paused &&
+          <Chip text="paused" color="orange" />}
       </header>
 
       {projClusters.length > 0 && (
@@ -1207,19 +1296,10 @@ function Dashboard() {
 
 function JobTable({ jobs, onChanged, empty, reorder, onMove }) {
   if (!jobs.length) return <p className="muted">{empty}</p>
-  // A queued job inherits the lease when the job right ahead of it in
-  // dispatch order runs on the same cluster.
-  const inherits = new Set()
-  for (let i = 1; i < jobs.length; i++) {
-    const prev = jobs[i - 1], cur = jobs[i]
-    if (cur.state === 'waiting' && cur.spec.cluster &&
-        cur.spec.cluster === prev.spec.cluster &&
-        prev.state !== 'done') inherits.add(cur.id)
-  }
   return (
     <table>
       <thead><tr>
-        <th>id</th><th>experiments</th><th>queue</th>
+        <th>id</th><th>experiments</th><th>queue</th><th>cluster</th>
         <th>state</th><th>created</th><th></th>
       </tr></thead>
       <tbody>
@@ -1233,8 +1313,7 @@ function JobTable({ jobs, onChanged, empty, reorder, onMove }) {
           }
           return jobs.map(j => <JobRow key={j.id} job={j} onChanged={onChanged}
                                       reorder={reorder} onMove={onMove}
-                                      queueHead={heads.has(j.id)}
-                                      inherits={inherits.has(j.id)} />)
+                                      queueHead={heads.has(j.id)} />)
         })()}
       </tbody>
     </table>
