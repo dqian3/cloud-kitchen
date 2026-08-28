@@ -3,7 +3,7 @@
     kitchend serve                      run the daemon
     kitchend status                     ping a running daemon
     kitchend catalog PROJECT            list experiments and aggregates
-    kitchend submit PROJECT NAME...     queue experiments (native ones lease
+    kitchend submit PROJECT NAME...     queue experiments (native ones use
                                         their cluster; fan-out prints one
                                         line per job)
     kitchend jobs [--state S] [-n N]    recent jobs
@@ -49,12 +49,12 @@ def _fmt_job_line(j):
     what = j["spec"].get("name") \
         or " ".join(j["spec"].get("experiments") or []) or "job"
     queue = j["spec"].get("queue") or j["project"]
-    lease = " ⚙" if j["spec"].get("cluster") else ""
+    managed = " ⚙" if j["spec"].get("cluster") else ""
     state = j["outcome"] if j["state"] == "done" else j["state"]
     if j.get("attempts", 0) > 1 and j["state"] != "done":
         state += f" #{j['attempts']}"
     return (f"#{j['id']:<5} {j['project']:<10} {state:<11} "
-            f"{queue}{lease}  {what}")
+            f"{queue}{managed}  {what}")
 
 
 def cmd_catalog(config, args):
@@ -100,7 +100,6 @@ def cmd_submit(config, args):
             "priority": args.priority, "max_attempts": args.retries}
     if args.cluster:
         spec["cluster"] = args.cluster
-        spec["cluster_ttl_minutes"] = args.ttl
     if args.after is not None:
         spec["after"] = args.after
     if args.flags:
@@ -120,7 +119,7 @@ def cmd_submit(config, args):
             key = f"{args.project}/{cluster}"
             rate = (clusters.get(key) or {}).get("est_usd_per_hr")
             if rate:
-                line += f"  (leases {cluster}: ~${rate:.2f}/hr while running)"
+                line += f"  (uses {cluster}: ~${rate:.2f}/hr while running)"
         print(line)
     print(f"{len(ids)} job(s) queued; follow with: kitchend watch {ids[0]}")
 
@@ -243,9 +242,10 @@ def cmd_clusters(config, args):
             line += f"  ${c['burn_usd_per_hr']:.2f}/hr"
         elif c.get("est_usd_per_hr"):
             line += f"  (${c['est_usd_per_hr']:.2f}/hr when up)"
-        for lease in c.get("leases", []):
-            line += (f"  lease:{lease['purpose']}"
-                     f"({lease['expires_in_s'] // 60}m)")
+        if c.get("used_by"):
+            line += f"  in use: {c['used_by']}"
+        elif c.get("kept_for_next"):
+            line += "  kept for the next job"
         print(line)
 
 
@@ -264,7 +264,6 @@ def main(argv=None):
     p.add_argument("project")
     p.add_argument("experiments", nargs="+")
     p.add_argument("--cluster", help="daemon-managed lease on this cluster")
-    p.add_argument("--ttl", type=int, default=60, help="lease TTL minutes")
     p.add_argument("--priority", type=int, default=0)
     p.add_argument("--attempts", type=int, default=20, dest="retries",
                    help="driver invocations before giving up")

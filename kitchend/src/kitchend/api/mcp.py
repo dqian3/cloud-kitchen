@@ -63,7 +63,7 @@ def build_mcp(state) -> MCPServer:
         "cloud-kitchen",
         instructions=(
             "Job queue, cluster manager, and run ledger for benchmark "
-            "experiments. Cluster lifecycle is explicit and TTL-leased: "
+            "experiments. The daemon owns cluster lifecycle: "
             "bring a cluster up before submitting jobs that need it, and "
             "every dollar-burning call requires confirm_cost_usd. Job "
             "progress comes from get_job (points done/total, ETA); results "
@@ -108,7 +108,7 @@ def build_mcp(state) -> MCPServer:
     @mcp.tool()
     def submit_job(project: str, experiments: list[str] | None = None,
                    sweep: dict | None = None, queue: str | None = None,
-                   cluster: str | None = None, cluster_ttl_minutes: int = 60,
+                   cluster: str | None = None,
                    after: int | None = None,
                    priority: int = 0, max_attempts: int = 20,
                    est_hours: float | None = None,
@@ -119,9 +119,9 @@ def build_mcp(state) -> MCPServer:
         queue maps to a costed cluster require est_hours plus
         confirm_cost_usd >= the returned estimate.
 
-        `cluster` (a daemon-configured cluster name) makes the lease
-        daemon-managed: VMs come up before the driver spawns, the lease is
-        renewed while the job runs, and released after — a chained job on
+        `cluster` (a daemon-configured cluster name) hands the fleet to the
+        daemon: VMs come up before the driver spawns and are kept up if the
+        next queued job wants them, stopped otherwise — a chained job on
         the same cluster inherits it without a VM cycle. A sweep whose
         params name a configured cluster gets this automatically. `after`
         holds the job until that job is done with data (ok or
@@ -139,7 +139,6 @@ def build_mcp(state) -> MCPServer:
             spec["queue"] = queue
         if cluster:
             spec["cluster"] = cluster
-            spec["cluster_ttl_minutes"] = cluster_ttl_minutes
         if after is not None:
             spec["after"] = after
         specs = submission.prepare_specs(project_cfg, spec)
@@ -197,41 +196,27 @@ def build_mcp(state) -> MCPServer:
 
     @mcp.tool()
     def cluster_status() -> dict:
-        """All clusters: state, VM count, burn rate, live leases."""
+        """All clusters: state, VM count, burn rate, who is using them."""
         return {"clusters": state.clusters.snapshot()}
 
     @mcp.tool()
-    async def cluster_up(project: str, cluster: str, ttl_minutes: int,
+    async def cluster_up(project: str, cluster: str,
                          confirm_cost_usd: float | None = None) -> dict:
-        """Start a cluster under a TTL lease (auto-stops at expiry; extend
-        with extend_lease). ttl_minutes is mandatory and confirm_cost_usd
-        must cover burn_rate * ttl."""
-        if ttl_minutes <= 0:
-            raise ValueError("ttl_minutes must be positive")
+        """Start a cluster. The daemon keeps it up while queued jobs want it
+        and stops it when none do; confirm_cost_usd must cover an hour."""
         key = f"{project}/{cluster}"
         hourly = state.clusters.estimate_hourly(key)
-        estimate = (hourly * ttl_minutes / 60) if hourly is not None else None
-        require_confirmed_cost(estimate, confirm_cost_usd,
-                               f"cluster {key} for {ttl_minutes} minutes")
-        lease_id = await state.clusters.up(key, ttl_minutes, purpose="agent")
-        return {"lease_id": lease_id, "ttl_minutes": ttl_minutes,
-                "estimate_usd": estimate}
+        _confirm(confirm_cost_usd, hourly,
+                 f"cluster {key} for an hour")
+        await state.clusters.up(key, purpose="agent")
+        return {"ok": True, "est_usd_per_hr": hourly}
 
     @mcp.tool()
     async def cluster_down(project: str, cluster: str,
                            force: bool = False) -> dict:
-        """Stop a cluster. Refuses while leases are live unless force=True."""
+        """Stop a cluster. Refuses while a job is using it unless force=True."""
         await state.clusters.down(f"{project}/{cluster}", force=force)
         return {"ok": True}
-
-    @mcp.tool()
-    def extend_lease(project: str, cluster: str, lease_id: str,
-                     ttl_minutes: int) -> dict:
-        """Push a lease's expiry ttl_minutes from now."""
-        state.clusters.extend(f"{project}/{cluster}", lease_id, ttl_minutes)
-        return {"ok": True}
-
-    # --- run ledger ---
 
     @mcp.tool()
     def list_runs(project: str | None = None, experiment: str | None = None,

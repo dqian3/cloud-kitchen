@@ -34,7 +34,6 @@ class JobSubmit(BaseModel):
     extra_flags: list[str] = Field(default_factory=list)
     queue: str | None = None
     cluster: str | None = None     # daemon-managed lease: up before, down after
-    cluster_ttl_minutes: int = 60
     after: int | None = None       # wait for this job to finish with data
     run_dir: str | None = None
     resume: bool = False
@@ -169,6 +168,18 @@ def retry_job(job_id: int, request: Request):
         raise HTTPException(409, str(e))
 
 
+class Paused(BaseModel):
+    paused: bool
+
+
+@router.post("/pause")
+def set_paused(body: Paused, request: Request):
+    """Stop starting new jobs, without stopping the daemon. Anything already
+    running is left alone; clusters, the ledger and the UI keep working."""
+    request.app.state.scheduler.set_paused(body.paused)
+    return {"paused": request.app.state.scheduler.paused()}
+
+
 class Resubmit(BaseModel):
     resume: bool = True
 
@@ -185,16 +196,11 @@ def resubmit_job(job_id: int, body: Resubmit, request: Request):
 # --- clusters ---
 
 class ClusterUp(BaseModel):
-    ttl_minutes: int = 120
+    pass
 
 
 class ClusterDown(BaseModel):
     force: bool = False
-
-
-class ClusterExtend(BaseModel):
-    lease_id: str
-    ttl_minutes: int = 60      # ignored by release
 
 
 @router.get("/spend")
@@ -218,15 +224,14 @@ def list_clusters(request: Request):
 @router.post("/clusters/{project}/{name}/up")
 async def cluster_up(project: str, name: str, body: ClusterUp, request: Request):
     try:
-        lease_id = await request.app.state.clusters.up(
-            f"{project}/{name}", body.ttl_minutes)
+        await request.app.state.clusters.up(f"{project}/{name}")
     except KeyError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
         raise HTTPException(422, str(e))
     except RuntimeError as e:
         raise HTTPException(502, str(e))
-    return {"lease_id": lease_id, "ttl_minutes": body.ttl_minutes}
+    return {"ok": True}
 
 
 @router.post("/clusters/{project}/{name}/down")
@@ -241,7 +246,7 @@ async def cluster_down(project: str, name: str, body: ClusterDown, request: Requ
 
 
 @router.post("/clusters/{project}/{name}/release")
-def cluster_release(project: str, name: str, body: ClusterExtend,
+def cluster_release(project: str, name: str,
                     request: Request):
     """Give back one lease without stopping the cluster. A lease taken by
     hand otherwise locks the queue out of those VMs until it expires, and
@@ -249,23 +254,14 @@ def cluster_release(project: str, name: str, body: ClusterExtend,
     already running."""
     app = request.app
     try:
-        app.state.clusters.release(f"{project}/{name}", body.lease_id)
+        app.state.clusters.release(f"{project}/{name}")
     except KeyError as e:
         raise HTTPException(404, str(e))
     except RuntimeError as e:
         raise HTTPException(409, str(e))
     app.state.scheduler.wake()      # a job may have been waiting on it
-    return {"ok": True, "released": body.lease_id}
-
-
-@router.post("/clusters/{project}/{name}/extend")
-def cluster_extend(project: str, name: str, body: ClusterExtend, request: Request):
-    try:
-        request.app.state.clusters.extend(
-            f"{project}/{name}", body.lease_id, body.ttl_minutes)
-    except KeyError as e:
-        raise HTTPException(404, str(e))
     return {"ok": True}
+
 
 
 @router.post("/clusters/{project}/{name}/refresh")

@@ -14,7 +14,7 @@ A job spec (stored verbatim as spec_json):
       "experiments": ["aspen", "flutter"],     # driver args, or
       "command":     ["python3", "x.py"],      # explicit command (overrides driver)
       "extra_flags": ["--trials", "3"],
-      "queue":       "main",                   # serialization key; default = project
+      "queue":       "main",                   # display grouping; default = project
       "run_dir":     null,                     # assigned at first spawn
       "resume":      false,
       "priority":    0,
@@ -151,6 +151,12 @@ def label(spec: dict, project_cfg=None) -> str:
 
 
 def queue_key(job: dict) -> str:
+    """What to group this job under in the UI.
+
+    Once the serialization key: dispatch ran a queue at a time and this chose
+    which. There is one queue now, in priority order, so nothing serializes by
+    it and it survives only as a label.
+    """
     return job["spec"].get("queue") or job["spec"].get("cluster") or job["project"]
 
 

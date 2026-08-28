@@ -42,6 +42,20 @@ class Scheduler:
         self._wait_until: dict[int, float] = {}        # job id -> monotonic
         self._wake = asyncio.Event()
         self._stopped = False
+        self._paused = False
+
+    # --- pause ---
+    #
+    # In memory, like the retry waits above: a restart is already a fresh
+    # start for the queue, and nothing else in the scheduler is persisted.
+
+    def paused(self) -> bool:
+        return self._paused
+
+    def set_paused(self, value: bool):
+        self._paused = bool(value)
+        self.hub.emit("scheduler.paused" if value else "scheduler.resumed")
+        self.wake()
 
     def wake(self):
         self._wake.set()
@@ -75,6 +89,10 @@ class Scheduler:
         """
         if self._running is not None:
             return
+        # Paused: finish what is running, start nothing. Cluster polling, the
+        # ledger and the UI all keep working.
+        if self.paused():
+            return
         for row in self.db.query(
             "SELECT j.id FROM jobs j WHERE j.state = ? "
             "ORDER BY j.priority DESC, j.id ASC", (jobs.WAITING,)
@@ -96,13 +114,13 @@ class Scheduler:
             self._bringing_up = (f"{job['project']}/{job['spec']['cluster']}"
                                  if job["spec"].get("cluster") else None)
             self._tasks[job["id"]] = asyncio.get_running_loop().create_task(
-                self._execute(job, jobs.queue_key(job)))
+                self._execute(job))
             return
 
     def bringing_up(self, job_id):
         """The cluster this job is waiting on the daemon to bring up, if it
-        is the one doing so. A bring-up is the cluster's business, not a job
-        state, but the queue should still say what it is waiting for."""
+        is the one doing so. The job row stays `waiting` -- nothing has run
+        and no attempt is spent -- and the UI renders this as `starting`."""
         if self._running != job_id:
             return None
         # Only while it is actually getting the cluster: once the driver
@@ -146,13 +164,15 @@ class Scheduler:
         return jobs.get(self.db, row["id"]) if row else None
 
     def _shares_cluster(self, a, b) -> bool:
+        """Would the next job use the fleet this one is finishing with?
+
+        Same cluster, nothing subtler. Overlapping-but-different clusters
+        (main's VMs are a subset of n51's) used to count, from when several
+        holders could lease at once; now the next job brings up whichever
+        cluster it names, so keeping a different one up buys nothing.
+        """
         ca, cb = a["spec"].get("cluster"), b["spec"].get("cluster")
-        if not ca or not cb or a["project"] != b["project"]:
-            return False
-        if ca == cb:
-            return True
-        return self.clusters is not None and self.clusters.overlaps(
-            f"{a['project']}/{ca}", f"{b['project']}/{cb}")
+        return bool(ca) and ca == cb and a["project"] == b["project"]
 
     def _after_gate(self, job) -> str:
         """'ready' | 'wait' | 'cancel' for a job's `after` dependency.
@@ -173,17 +193,17 @@ class Scheduler:
             return "wait"
         return "ready" if dep["outcome"] in (jobs.OK, jobs.DEGRADED) else "cancel"
 
-    async def _execute(self, job, key):
+    async def _execute(self, job):
         job_id = job["id"]
         try:
-            await self._run(job, key)
+            await self._run(job)
         finally:
             # The queue slot goes back whatever happened — including a
             # job deleted mid-dispatch, whose bookkeeping raises. One
             # slot never returned stops the scheduler entirely.
-            self._release(key, job_id)
+            self._release(job_id)
 
-    async def _run(self, job, key):
+    async def _run(self, job):
         job_id = job["id"]
         try:
             project_cfg = self.config.project(job["project"])
@@ -210,8 +230,8 @@ class Scheduler:
         # job lives, release it after. The job stays `waiting` until the
         # driver actually spawns — a cluster coming up is the cluster's
         # business, and its state says so.
-        cluster_key = lease_id = None
-        ttl = int(spec.get("cluster_ttl_minutes", 60))
+        cluster_key = None
+        using_cluster = False
         if spec.get("cluster") and self.clusters is not None:
             cluster_key = f"{job['project']}/{spec['cluster']}"
             self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
@@ -220,9 +240,9 @@ class Scheduler:
                 # A job that names its hosts (a committee sweep addressing
                 # part of the fleet) leases only those; the rest stay down.
                 subset = {"vms": spec["hosts"]} if spec.get("hosts") else {}
-                lease_id = await self.clusters.up(cluster_key, ttl,
-                                                  purpose=f"job-{job_id}",
-                                                  **subset)
+                await self.clusters.up(cluster_key,
+                                       purpose=f"job-{job_id}", **subset)
+                using_cluster = True
             except Exception as e:
                 error = f"cluster bring-up failed: {e!r}"
                 self.hub.emit("job.error", job_id=job_id, error=error)
@@ -235,19 +255,15 @@ class Scheduler:
                 jobs.wait_again(self.db, self.hub, job_id, error)
                 return
             self.hub.emit("job.cluster", job_id=job_id, cluster=cluster_key,
-                          action="leased", lease=lease_id)
+                          action="acquired")
             if jobs.get(self.db, job_id)["state"] == jobs.DONE:
                 # Canceled while the cluster was coming up.
-                self.clusters.release(cluster_key, lease_id)
+                self.clusters.release(cluster_key)
                 return
 
         self._wait_until.pop(job_id, None)
         n = jobs.start_attempt(self.db, self.hub, job_id)
         jobs.set_state(self.db, self.hub, job_id, jobs.RUNNING)
-        extender = None
-        if lease_id is not None:
-            extender = asyncio.get_running_loop().create_task(
-                self._keep_lease(cluster_key, lease_id, ttl))
         self.hub.emit("job.command", job_id=job_id, argv=argv, cwd=str(cwd),
                       attempt=n)
         try:
@@ -264,38 +280,35 @@ class Scheduler:
             self.hub.emit("job.error", job_id=job_id, error=repr(e))
             return
         finally:
-            if extender is not None:
-                extender.cancel()
-            if lease_id is not None:
-                nxt = self.next_waiting()
-                if nxt is not None and nxt["id"] != job_id \
-                        and self._shares_cluster(job, nxt):
-                    # The head of the queue runs on these VMs: keep them up
-                    # for it rather than stop now and start again.
-                    self.clusters.hold(cluster_key, 600, for_job=nxt["id"])
-                    self.hub.emit("job.lease_handoff", job_id=job_id,
-                                  cluster=cluster_key, to_job=nxt["id"])
+            if using_cluster:
                 try:
-                    self.clusters.release(cluster_key, lease_id)
+                    self.clusters.release(cluster_key)
                 except Exception as e:
                     self.hub.emit("job.error", job_id=job_id,
                                   error=f"lease release failed: {e!r}")
+                # The queue is known, so say what happens to the fleet rather
+                # than leaving a timer to infer it: the next job either wants
+                # these VMs or it does not. Under a stockout a needless
+                # teardown can cost VMs that will not start again.
+                nxt = self.next_waiting()
+                keep = (nxt is not None and nxt["id"] != job_id
+                        and self._shares_cluster(job, nxt))
+                if keep:
+                    self.hub.emit("job.cluster", job_id=job_id,
+                                  cluster=cluster_key, action="kept",
+                                  for_job=nxt["id"])
+                else:
+                    self.hub.emit("job.cluster", job_id=job_id,
+                                  cluster=cluster_key, action="stopping")
+                    try:
+                        await self.clusters.down(cluster_key, force=True)
+                    except Exception as e:
+                        self.hub.emit("job.error", job_id=job_id,
+                                      error=f"cluster stop failed: {e!r}")
 
-        self._finish(job, key, rc)
+        self._finish(job, rc)
 
-    async def _keep_lease(self, cluster_key, lease_id, ttl_minutes):
-        """Renew a job's cluster lease at half-TTL cadence while it runs, so
-        a long job outlives its initial TTL but a dead daemon still lets the
-        lease lapse within one TTL."""
-        interval = max(60, ttl_minutes * 30)   # half the TTL, in seconds
-        while True:
-            await asyncio.sleep(interval)
-            try:
-                self.clusters.extend(cluster_key, lease_id, ttl_minutes)
-            except Exception:
-                return   # lease vanished (cluster forced down); stop renewing
-
-    def _finish(self, job, key, rc):
+    def _finish(self, job, rc):
         job_id = job["id"]
         current = jobs.get(self.db, job_id)
         if current is None:            # deleted while it ran; nothing to record
@@ -343,7 +356,7 @@ class Scheduler:
             "ORDER BY n DESC LIMIT 2", (job_id,))
         return len(rows) == 2 and all(r["points"] == 0 for r in rows)
 
-    def _release(self, key, job_id):
+    def _release(self, job_id):
         if self._running == job_id:
             self._running = None
             self._bringing_up = None
@@ -381,6 +394,13 @@ class Scheduler:
             raise KeyError(job_id)
         if job["state"] != jobs.WAITING:
             raise ValueError(f"job {job_id} is {job['state']}, not waiting")
+        # A job stays WAITING while its cluster is coming up, so the state
+        # check alone is not enough: without this, asking to retry during an
+        # attempt cleared a wait that was not set and reported success while
+        # changing nothing.
+        if self._running == job_id:
+            raise ValueError(
+                f"job {job_id} is already trying: its cluster is coming up")
         self._wait_until.pop(job_id, None)
         self.hub.emit("job.retry_now", job_id=job_id)
         self.wake()
