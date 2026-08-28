@@ -7,6 +7,7 @@ SIGINT (and, since the extraction, on SIGTERM too).
 """
 
 import asyncio
+import time
 import os
 import signal
 
@@ -25,6 +26,12 @@ class JobRunner:
         soon as the process exists, so the pid is on record for crash
         recovery even if the daemon dies while the job runs."""
         log = open(self.log_path(job_id), "ab", buffering=0)
+        # Every attempt appends to one file, so without a marker the tail
+        # shows the previous attempt's output until this one prints something
+        # -- a UI reading a stale build log while the new driver is still
+        # connecting, with nothing to say which attempt it belongs to.
+        log.write(f"\n=== attempt started {time.strftime('%Y-%m-%d %H:%M:%S')} "
+                  f": {' '.join(argv)}\n".encode())
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=str(cwd),

@@ -67,7 +67,8 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/api/health")
     def health():
-        return {"status": "ok", "version": __version__}
+        return {"status": "ok", "version": __version__,
+                "paused": app.state.scheduler.paused()}
 
     @app.get("/api/projects")
     def projects():

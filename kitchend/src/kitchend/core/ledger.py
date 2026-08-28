@@ -51,11 +51,23 @@ def apply_events(db, project_id, job_id, out_root, events) -> None:
             row = db.query_one("SELECT id FROM runs WHERE run_dir = ?",
                                (_sweep_dir(out_root, d["name"]),))
             if row:
-                n = db.query_one("SELECT COUNT(*) AS n FROM run_points "
-                                 "WHERE run_id = ?", (row["id"],))["n"]
+                # Only rows that carry a measurement. A point the driver
+                # attempted and failed is stored with its dims and no
+                # metrics; counting those made a run of six failures read
+                # as six points of data.
+                n = db.query_one(
+                    "SELECT COUNT(*) AS n FROM run_points WHERE run_id = ? "
+                    "AND metrics_json IS NOT NULL AND metrics_json != '{}'",
+                    (row["id"],))["n"]
                 db.execute("UPDATE runs SET status = ?, n_points = ? "
                            "WHERE id = ?",
                            (d.get("status") or "ok", n, row["id"]))
+
+
+# The sweep dimensions an entry may carry, in the shape the live ingest
+# records them. Anything else in the entry is a metric.
+_DIM_KEYS = ("f", "p", "gamma", "max_in_flight", "payload_size",
+             "eta_headroom_ms", "client_count", "clients_per_replica")
 
 
 def _sweep_dir(out_root, experiment) -> str:
@@ -79,6 +91,18 @@ def _ensure_run(db, project_id, job_id, run_dir, experiment, ts) -> int:
         "job_id, dir_exists, indexed_at) "
         "VALUES (?, ?, ?, ?, ?, 1, datetime('now'))",
         (project_id, run_dir, experiment, ts, job_id))
+
+
+def _measured(entries) -> int:
+    """Entries that actually produced a measurement.
+
+    A point the driver attempted and failed is still written to
+    sweep_results.json -- same dims, an `error` string, no metrics. Counting
+    those made a run of six consecutive upload failures report six points,
+    so a total failure was indistinguishable from a completed sweep.
+    """
+    return sum(1 for e in entries
+               if isinstance(e, dict) and not e.get("error"))
 
 
 def _upsert_point(db, run_id, dims, rate, trial, metrics, summary_path,
@@ -165,24 +189,29 @@ def _index_sweep_dir(db, project_id, sweep_dir: Path) -> bool | None:
             "argv = COALESCE(argv, ?), dir_exists = 1, "
             "job_id = COALESCE(job_id, ?), "
             "indexed_at = datetime('now') WHERE id = ?",
-            (status, len(entries), started_at, git_commit, argv, job_id, run_id))
+            (status, _measured(entries), started_at, git_commit, argv,
+             job_id, run_id))
     else:
         run_id = db.insert(
             "INSERT INTO runs (project_id, run_dir, experiment, started_at, "
             "git_commit, argv, n_points, status, job_id, dir_exists, indexed_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))",
             (project_id, run_dir, sweep_dir.name, started_at, git_commit,
-             argv, len(entries), status, job_id))
+             argv, _measured(entries), status, job_id))
     for i, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue
-        # Old-driver entries are flat summary dicts with dim tags mixed in;
-        # there is no dimension table to split them with, so the whole entry
-        # is the metrics record and rate/trial are lifted for querying. Its
-        # position in the file is the identity: two entries that differ only
-        # in a dim the ledger cannot name (a payload size) must not collapse
-        # into one, and re-scanning the same file must not duplicate them.
-        _upsert_point(db, run_id, {"i": i},
+        # Key on the same dims the live ingest uses, so re-scanning a dir the
+        # daemon already indexed updates those points instead of inserting a
+        # parallel set. Scanning after a live run used to double every point:
+        # the live path keys on {"f":10,"p":10,...}, this one keyed on file
+        # position, and the two never matched.
+        #
+        # Position stays the identity only when an entry carries no dims at
+        # all -- an old-driver flat summary -- where two entries differing in
+        # a dim the ledger cannot name must not collapse into one.
+        dims = {k: entry[k] for k in _DIM_KEYS if k in entry}
+        _upsert_point(db, run_id, dims or {"i": i},
                       entry.get("rate"), entry.get("trial"), entry, None)
     return row is None
 
