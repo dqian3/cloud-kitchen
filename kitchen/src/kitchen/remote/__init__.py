@@ -61,6 +61,11 @@ def load_remote(config, settings: RemoteSettings | None = None):
             project=project,
             tunnel_through_iap=bool(iap),
             settings=settings,
+            # Set per cluster: only a fleet large enough for the per-VM IAP
+            # tunnels to exhaust memory needs a jump host.
+            proxy_jump=_cfg_get(config, "proxy_jump"),
+            ssh_user=_cfg_get(config, "ssh_user"),
+            ssh_key_file=_cfg_get(config, "ssh_key_file"),
         )
     elif platform == "ssh":
         return SSHRemote(user=_cfg_get(config, "user", "root"), key_file=_cfg_get(config, "key_file"))

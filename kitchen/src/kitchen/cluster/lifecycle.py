@@ -33,6 +33,18 @@ def unarmed(results) -> list:
                   if isinstance(out, Exception))
 
 
+# Already up, or on its way up: a bring-up adopts these rather than starting
+# them again. STAGING/PROVISIONING count because a VM asked to start is in
+# one of them for a while before it is RUNNING, and a second start there is
+# a fingerprint error, not a no-op.
+ADOPTABLE_STATES = ("RUNNING", "STAGING", "PROVISIONING")
+
+# States in which a VM is not consuming anything and needs no cleanup.
+# Everything else -- RUNNING, STAGING, PROVISIONING, REPAIRING -- is either
+# billing already or about to, so it must be stopped or armed.
+DOWN_STATES = ("TERMINATED", "STOPPING", "SUSPENDED", "SUSPENDING")
+
+
 def wait_drained(remote, vms, timeout_s=600, poll_s=10):
     """Block until no VM is mid-shutdown (STOPPING/SUSPENDING).
 
@@ -77,15 +89,39 @@ def start_vms(remote, vms, deadman_minutes=60, drain_first=True,
         statuses = wait_drained(remote, vms, timeout_s=drain_timeout_s)
     else:
         statuses = remote.vm_status(vms)
-    to_start = [v for v in vms if statuses.get(v) != "RUNNING"]
+    # Take over whatever is already up or on its way up, rather than
+    # restarting it or treating it as foreign. A VM someone started by hand
+    # is usable as-is: re-issuing start on a RUNNING or STAGING VM is at best
+    # wasted and at worst an error, and stopping it would fight the person
+    # who started it.
+    to_start = [v for v in vms if statuses.get(v) not in ADOPTABLE_STATES]
     try:
         if to_start:
             remote.vm_start(to_start)
     except Exception:
         post = remote.vm_status(vms)
-        started = [v for v in to_start if post.get(v) == "RUNNING"]
+        # Anything not plainly down is treated as up. A VM asked to start is
+        # STAGING for a while before it is RUNNING, and testing for RUNNING
+        # here missed exactly that window: the VM was neither stopped nor
+        # armed, finished booting a moment later, and ran unmanaged with no
+        # dead-man timer -- twelve did, for four hours, while the daemon
+        # reported them as failed to start.
+        # When this brings VMs down it brings all of them down. Stopping only
+        # what this call started kept leaving strays: VMs a probe started, and
+        # VMs already up before the call. A cluster that failed to start is
+        # not usable half-up, so there is nothing worth preserving.
+        started = [v for v in vms
+                   if post.get(v, "TERMINATED") not in DOWN_STATES]
         if started and stop_on_partial:
-            remote.vm_stop(started)
+            # A stop that fails leaves a VM running with nobody responsible
+            # for it, so anything that survives cleanup gets the dead-man
+            # switch instead: it powers itself off within the hour rather
+            # than running until someone notices.
+            left = remote.vm_stop(started) or []
+            if left:
+                print(f"  WARNING: could not stop {len(left)}: "
+                      f"{', '.join(left)} -- arming their shutdown timer")
+                arm_shutdown(remote, left, minutes=deadman_minutes)
         elif started:
             arm_shutdown(remote, started, minutes=deadman_minutes)
         raise

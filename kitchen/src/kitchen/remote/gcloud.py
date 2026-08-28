@@ -1,5 +1,7 @@
 """GCloud backend: hosts are VM instance names, transport is gcloud compute ssh/scp."""
 
+import getpass
+import os
 import subprocess
 import sys
 import time
@@ -17,7 +19,8 @@ class GCloudRemote(Remote):
     """
 
     def __init__(self, zone=None, project=None, tunnel_through_iap=False,
-                 settings: RemoteSettings | None = None):
+                 settings: RemoteSettings | None = None,
+                 proxy_jump=None, ssh_user=None, ssh_key_file=None):
         self.default_zone = zone
         self.project = project
         # Route ssh/scp through IAP instead of a public address. Needed in any
@@ -34,6 +37,23 @@ class GCloudRemote(Remote):
         # direct constructions too.
         self.settings = settings or get_default_settings()
         self._zone_cache = {}  # vm_name -> zone
+        # Reach sessions through one ssh jump host instead of one IAP tunnel
+        # per VM. `gcloud compute ssh` is a bundled Python interpreter at
+        # ~130 MB, and an n=51 run holds a session open on all 102 VMs at
+        # once (bench.py starts every replica and client with bg=True), so
+        # the tunnels alone came to ~13 GB and the daemon was OOM-killed.
+        # Plain ssh is ~5 MB, and one IAP tunnel to the jump replaces 102.
+        #
+        # Sessions only. VM lifecycle stays on gcloud: vm_status/start/stop
+        # are short calls, never the memory problem, and they need the API
+        # rather than a shell on the box.
+        self.proxy_jump = proxy_jump
+        self.ssh_user = ssh_user or getpass.getuser()
+        # gcloud provisions this key and pushes it to the fleet, so a jump
+        # session authenticates as the same identity `gcloud compute ssh`
+        # would have used.
+        self.ssh_key_file = ssh_key_file or os.path.expanduser(
+            "~/.ssh/google_compute_engine")
 
     def _resolve_zone(self, vm_name):
         """Look up the zone for a VM, using cache or gcloud discovery."""
@@ -89,6 +109,40 @@ class GCloudRemote(Remote):
         if self.tunnel_through_iap:
             args.append("--tunnel-through-iap")
         return args
+
+    _JUMP_QUIET = ["-o", "StrictHostKeyChecking=no",
+                   "-o", "UserKnownHostsFile=/dev/null",
+                   "-o", "LogLevel=ERROR"]
+
+    def _jump_opts(self):
+        """ssh/scp options for a jumped connection.
+
+        ProxyCommand rather than ProxyJump, because the hop to the jump host
+        is a *separate* ssh connection that does not inherit -i: with plain
+        ProxyJump the jump was offered whatever default key ssh happened to
+        find and refused it, while the -i key was held back for the far end.
+        Spelling the hop out passes the same identity to both.
+
+        -o rather than -J for the same reason as ever: scp only grew -J in
+        OpenSSH 8.0, and both commands accept -o.
+        """
+        user, _, hostport = self.proxy_jump.rpartition("@")
+        host, _, port = hostport.partition(":")
+        hop = ["ssh", "-i", self.ssh_key_file, *self._JUMP_QUIET]
+        if port:
+            # `ssh host:port` is not a thing; the port is a separate flag.
+            hop += ["-p", port]
+        hop += ["-W", "%h:%p", f"{user}@{host}" if user else host]
+        return [
+            *self._JUMP_QUIET,
+            "-o", "ProxyCommand=" + " ".join(hop),
+            "-i", self.ssh_key_file,
+        ]
+
+    def _jump_target(self, vm_name):
+        """user@<internal ip>. The jump host resolves nothing: it is handed
+        an address that is routable inside the VPC."""
+        return f"{self.ssh_user}@{self.get_ip(vm_name)}"
 
     def _discover_all(self, vm_names):
         """Pre-fetch zones for all VMs in a single gcloud call."""
@@ -156,11 +210,15 @@ class GCloudRemote(Remote):
             sys.exit(1)
 
     def ssh(self, vm_name, command, bg=False, timeout=None):
-        cmd = [
-            "gcloud", "compute", "ssh", vm_name,
-            *self._ssh_args(vm_name),
-            "--command", command,
-        ]
+        if self.proxy_jump:
+            cmd = ["ssh", *self._jump_opts(), self._jump_target(vm_name),
+                   command]
+        else:
+            cmd = [
+                "gcloud", "compute", "ssh", vm_name,
+                *self._ssh_args(vm_name),
+                "--command", command,
+            ]
         if bg:
             return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -191,11 +249,15 @@ class GCloudRemote(Remote):
         )
 
     def scp_upload(self, local_path, vm_name, remote_path):
-        cmd = [
-            "gcloud", "compute", "scp",
-            local_path, f"{vm_name}:{remote_path}",
-            *self._ssh_args(vm_name),
-        ]
+        if self.proxy_jump:
+            cmd = ["scp", *self._jump_opts(), local_path,
+                   f"{self._jump_target(vm_name)}:{remote_path}"]
+        else:
+            cmd = [
+                "gcloud", "compute", "scp",
+                local_path, f"{vm_name}:{remote_path}",
+                *self._ssh_args(vm_name),
+            ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
@@ -208,12 +270,16 @@ class GCloudRemote(Remote):
         must end in `/` or be a directory that exists on the remote."""
         if not local_paths:
             return
-        cmd = [
-            "gcloud", "compute", "scp",
-            *local_paths,
-            f"{vm_name}:{remote_dir}",
-            *self._ssh_args(vm_name),
-        ]
+        if self.proxy_jump:
+            cmd = ["scp", *self._jump_opts(), *local_paths,
+                   f"{self._jump_target(vm_name)}:{remote_dir}"]
+        else:
+            cmd = [
+                "gcloud", "compute", "scp",
+                *local_paths,
+                f"{vm_name}:{remote_dir}",
+                *self._ssh_args(vm_name),
+            ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
@@ -223,11 +289,15 @@ class GCloudRemote(Remote):
             )
 
     def scp_download(self, vm_name, remote_path, local_path):
-        cmd = [
-            "gcloud", "compute", "scp",
-            f"{vm_name}:{remote_path}", local_path,
-            *self._ssh_args(vm_name),
-        ]
+        if self.proxy_jump:
+            cmd = ["scp", *self._jump_opts(),
+                   f"{self._jump_target(vm_name)}:{remote_path}", local_path]
+        else:
+            cmd = [
+                "gcloud", "compute", "scp",
+                f"{vm_name}:{remote_path}", local_path,
+                *self._ssh_args(vm_name),
+            ]
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
@@ -385,6 +455,12 @@ class GCloudRemote(Remote):
             if result.returncode != 0:
                 detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
                 raise RuntimeError(f"Failed to stop VM '{vm}' (exit {result.returncode}): {detail}")
+        # Report what could not be stopped. This used to print and discard:
+        # vm_stop could not fail, so a caller cleaning up a partial start
+        # believed it had succeeded. Twelve VMs whose stop errored stayed up
+        # for four hours with no dead-man timer while the daemon reported
+        # them as failed to start.
+        unstopped: list[str] = []
         with ThreadPoolExecutor(max_workers=len(vm_names)) as pool:
             futures = {pool.submit(_stop_one, vm): vm for vm in vm_names}
             for f in as_completed(futures):
@@ -393,3 +469,5 @@ class GCloudRemote(Remote):
                     f.result()
                 except Exception as e:
                     print(f"[{vm}] {e}")
+                    unstopped.append(vm)
+        return sorted(unstopped)

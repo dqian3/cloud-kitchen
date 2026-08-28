@@ -63,6 +63,12 @@ class RemoteSettings:
     vm_start_retry_markers: tuple[str, ...] = field(
         default=DEFAULT_VM_START_RETRY_MARKERS
     )
+    # Connection setup is retried; a command that ran and exited nonzero is
+    # not (see GCloudRemote.ssh). A large fan-out opens connections faster
+    # than a jump host services them, and one refused during setup is worth
+    # a second try 5s later -- without it, three points of a 102-VM sweep
+    # died on a single dropped scp. Each retry is printed, so this recovers
+    # from a burst without hiding a real fault.
     ssh_attempts: int = 3
     ssh_retry_delay_s: int = 5
     ssh_transient_markers: tuple[str, ...] = field(

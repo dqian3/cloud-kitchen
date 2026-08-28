@@ -65,7 +65,8 @@ class Remote(ABC):
         if not hosts:
             return {}
         results = {}
-        with ThreadPoolExecutor(max_workers=len(hosts)) as pool:
+        with ThreadPoolExecutor(
+                max_workers=min(self._MAX_CONCURRENT, len(hosts))) as pool:
             futures = {pool.submit(self.ssh, h, command, timeout=timeout): h for h in hosts}
             for f in as_completed(futures):
                 host = futures[f]
@@ -134,7 +135,8 @@ class Remote(ABC):
                     f"echo '{pubkey} {self._EPHEMERAL_TAG}' >> ~/.ssh/authorized_keys"
                 ))
 
-            with ThreadPoolExecutor(max_workers=len(hosts)) as pool:
+            with ThreadPoolExecutor(
+                max_workers=min(self._MAX_CONCURRENT, len(hosts))) as pool:
                 futures = {pool.submit(_setup_one, h): h for h in hosts}
                 for f in as_completed(futures):
                     host = futures[f]
@@ -193,6 +195,16 @@ class Remote(ABC):
 
     # --- Broadcast strategies ---
 
+    # Cap on concurrent per-host subprocesses for the *blocking* fan-outs
+    # below. Each gcloud is a bundled Python interpreter at ~100-150 MB, so
+    # one per VM came to ~13 GB on a 102-VM fleet and the daemon was
+    # OOM-killed. These calls wait for every host, so running them in waves
+    # costs wall-clock and nothing else.
+    #
+    # Deliberately not applied to ssh(bg=True): a run holds a session open on
+    # every replica and client at once, so capping those would not slow the
+    # experiment down, it would make it impossible.
+    _MAX_CONCURRENT = 16
     _MAX_CONCURRENT_SCP = 8  # avoid overwhelming sshd MaxStartups on seed
 
     def seed_broadcast(self, local_path, hosts, remote_path):
@@ -254,7 +266,8 @@ class Remote(ABC):
             if not pairs:
                 break
 
-            with ThreadPoolExecutor(max_workers=len(pairs)) as pool:
+            with ThreadPoolExecutor(
+                    max_workers=min(self._MAX_CONCURRENT, len(pairs))) as pool:
                 futures = {}
                 for src, dst in pairs:
                     f = pool.submit(self.vm_to_vm_scp, src, remote_path, dst)
