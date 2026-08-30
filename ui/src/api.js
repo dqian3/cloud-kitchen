@@ -16,13 +16,11 @@ export const api = {
   projects: () => req('/api/projects'),
   experiments: (project) => req(`/api/experiments?project=${encodeURIComponent(project)}`),
   jobs: () => req('/api/jobs?limit=100'),
-  job: (id) => req(`/api/jobs/${id}`),
   jobLog: (id, tail = 200) => req(`/api/jobs/${id}/log?tail=${tail}`),
   submit: (spec) => req('/api/jobs', { method: 'POST', body: JSON.stringify(spec) }),
   purgeJobs: (project) => req('/api/jobs/purge', { method: 'POST', body: JSON.stringify({ project }) }),
   reorderJobs: (ids) => req('/api/jobs/reorder', { method: 'POST', body: JSON.stringify({ ids }) }),
   cancel: (id) => req(`/api/jobs/${id}/cancel`, { method: 'POST', body: '{}' }),
-  retryNow: (id) => req(`/api/jobs/${id}/retry`, { method: 'POST' }),
   setPaused: (paused) => req('/api/pause', {
     method: 'POST', body: JSON.stringify({ paused }) }),
   resubmit: (id, resume = true) =>
@@ -52,7 +50,5 @@ export const api = {
   clusterDown: (key, force = false) =>
     req(`/api/clusters/${key}/down`, { method: 'POST', body: JSON.stringify({ force }) }),
   clusterRefresh: (key) => req(`/api/clusters/${key}/refresh`, { method: 'POST', body: '{}' }),
-  clusterCreate: (key) => req(`/api/clusters/${key}/create`, { method: 'POST', body: '{}' }),
-  clusterCreateCancel: (key) => req(`/api/clusters/${key}/create/cancel`, { method: 'POST', body: '{}' }),
   daemonLog: (limit = 200) => req(`/api/logs?limit=${limit}`),
 }

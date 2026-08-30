@@ -1,5 +1,5 @@
 """Cluster lifecycle: start/stop with the dead-man switch, clock sync,
-keep-alive heartbeat, and file-based leases.
+and a single-owner keep-alive heartbeat.
 
 The safety model, unchanged from the scripts this was extracted from: every
 running VM carries a GCE-side `shutdown -h +N` timer, re-armed periodically by
@@ -18,12 +18,12 @@ from .lifecycle import (
     unarmed,
     wait_drained,
 )
-from .state import ClusterState, Lease, LeaseInfo
+from .state import ClusterState
 
 __all__ = [
     "parse_chronyc_offset", "sync_clocks",
     "KeepAlive", "AlreadyRunning",
     "arm_shutdown", "arm_shutdown_cmd", "start_vms", "stop_vms", "unarmed",
     "wait_drained",
-    "ClusterState", "Lease", "LeaseInfo",
+    "ClusterState",
 ]

@@ -5,7 +5,7 @@ No subprocesses, no network. Hosts are arbitrary strings; files live in a dict.
 
 import re
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .base import Remote
 

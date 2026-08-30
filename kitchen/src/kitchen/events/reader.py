@@ -1,7 +1,6 @@
 """Read and follow events.jsonl files."""
 
 import json
-import os
 import time
 
 
@@ -40,10 +39,3 @@ def follow(path, poll_s=1.0, stop=None):
         if stop is not None and stop():
             return
         time.sleep(poll_s)
-
-
-def file_offset(path):
-    try:
-        return os.path.getsize(path)
-    except OSError:
-        return 0

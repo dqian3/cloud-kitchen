@@ -66,7 +66,7 @@ def apply_events(db, project_id, job_id, out_root, events) -> None:
 
 # The sweep dimensions an entry may carry, in the shape the live ingest
 # records them. Anything else in the entry is a metric.
-_DIM_KEYS = ("f", "p", "gamma", "max_in_flight", "payload_size",
+_DIM_KEYS = ("f", "p", "gamma", "max_in_flight", "payload_size", "batch_size",
              "eta_headroom_ms", "client_count", "clients_per_replica")
 
 
@@ -198,6 +198,11 @@ def _index_sweep_dir(db, project_id, sweep_dir: Path) -> bool | None:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))",
             (project_id, run_dir, sweep_dir.name, started_at, git_commit,
              argv, _measured(entries), status, job_id))
+    # The results file is the complete snapshot for this sweep. Rebuild its
+    # point index instead of layering a scan over live-ingested rows: the two
+    # paths may have seen different portions of an interrupted run, and stale
+    # identities must not survive a refresh.
+    db.execute("DELETE FROM run_points WHERE run_id = ?", (run_id,))
     for i, entry in enumerate(entries):
         if not isinstance(entry, dict):
             continue

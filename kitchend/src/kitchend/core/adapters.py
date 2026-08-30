@@ -48,10 +48,6 @@ def load_adapter(project_cfg) -> AdapterHandle:
     return handle
 
 
-def clear_cache():
-    _cache.clear()
-
-
 def _display_info(adapter) -> dict | None:
     """Serialize the optional display() hook (dim/metric presentation)."""
     hook = getattr(adapter, "display", None)

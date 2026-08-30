@@ -22,13 +22,10 @@ SCHEMA = """
         project_id INTEGER NOT NULL REFERENCES projects(id),
         name TEXT NOT NULL,
         config_path TEXT NOT NULL,
-        machine_type TEXT,
         hourly_usd REAL,
         vm_count INTEGER,
         state TEXT NOT NULL DEFAULT 'terminated',
         state_updated_at TEXT,
-        orphan INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT,
         UNIQUE (project_id, name)
     );
 
@@ -39,16 +36,6 @@ SCHEMA = """
         stopped_at TEXT,
         vm_count INTEGER NOT NULL,
         hourly_usd REAL
-    );
-
-    CREATE TABLE cluster_leases (
-        id INTEGER PRIMARY KEY,
-        cluster_id INTEGER NOT NULL REFERENCES clusters(id),
-        holder_type TEXT NOT NULL,              -- job | user | agent
-        holder_id TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        expires_at TEXT,
-        released_at TEXT
     );
 
     -- One row per job, for its whole life: waiting -> running -> done.
@@ -68,7 +55,6 @@ SCHEMA = """
         pid INTEGER,
         events_offset INTEGER NOT NULL DEFAULT 0,
         progress_json TEXT,
-        estimate_json TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         started_at TEXT,
         finished_at TEXT
@@ -113,7 +99,6 @@ SCHEMA = """
         key_metrics_json TEXT,
         status TEXT,
         dir_exists INTEGER NOT NULL DEFAULT 1,
-        archived INTEGER NOT NULL DEFAULT 0,
         job_id INTEGER REFERENCES jobs(id),      -- provenance: last writer
         indexed_at TEXT
     );
@@ -155,7 +140,7 @@ SCHEMA = """
     );
 """
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Db:
@@ -208,26 +193,34 @@ def open_db(path: Path) -> sqlite3.Connection:
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    """Create the schema, rebuilding the file if it holds an older one.
+    """Create or migrate the schema.
 
-    The daemon's tables are a working record of what it is doing now; the
-    part worth keeping is the ledger, and that is rebuilt from the run dirs
-    on disk with `runs/scan`. So a schema change drops and recreates rather
-    than migrating.
+    Version 4 preserves active jobs, billing sessions, notes, and tags.
+    Unknown old schemas are rejected rather than destroyed and rebuilt.
     """
-    if conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version == SCHEMA_VERSION:
         return
-    # Foreign keys are enforced on DROP, and the old tables reference each
-    # other; the rebuild replaces every one of them, so turn them off for it.
-    conn.execute("PRAGMA foreign_keys=OFF")
-    try:
+    if version == 3:
         with conn:
-            for (name,) in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' "
-                    "AND name NOT LIKE 'sqlite_%'").fetchall():
-                conn.execute(f"DROP TABLE IF EXISTS {name}")
+            conn.execute("DROP TABLE cluster_leases")
+            conn.execute("ALTER TABLE clusters DROP COLUMN machine_type")
+            conn.execute("ALTER TABLE clusters DROP COLUMN orphan")
+            conn.execute("ALTER TABLE clusters DROP COLUMN last_error")
+            conn.execute("ALTER TABLE jobs DROP COLUMN estimate_json")
+            conn.execute("ALTER TABLE runs DROP COLUMN archived")
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        return
+
+    tables = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name NOT LIKE 'sqlite_%' LIMIT 1").fetchone()
+    if version == 0 and tables is None:
         conn.executescript(SCHEMA)
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn.commit()
-    finally:
-        conn.execute("PRAGMA foreign_keys=ON")
+        return
+
+    raise RuntimeError(
+        f"unsupported database schema version {version}; expected 3 or "
+        f"{SCHEMA_VERSION}")

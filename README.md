@@ -7,14 +7,14 @@ fork). The full design lives in the plan this repo was built from; the short
 version:
 
 - **`kitchen/`** — the library: remote execution backends (gcloud / ssh /
-  local / fake), and later cluster lifecycle with leases and the dead-man
+  local / fake), cluster lifecycle with a single keepalive owner and dead-man
   switch, structured JSONL events, the sweep engine, and the project-adapter
   interface.
 - **`kitchend/`** — the daemon: FastAPI + SQLite job queue, cluster manager
   with daemon-owned keep-alive, SSE progress, results catalog, MCP server.
   Runs as a systemd user unit on the workstation; expose the UI over your
   tailnet with `tailscale serve --bg 8321`.
-- **`ui/`** — Vite + React frontend (placeholder page until built).
+- **`ui/`** — Vite + React frontend for queue, cluster, and result state.
 
 ## Consumers
 

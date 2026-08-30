@@ -20,9 +20,17 @@ def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120):
     backends whose hosts can't shut themselves down (containers)."""
     if not getattr(remote, "supports_deadman", True):
         return {}
-    return remote.run_on_all(
+    results = remote.run_on_all(
         vms, arm_shutdown_cmd(minutes, cancel_first), quiet=True, timeout=timeout,
     )
+    failed = unarmed(results)
+    if failed:
+        error = RuntimeError(
+            f"could not arm shutdown timer on {len(failed)} VM(s): "
+            f"{', '.join(failed)}")
+        error.failed_vms = failed
+        raise error
+    return results
 
 
 def unarmed(results) -> list:
@@ -127,20 +135,17 @@ def start_vms(remote, vms, deadman_minutes=60, drain_first=True,
         raise
     # Fresh boots have no pending timer, but re-arming unconditionally is
     # harmless and covers the VMs that were already running.
-    arm_shutdown(remote, vms, minutes=deadman_minutes)
+    try:
+        arm_shutdown(remote, vms, minutes=deadman_minutes)
+    except Exception:
+        # A running VM without a shutdown deadline is an unbounded bill.
+        remote.vm_stop(vms)
+        raise
     return to_start
 
 
-def stop_vms(remote, vms, state=None, force=False):
-    """Stop VMs. With a ClusterState, refuse while live leases exist unless forced."""
+def stop_vms(remote, vms):
+    """Stop VMs and return any that the backend could not stop."""
     if not vms:
         return
-    if state is not None and not force:
-        live = state.live_leases()
-        if live:
-            holders = ", ".join(f"{l.purpose} (pid {l.pid})" for l in live)
-            raise RuntimeError(
-                f"cluster '{state.name}' has live leases: {holders}. "
-                "Release them or stop with force=True."
-            )
-    remote.vm_stop(vms)
+    return remote.vm_stop(vms) or []

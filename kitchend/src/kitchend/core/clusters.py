@@ -92,16 +92,7 @@ class ManagedCluster:
     # What would not start last time. The next bring-up asks for these
     # first; a successful start clears them.
     short_vms: list[str] = field(default_factory=list)
-    create_task: asyncio.Task | None = None
     create_log: list = field(default_factory=list)   # captured output lines
-    # Creation run from inside a bring-up has no create_task to watch, but
-    # its output is worth the same as a manual create's.
-    creating_for_job: bool = False
-    create_rc: int | None = None                     # last run's exit code
-    create_attempt: int = 0
-    create_max_attempts: int = 0
-    create_missing: list = field(default_factory=list)   # VMs still absent
-    create_next_at: float | None = None              # epoch of next attempt
     # The ssh jump host, for fleets too large to give every VM its own IAP
     # tunnel. It is a VM like any other: it costs money while it runs, so it
     # comes up with the lease and goes down with it. `jump_remote` reaches it
@@ -110,6 +101,7 @@ class ManagedCluster:
     jump_port: int = 0
     jump_remote: GCloudRemote | None = None
     jump_proc: object | None = None      # the `start-iap-tunnel` subprocess
+    stop_at: float | None = None         # manual TTL or bounded queue handoff
 
 
 def _why_create_failed(log) -> str:
@@ -140,11 +132,11 @@ def _probe_set(vms, short=()) -> list:
 class ClusterManager:
     REARM_INTERVAL_S = 30 * 60
     TICK_S = 60
-    # gcloud status poll cadence by what the cluster is doing: fast while
-    # it changes, slow when nothing should be happening.
+    # Keep every cluster observation fresh enough for the dashboard and for
+    # detecting VMs changed outside the daemon.
     POLL_TRANSITIONAL_S = 10    # starting, stopping, provisioning
-    POLL_RUNNING_S = 60         # running or unmanaged: VMs are billing
-    POLL_IDLE_S = 10 * 60       # terminated
+    POLL_RUNNING_S = 10         # running or unmanaged: keep billing state fresh
+    POLL_IDLE_S = 10            # terminated, including externally started VMs
     # How long a fleet stays up with no lease while its queue still has work.
     # Long enough to ride out a failed bring-up and its 120s retry, short
     # enough that a genuinely stalled queue does not idle a cluster for long.
@@ -253,18 +245,6 @@ class ClusterManager:
         except (KeyError, OSError, ValueError):
             return False
 
-    def is_up(self, key: str) -> bool:
-        """Are this cluster's VMs running — under one of our leases or not?
-        A cluster somebody else started is still up, and a scheduler holding
-        a cooldown against it should stop waiting."""
-        try:
-            mc = self._get(key)
-        except (KeyError, ValueError):
-            return False
-        row = self.db.query_one("SELECT state FROM clusters WHERE id = ?",
-                                (mc.db_id,))
-        return bool(row) and row["state"] in ("running", "unmanaged")
-
     def overlapping_active(self, key: str) -> list[str]:
         return [other.key for other in self.clusters.values()
                 if other.task is not None and not other.task.done()
@@ -291,7 +271,7 @@ class ClusterManager:
 
     # --- user/agent operations ---
 
-    async def up(self, key, purpose="user", vms=None):
+    async def up(self, key, purpose="user", vms=None, ttl_minutes=None):
         """Bring the cluster up and mark who is using it.
 
         `vms` restricts the start to a subset (a job whose largest point
@@ -300,6 +280,8 @@ class ClusterManager:
         when to keep the fleet and when to stop it.
         """
         mc = self._get(key)
+        if ttl_minutes is not None and ttl_minutes <= 0:
+            raise ValueError("ttl_minutes must be greater than zero")
         every = self._vms(mc)
         unknown = sorted(set(vms or ()) - set(every))
         if unknown:
@@ -312,6 +294,8 @@ class ClusterManager:
                     f"cluster {key} shares VMs with {busy[0]}, which is up "
                     "under a lease; wait for it or use that cluster")
         mc.used_by = purpose
+        mc.stop_at = (time.time() + ttl_minutes * 60
+                      if ttl_minutes is not None else None)
         fresh = mc.task is None or mc.task.done()
         if fresh:
             self._set_db_state(mc, "starting")
@@ -355,6 +339,7 @@ class ClusterManager:
             mc.short_vms = list(getattr(e, "failed_vms", None) or mc.short_vms)
             self.hub.emit("cluster.error", cluster_id=mc.db_id,
                           cluster=mc.key, error=repr(e))
+            await self._stop_whole_cluster(mc)
             self._mark_bringup_failed(mc, fresh)
             raise RuntimeError(
                 f"cluster {key} failed to start (the VMs that did come "
@@ -390,7 +375,6 @@ class ClusterManager:
                           cluster=mc.key, error=repr(e))
             self._mark_bringup_failed(mc, fresh)
             raise
-        return lease.info.id
 
     async def down(self, key, force=False):
         mc = self._get(key)
@@ -400,12 +384,13 @@ class ClusterManager:
         mc.used_by = None
         await self._shutdown(mc, vms, reason="user")
 
-    def release(self, key, _lease_id=None):
+    def release(self, key):
         """Note that nobody is using the cluster. Does not stop it -- the
         scheduler decides that from the queue."""
         mc = self._get(key)
         if mc.used_by is not None:
             mc.used_by = None
+            mc.stop_at = time.time() + self.HOLD_FOR_QUEUE_S
             self.hub.emit("cluster.released", cluster_id=mc.db_id,
                           cluster=mc.key)
 
@@ -413,6 +398,7 @@ class ClusterManager:
         """A bring-up that did not get off the ground leaves nobody using the
         cluster, and the fleet already came down with it."""
         mc.used_by = None
+        mc.stop_at = None
         if fresh:
             self._set_db_state(mc, "terminated")
             # The fleet is going down, so the jump host goes with it: it is a
@@ -437,7 +423,6 @@ class ClusterManager:
         # clearing here left the UI showing an empty log for a failed create
         # whose reason had just been overwritten.
         mc.create_log = list(mc.create_log)[-200:]
-        mc.creating_for_job = True
         self.hub.emit("cluster.creating", cluster_id=mc.db_id, cluster=mc.key,
                       vms=missing, reason="missing for a lease")
         # A created VM boots running. If the rest of the fleet cannot be
@@ -445,10 +430,7 @@ class ClusterManager:
         # they are stopped here: the caller only hands back the lease, and
         # a VM nothing is holding still bills.
         try:
-            try:
-                await self._run_create_once(mc)
-            finally:
-                mc.creating_for_job = False
+            await self._run_create_once(mc)
             after = await asyncio.to_thread(mc.remote.vm_status, vms)
             made = [v for v in missing if after.get(v, "NOT_FOUND") != "NOT_FOUND"]
             if len(made) < len(missing):
@@ -512,7 +494,7 @@ class ClusterManager:
             f"iap tunnel to {mc.jump_vm} did not accept on port "
             f"{mc.jump_port} within 60s")
 
-    async def _stop_jump(self, mc: ManagedCluster) -> None:
+    async def _stop_jump(self, mc: ManagedCluster) -> list[str]:
         """Close the tunnel and stop the jump host. It bills like any other
         VM, so it does not outlive the lease that needed it."""
         if mc.jump_proc is not None:
@@ -522,16 +504,21 @@ class ClusterManager:
                 pass
             mc.jump_proc = None
         if not mc.jump_vm or mc.jump_remote is None:
-            return
+            return []
         try:
-            await asyncio.to_thread(mc.jump_remote.vm_stop, [mc.jump_vm])
+            left = await asyncio.to_thread(mc.jump_remote.vm_stop, [mc.jump_vm])
+            if left:
+                arm_shutdown(mc.jump_remote, left)
+                raise RuntimeError(f"could not stop jump host {mc.jump_vm}")
             self.hub.emit("cluster.jump.down", cluster_id=mc.db_id,
                           cluster=mc.key, vm=mc.jump_vm)
+            return []
         except Exception as e:
             # Never mask a teardown error with the jump's; the dead-man
             # switch armed at start is the backstop.
             self.hub.emit("cluster.error", cluster_id=mc.db_id, cluster=mc.key,
                           error=f"could not stop jump host {mc.jump_vm}: {e!r}")
+            return [mc.jump_vm]
 
     async def _stop_whole_cluster(self, mc: ManagedCluster) -> None:
         """Bring the whole configured fleet down after a failed bring-up.
@@ -563,7 +550,7 @@ class ClusterManager:
                               cluster=mc.key,
                               error=f"could not stop {len(left)} VM(s): "
                                     f"{', '.join(left)}; arming their timers")
-                await asyncio.to_thread(arm_shutdown, mc.remote, left)
+                arm_shutdown(mc.remote, left)
         except Exception as e:
             self.hub.emit("cluster.error", cluster_id=mc.db_id, cluster=mc.key,
                           error=f"cleanup after a failed bring-up: {e!r}")
@@ -579,46 +566,11 @@ class ClusterManager:
                 mc.create_log.append(line)
                 if len(mc.create_log) > 500:
                     del mc.create_log[:100]
-            mc.create_rc = await proc.wait()
+            await proc.wait()
         except asyncio.CancelledError:
             raise
         except Exception as e:
             mc.create_log.append(f"[daemon] create failed to run: {e!r}")
-            mc.create_rc = -1
-
-    async def _run_create(self, mc: ManagedCluster, retry_delay_s, stop_after):
-        while True:
-            mc.create_attempt += 1
-            mc.create_next_at = None
-            mc.create_log.append(
-                f"[daemon] provisioning attempt {mc.create_attempt}"
-                f"/{mc.create_max_attempts}")
-            await self._run_create_once(mc)
-            # The setup scripts may regenerate the cluster YAML; re-read it.
-            mc.vms = []
-            vms = self._vms(mc)
-            statuses = await asyncio.to_thread(mc.remote.vm_status, vms)
-            mc.last_status = statuses
-            mc.create_missing = [v for v in vms if v not in statuses]
-            running = [v for v, s in statuses.items() if s == "RUNNING"]
-            if stop_after and running:
-                await asyncio.to_thread(mc.remote.vm_stop, running)
-                mc.create_log.append(
-                    f"[daemon] stopped {len(running)} freshly created VM(s)")
-            self.hub.emit("cluster.create.attempt", cluster_id=mc.db_id,
-                          cluster=mc.key, attempt=mc.create_attempt,
-                          rc=mc.create_rc, missing=len(mc.create_missing))
-            if not mc.create_missing or mc.create_attempt >= mc.create_max_attempts:
-                break
-            mc.create_next_at = time.time() + retry_delay_s
-            mc.create_log.append(
-                f"[daemon] {len(mc.create_missing)} VM(s) still missing; "
-                f"next attempt in {int(retry_delay_s // 60)} min")
-            await asyncio.sleep(retry_delay_s)
-        self.hub.emit("cluster.create.finished", cluster_id=mc.db_id,
-                      cluster=mc.key, rc=mc.create_rc,
-                      attempts=mc.create_attempt,
-                      missing=len(mc.create_missing))
 
     async def refresh_status(self, key):
         mc = self._get(key)
@@ -654,15 +606,18 @@ class ClusterManager:
                 "cluster.unmanaged", cluster_id=mc.db_id, cluster=mc.key,
                 running=running,
                 note="VMs running with no daemon lease are accruing cost")
-        elif not running and state == "unmanaged":
+        elif not running and state in ("running", "unmanaged"):
+            if mc.session_id is not None:
+                self.db.execute(
+                    "UPDATE cluster_sessions SET stopped_at = datetime('now') "
+                    "WHERE id = ?", (mc.session_id,))
+                mc.session_id = None
             self._set_db_state(mc, "terminated")
         return statuses
 
     TRANSITIONAL_VM_STATES = ("STOPPING", "STAGING", "PROVISIONING", "SUSPENDING")
 
     def poll_interval(self, mc: ManagedCluster) -> float:
-        if mc.create_task is not None and not mc.create_task.done():
-            return self.POLL_TRANSITIONAL_S
         # What the VMs are doing outranks what the row says: a cluster marked
         # terminated whose VMs are still STOPPING is mid-transition, and
         # polling it every ten minutes leaves the UI showing VMs long gone.
@@ -709,9 +664,6 @@ class ClusterManager:
                 burn = mc.hourly_usd * len(held)
             elif mc.hourly_usd is not None and running:
                 burn = mc.hourly_usd * running
-            creating = (mc.creating_for_job
-                        or (mc.create_task is not None
-                            and not mc.create_task.done()))
             try:
                 est_hourly = self.estimate_hourly(mc.key)
             except Exception:
@@ -723,8 +675,6 @@ class ClusterManager:
                 "vm_count": len(mc.vms) if mc.vms else None,
                 "vms_running": running if mc.last_status is not None else None,
                 "vms": mc.last_status or None,
-                # Kept for API compatibility; one entry when in use.
-                "leases": ([{"purpose": mc.used_by}] if mc.used_by else []),
                 "used_by": mc.used_by,
                 "active": mc.task is not None and not mc.task.done(),
                 # Up with nobody using it means the scheduler is keeping it
@@ -732,18 +682,10 @@ class ClusterManager:
                 "kept_for_next": bool(
                     mc.task is not None and not mc.task.done()
                     and mc.used_by is None),
+                "stop_at": mc.stop_at,
                 "burn_usd_per_hr": burn,
                 "est_usd_per_hr": est_hourly,   # whole-cluster rate if up
                 "session_cost_usd": self._session_cost(mc),
-                "create": ({
-                    "running": creating,
-                    "rc": mc.create_rc,
-                    "attempt": mc.create_attempt,
-                    "max_attempts": mc.create_max_attempts,
-                    "missing": mc.create_missing,
-                    "next_at": mc.create_next_at,
-                    "log_tail": mc.create_log[-200:],
-                } if mc.create_cmd else None),
             })
         return out
 
@@ -760,20 +702,15 @@ class ClusterManager:
     # --- the tick loop ---
 
     async def _tick_loop(self, mc: ManagedCluster):
-        """Keep a cluster alive while it is up. It does not decide when the
-        cluster dies.
-
-        The scheduler knows the job list, so it knows whether the next job
-        wants this fleet; it says so by calling stop(). Leases with TTLs, an
-        expiry check and a hold to bridge hand-offs were all ways of guessing
-        that from in here, and the guess was wrong: taking a lease cleared the
-        hold and nothing re-armed it, so one failed bring-up -- a lease taken
-        and released in seconds -- tore down a fleet the queue still needed.
-        """
+        """Keep an owned cluster alive until its one stop deadline."""
         vms = self._vms(mc)
         try:
             while True:
                 await asyncio.sleep(self.TICK_S)
+                if mc.stop_at is not None and time.time() >= mc.stop_at:
+                    mc.used_by = None
+                    await self._shutdown(mc, self._vms(mc), reason="deadline")
+                    return
                 # Nothing else notices a dead tunnel, and every session on a
                 # jumped cluster goes through it -- including the re-arm below.
                 if mc.jump_vm and (mc.jump_proc is None
@@ -791,6 +728,12 @@ class ClusterManager:
         except Exception as e:
             self.hub.emit("cluster.error", cluster_id=mc.db_id,
                           cluster=mc.key, error=repr(e))
+            try:
+                await self._shutdown(mc, self._vms(mc),
+                                     reason="heartbeat_failed")
+            except Exception as stop_error:
+                self.hub.emit("cluster.error", cluster_id=mc.db_id,
+                              cluster=mc.key, error=repr(stop_error))
         finally:
             if mc.keepalive is not None:
                 mc.keepalive.release_lock()
@@ -801,28 +744,41 @@ class ClusterManager:
                 mc.task is not asyncio.current_task():
             mc.task.cancel()
         mc.task = None
+        mc.stop_at = None
         self._set_db_state(mc, "stopping")
         self.hub.emit("cluster.stopping", cluster_id=mc.db_id,
                       cluster=mc.key, reason=reason)
         try:
-            await asyncio.to_thread(stop_vms, mc.remote, vms)
-        finally:
-            await self._stop_jump(mc)
+            left = await asyncio.to_thread(stop_vms, mc.remote, vms)
+            if left:
+                arm_shutdown(mc.remote, left)
+                raise RuntimeError(
+                    f"could not stop {len(left)} VM(s): {', '.join(left)}")
+            jump_left = await self._stop_jump(mc)
+            if jump_left:
+                raise RuntimeError(
+                    f"could not stop jump host: {', '.join(jump_left)}")
+        except Exception:
             if mc.keepalive is not None:
                 mc.keepalive.release_lock()
                 mc.keepalive = None
-            if mc.session_id is not None:
-                self.db.execute(
-                    "UPDATE cluster_sessions SET stopped_at = datetime('now') "
-                    "WHERE id = ?", (mc.session_id,))
-                mc.session_id = None
-            self._set_db_state(mc, "terminated")
-            # The last poll ran mid-lease; re-read so the card doesn't
-            # keep showing the VMs as up until the next poll.
-            try:
-                mc.last_status = await asyncio.to_thread(mc.remote.vm_status, vms)
-            except Exception:
-                pass
+            self._set_db_state(mc, "unmanaged")
+            raise
+        if mc.keepalive is not None:
+            mc.keepalive.release_lock()
+            mc.keepalive = None
+        if mc.session_id is not None:
+            self.db.execute(
+                "UPDATE cluster_sessions SET stopped_at = datetime('now') "
+                "WHERE id = ?", (mc.session_id,))
+            mc.session_id = None
+        self._set_db_state(mc, "terminated")
+        # The last poll ran mid-lease; re-read so the card doesn't
+        # keep showing the VMs as up until the next poll.
+        try:
+            mc.last_status = await asyncio.to_thread(mc.remote.vm_status, vms)
+        except Exception:
+            pass
 
     async def shutdown_all(self):
         """Daemon exit: stop every cluster this daemon is keeping alive."""

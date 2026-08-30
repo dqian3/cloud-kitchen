@@ -48,13 +48,6 @@ class JobRunner:
         finally:
             self._procs.pop(job_id, None)
 
-    def pid(self, job_id):
-        proc = self._procs.get(job_id)
-        return proc.pid if proc else None
-
-    def is_running(self, job_id):
-        return job_id in self._procs
-
     async def cancel(self, job_id, grace_s=60):
         """SIGINT the process group; escalate if it won't die."""
         proc = self._procs.get(job_id)

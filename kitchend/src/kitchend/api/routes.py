@@ -66,6 +66,7 @@ def list_jobs(request: Request, state: str | None = None, limit: int = 100):
     for job in out:
         job["retry_in_s"] = sched.wait_seconds(job["id"])
         job["bringing_up"] = sched.bringing_up(job["id"])
+        job["display_state"] = sched.display_state(job)
     return out
 
 
@@ -77,6 +78,7 @@ def get_job(job_id: int, request: Request):
     job["attempts_log"] = jobs.attempts(request.app.state.db, job_id)
     job["retry_in_s"] = request.app.state.scheduler.wait_seconds(job_id)
     job["bringing_up"] = request.app.state.scheduler.bringing_up(job_id)
+    job["display_state"] = request.app.state.scheduler.display_state(job)
     return job
 
 
@@ -190,13 +192,15 @@ def resubmit_job(job_id: int, body: Resubmit, request: Request):
         new_id = request.app.state.scheduler.resubmit(job_id, resume=body.resume)
     except KeyError:
         raise HTTPException(404, f"no job {job_id}")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
     return {"id": new_id, "parent": job_id}
 
 
 # --- clusters ---
 
 class ClusterUp(BaseModel):
-    pass
+    ttl_minutes: int = Field(120, ge=1)
 
 
 class ClusterDown(BaseModel):
@@ -224,7 +228,8 @@ def list_clusters(request: Request):
 @router.post("/clusters/{project}/{name}/up")
 async def cluster_up(project: str, name: str, body: ClusterUp, request: Request):
     try:
-        await request.app.state.clusters.up(f"{project}/{name}")
+        await request.app.state.clusters.up(
+            f"{project}/{name}", ttl_minutes=body.ttl_minutes)
     except KeyError as e:
         raise HTTPException(404, str(e))
     except ValueError as e:
@@ -245,25 +250,6 @@ async def cluster_down(project: str, name: str, body: ClusterDown, request: Requ
     return {"ok": True}
 
 
-@router.post("/clusters/{project}/{name}/release")
-def cluster_release(project: str, name: str,
-                    request: Request):
-    """Give back one lease without stopping the cluster. A lease taken by
-    hand otherwise locks the queue out of those VMs until it expires, and
-    forcing the cluster down to break that would throw away VMs that are
-    already running."""
-    app = request.app
-    try:
-        app.state.clusters.release(f"{project}/{name}")
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    except RuntimeError as e:
-        raise HTTPException(409, str(e))
-    app.state.scheduler.wake()      # a job may have been waiting on it
-    return {"ok": True}
-
-
-
 @router.post("/clusters/{project}/{name}/refresh")
 async def cluster_refresh(project: str, name: str, request: Request):
     try:
@@ -273,49 +259,11 @@ async def cluster_refresh(project: str, name: str, request: Request):
     return {"vms": statuses}
 
 
-class ClusterCreate(BaseModel):
-    retry_delay_s: int = 900       # between attempts while VMs are missing
-    max_attempts: int = 12
-    stop_after: bool = True        # fresh VMs boot running; stop them
-
-
-@router.post("/clusters/{project}/{name}/create")
-async def cluster_create(project: str, name: str, request: Request,
-                         body: ClusterCreate | None = None):
-    """Provision the cluster's VMs via the repo's setup script (creates
-    instances — money), retrying until every VM in its config exists.
-    Runs in the background; progress lands in the cluster snapshot's
-    create.* fields and the event log."""
-    body = body or ClusterCreate()
-    try:
-        await request.app.state.clusters.create(
-            f"{project}/{name}", retry_delay_s=body.retry_delay_s,
-            max_attempts=body.max_attempts, stop_after=body.stop_after)
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    except ValueError as e:
-        raise HTTPException(422, str(e))
-    except RuntimeError as e:
-        raise HTTPException(409, str(e))
-    return {"ok": True}
-
-
-@router.post("/clusters/{project}/{name}/create/cancel")
-def cluster_create_cancel(project: str, name: str, request: Request):
-    try:
-        request.app.state.clusters.cancel_create(f"{project}/{name}")
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    except RuntimeError as e:
-        raise HTTPException(409, str(e))
-    return {"ok": True}
-
-
 # --- the daemon's own log: every state change, from the events table ---
 
 @router.get("/logs")
 def daemon_log(request: Request, limit: int = 200):
-    """Newest daemon events (jobs, clusters, leases, creates), oldest first
+    """Newest daemon events (jobs and clusters), oldest first
     within the window — the audit trail behind the SSE stream."""
     rows = request.app.state.db.query(
         "SELECT id, ts, job_id, cluster_id, type, payload_json FROM events "

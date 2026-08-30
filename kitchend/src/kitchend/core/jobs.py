@@ -113,6 +113,12 @@ def _to_dict(row):
     raw = d.pop("progress_json", None)
     d["progress"] = json.loads(raw) if raw else None
     d["done"] = d["state"] == DONE
+    # One source of truth for clients: explicit resubmits resume immediately;
+    # retries resume after their first attempt even though the original
+    # submission spec remains unchanged.
+    d["will_resume"] = bool(
+        d.get("run_dir")
+        and (d["spec"].get("resume") or d.get("attempts", 0) > 0))
     return d
 
 

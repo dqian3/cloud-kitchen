@@ -28,6 +28,15 @@ from .spec import SweepSpec
 SEARCH_REQUIRED_KEYS = ("offered_rate", "delivered_rate", "stats_window_secs")
 
 
+class PointFailed(Exception):
+    """A point ended in error under spec.abort_on_error.
+
+    Raised out of the point loop to end the experiment there. Carried as the
+    result's `fatal`, so the run exits 1 and the points that did produce data
+    keep it.
+    """
+
+
 @dataclass(frozen=True)
 class SweepPoint:
     """One benchmark execution: dims + rate + trial -> one directory."""
@@ -365,6 +374,13 @@ class SweepEngine:
                    rate=rate, trial=trial, rel_dir=rel, status=status,
                    duration_s=duration, metrics=metrics or {})
         self._record(result, entry, status)
+        # `error` covers both halves of a failed point: the engine sets it when
+        # launch or analysis raised, and an adapter sets it on a run whose
+        # numbers describe less than the system under test (a partial
+        # committee). Either way the point is not a measurement.
+        if spec.abort_on_error and "error" in entry:
+            reason = entry.get("error") or entry.get("error_reason") or "failed"
+            raise PointFailed(f"{rel}: {reason}")
         return entry
 
     def _record(self, result, entry, status, skipped=False) -> None:

@@ -7,10 +7,13 @@
   :root { --bg: #16181d; --fg: #e5e5e5; --muted: #9a9a9a; --line: #2e3238; --card: #1e2127; }
 }
 * { box-sizing: border-box; }
+html, body, #root { width: 100%; max-width: 100%; overflow-x: hidden; }
 body { margin: 0; background: var(--bg); color: var(--fg);
   font: 14px/1.5 system-ui, sans-serif; }
-.app { max-width: 72rem; margin: 0 auto; padding: 1rem 1.5rem 4rem; }
-header { display: flex; align-items: baseline; gap: 0.75rem; }
+.app { width: 100%; max-width: 72rem; min-width: 0; margin: 0 auto;
+  padding: 1rem 1.5rem 4rem; }
+header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.75rem;
+  min-width: 0; }
 h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
 .muted { color: var(--muted); } .mono { font-family: ui-monospace, monospace; }
 .wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -34,7 +37,7 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
 .card-head { display: flex; justify-content: space-between; gap: 1rem;
   align-items: center; }
 .card-actions { margin-top: 0.5rem; display: flex; gap: 0.4rem;
-  align-items: center; }
+  align-items: center; flex-wrap: wrap; }
 .card-actions input[type=number] { width: 4.5rem; }
 .burn { color: var(--orange); font-weight: 600; }
 .leases { margin: 0.3rem 0; padding-left: 1.1rem; }
@@ -81,13 +84,29 @@ button.agg { background: none; border: 1px solid var(--blue);
 button.variant-toggle { padding: 0 0.35rem; font-size: 0.72rem;
   border-color: var(--muted); color: var(--muted); }
 
-table { width: 100%; border-collapse: collapse; }
+.table-scroll { width: 100%; max-width: 100%; min-width: 0;
+  overflow-x: auto; overscroll-behavior-inline: contain; }
+.queue-table { width: 100%; min-width: 0; }
+.queue-table table { width: 100%; min-width: 0; table-layout: fixed; }
+.queue-table th:nth-child(1) { width: 3rem; }
+.queue-table th:nth-child(2) { width: 24%; }
+.queue-table th:nth-child(4) { width: 8rem; }
+.queue-table th:nth-child(5) { width: 11rem; }
+.queue-table td:not(.job-status):not(.log-cell) { overflow: hidden;
+  text-overflow: ellipsis; }
+.job-status { min-width: 0; }
+.job-status-scroll { width: 100%; max-width: 100%; overflow-x: auto;
+  white-space: nowrap; overscroll-behavior-inline: contain; padding-bottom: 2px; }
+table { width: max-content; min-width: 100%; border-collapse: collapse; }
 th { text-align: left; color: var(--muted); font-weight: 500;
   border-bottom: 1px solid var(--line); padding: 0.25rem 0.5rem; }
-td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); }
+td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line);
+  vertical-align: top; white-space: nowrap; overflow-wrap: normal; }
 .job-row { cursor: pointer; }
 .job-row:hover { background: color-mix(in srgb, var(--blue) 6%, transparent); }
-.log-cell { background: var(--card); }
+.log-cell { background: var(--card); max-width: 1px; white-space: normal; }
+.command-line { max-width: 100%; overflow-x: auto; white-space: nowrap;
+  padding: 0.2rem 0; }
 /* One treatment for every log: driver output, cluster provisioning, daemon.
    `white-space: pre` with horizontal scroll rather than wrapping -- these are
    column-aligned (ping matrices, VM tables, cargo output) and wrapping turns
@@ -116,17 +135,10 @@ td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line); }
 .oneoff label { display: inline-flex; gap: 0.3rem; align-items: center; }
 .oneoff textarea { font-family: ui-monospace, monospace; font-size: 0.8rem; }
 .oneoff input[type="number"] { width: 5rem; }
-.run-actions { display: flex; gap: 0.4rem; align-items: center;
+.run-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center;
   margin: 0.3rem 0; }
-.run-actions input { min-width: 22rem; }
+.run-actions input { flex: 1 1 18rem; min-width: 0; max-width: 100%; }
 .notes { margin: 0.2rem 0 0.4rem; padding-left: 1.2rem; font-size: 0.85rem; }
-table.points { font-size: 0.82rem; margin: 0.3rem 0; }
-table.points td, table.points th { padding: 0.15rem 0.5rem; }
-details.raw { display: inline-block; margin-left: 0.4rem; }
-details.raw summary { cursor: pointer; color: var(--muted);
-  font-size: 0.75rem; }
-details.raw pre { max-height: 14rem; overflow: auto; font-size: 0.72rem;
-  background: var(--card); padding: 0.4rem; border-radius: 4px; }
 /* The cluster's provisioning log is a log, not a footnote: full width and
    the same box as the driver's. */
 details.logs { display: block; margin: 0.5rem 0 0; min-width: 0; max-width: 100%; }
@@ -134,7 +146,8 @@ details.logs > summary { cursor: pointer; font-size: 0.8rem; }
 details.logs[open] > summary { margin-bottom: 0.3rem; }
 h2 button.link { margin-left: 0.6rem; font-size: 0.75rem; }
 
-.tabs { display: flex; gap: 0.2rem; margin-left: 1rem; }
+.tabs { display: flex; gap: 0.2rem; margin-left: 1rem; min-width: 0;
+  max-width: 100%; overflow-x: auto; }
 .tab { background: none; border: none; border-bottom: 2px solid transparent;
   padding: 0.25rem 0.7rem; cursor: pointer; font-size: 0.95rem;
   color: var(--muted); }
@@ -156,7 +169,7 @@ h2 button.link { margin-left: 0.6rem; font-size: 0.75rem; }
   align-items: center; justify-content: center;
   background: rgba(0, 0, 0, 0.35); }
 .modal { background: var(--card); border: 1px solid var(--line);
-  border-radius: 8px; padding: 1rem 1.25rem; min-width: 22rem;
+  border-radius: 8px; padding: 1rem 1.25rem; width: min(32rem, calc(100vw - 2rem));
   max-width: 32rem; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25); }
 .modal-msg { margin-bottom: 0.6rem; }
 .modal input { width: 100%; background: var(--bg); color: var(--fg);
@@ -168,3 +181,15 @@ button.danger { background: var(--red); }
   margin-top: 0.5rem; font-size: 0.85rem; color: var(--red); }
 
 .pub-link { margin-left: auto; margin-right: .8rem; font-size: .9em; }
+
+@media (max-width: 700px) {
+  .app { padding: 0.75rem 0.75rem 3rem; }
+  header { gap: 0.4rem; }
+  header h1 { width: 100%; margin: 0.25rem 0; }
+  .tabs { order: 2; width: 100%; margin-left: 0; }
+  .pub-link { margin-left: 0; }
+  .card { flex-basis: 100%; padding: 0.7rem; }
+  .card-head { align-items: flex-start; }
+  .submit-form > * { max-width: 100%; }
+  .toasts { left: 0.75rem; right: 0.75rem; max-width: none; }
+}

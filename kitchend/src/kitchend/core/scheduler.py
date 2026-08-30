@@ -20,7 +20,6 @@ broken environment, not a flaky run.
 """
 
 import asyncio
-import json
 import time
 
 from . import jobs
@@ -42,12 +41,17 @@ class Scheduler:
         self._wait_until: dict[int, float] = {}        # job id -> monotonic
         self._wake = asyncio.Event()
         self._stopped = False
-        self._paused = False
+        last_pause = self.db.query_one(
+            "SELECT type FROM events "
+            "WHERE type IN ('scheduler.paused', 'scheduler.resumed') "
+            "ORDER BY id DESC LIMIT 1")
+        self._paused = bool(last_pause and last_pause["type"] == "scheduler.paused")
 
     # --- pause ---
     #
-    # In memory, like the retry waits above: a restart is already a fresh
-    # start for the queue, and nothing else in the scheduler is persisted.
+    # The latest pause/resume event is restored at startup. This keeps a
+    # daemon restart from dispatching work before the operator can pause it
+    # again, without adding a second source of queue state.
 
     def paused(self) -> bool:
         return self._paused
@@ -136,6 +140,20 @@ class Scheduler:
         left = until - time.monotonic()
         return round(left) if left > 0 else None
 
+    def display_state(self, job) -> str:
+        """The queue state clients should show, derived from scheduler truth."""
+        if job["state"] == jobs.DONE:
+            return job["outcome"]
+        if self.bringing_up(job["id"]):
+            return "starting"
+        if job["state"] == jobs.RUNNING:
+            return "running"
+        if self._after_gate(job) == "wait":
+            return "blocked"
+        if self._waiting(job["id"]):
+            return "retrying"
+        return "queued"
+
     def _waiting(self, job_id) -> bool:
         until = self._wait_until.get(job_id)
         if until is None:
@@ -157,11 +175,50 @@ class Scheduler:
             self.hub.emit("job.blocked", job_id=job["id"], reason=reason)
 
     def next_waiting(self):
-        """The job that dispatches next (priority DESC, id ASC), or None."""
-        row = self.db.query_one(
+        """The first waiting job that can eventually dispatch, or None.
+
+        Dependency-blocked jobs are skipped just as `_dispatch` skips them;
+        otherwise a blocked job on another cluster could make us tear down
+        the fleet needed by the job that will actually run next.
+        """
+        for row in self.db.query(
             "SELECT id FROM jobs WHERE state = ? "
-            "ORDER BY priority DESC, id ASC LIMIT 1", (jobs.WAITING,))
-        return jobs.get(self.db, row["id"]) if row else None
+            "ORDER BY priority DESC, id ASC", (jobs.WAITING,)
+        ):
+            job = jobs.get(self.db, row["id"])
+            if self._after_gate(job) == "ready":
+                return job
+        return None
+
+    def _outranked_by(self, job):
+        """The job that should hold the queue slot instead of `job`, or None.
+
+        Only asked in the window between claiming the slot and spawning the
+        driver, while a cluster comes up. In that window the job row is still
+        `waiting`, no attempt has been spent and nothing has run, so a reorder
+        made during a bring-up can still take effect — the one moment where
+        changing the queue order is free. Once the driver spawns the order is
+        settled until the job ends.
+
+        Uses `_dispatch`'s gates, so the slot only changes hands to a job that
+        could actually take it: a dependency-blocked job is skipped the way
+        dispatch skips it, and a retry-delayed job ahead of us stops the scan
+        the way it stops dispatch — if nothing would run, there is no reason
+        to give the fleet up.
+        """
+        for row in self.db.query(
+            "SELECT j.id FROM jobs j WHERE j.state = ? "
+            "ORDER BY j.priority DESC, j.id ASC", (jobs.WAITING,)
+        ):
+            if row["id"] == job["id"]:
+                return None                     # still the head
+            other = jobs.get(self.db, row["id"])
+            if other is None or self._after_gate(other) != "ready":
+                continue
+            if self._waiting(other["id"]):
+                return None
+            return other
+        return None
 
     def _shares_cluster(self, a, b) -> bool:
         """Would the next job use the fleet this one is finishing with?
@@ -258,7 +315,21 @@ class Scheduler:
                           action="acquired")
             if jobs.get(self.db, job_id)["state"] == jobs.DONE:
                 # Canceled while the cluster was coming up.
-                self.clusters.release(cluster_key)
+                await self._handoff_cluster(job, cluster_key)
+                return
+            # Reordered while the cluster came up. Bring-up is minutes on a
+            # real fleet, and for all of it this job has done nothing but hold
+            # the slot — so hand it over rather than spending the fleet on a
+            # job the operator has since demoted. _handoff_cluster keeps the
+            # VMs up when the new head wants the same cluster, which is the
+            # usual case, so the swap costs nothing.
+            ahead = self._outranked_by(job)
+            if ahead is not None:
+                self._note(job, f"yielded the queue slot to job {ahead['id']}: "
+                                f"reordered while {cluster_key} was coming up")
+                self.hub.emit("job.preempted", job_id=job_id,
+                              by_job=ahead["id"], cluster=cluster_key)
+                await self._handoff_cluster(job, cluster_key)
                 return
 
         self._wait_until.pop(job_id, None)
@@ -279,34 +350,42 @@ class Scheduler:
             jobs.finish(self.db, self.hub, job_id, jobs.FAILED, last_error=repr(e))
             self.hub.emit("job.error", job_id=job_id, error=repr(e))
             return
+        else:
+            # Record success/failure/retry before deciding the cluster
+            # handoff. A failed job becomes WAITING here, so it can hand the
+            # still-running cluster to its own next attempt instead of being
+            # mistaken for a queue with no successor and stopping the VMs.
+            self._finish(job, rc)
         finally:
             if using_cluster:
-                try:
-                    self.clusters.release(cluster_key)
-                except Exception as e:
-                    self.hub.emit("job.error", job_id=job_id,
-                                  error=f"lease release failed: {e!r}")
-                # The queue is known, so say what happens to the fleet rather
-                # than leaving a timer to infer it: the next job either wants
-                # these VMs or it does not. Under a stockout a needless
-                # teardown can cost VMs that will not start again.
-                nxt = self.next_waiting()
-                keep = (nxt is not None and nxt["id"] != job_id
-                        and self._shares_cluster(job, nxt))
-                if keep:
-                    self.hub.emit("job.cluster", job_id=job_id,
-                                  cluster=cluster_key, action="kept",
-                                  for_job=nxt["id"])
-                else:
-                    self.hub.emit("job.cluster", job_id=job_id,
-                                  cluster=cluster_key, action="stopping")
-                    try:
-                        await self.clusters.down(cluster_key, force=True)
-                    except Exception as e:
-                        self.hub.emit("job.error", job_id=job_id,
-                                      error=f"cluster stop failed: {e!r}")
+                await self._handoff_cluster(job, cluster_key)
 
-        self._finish(job, rc)
+    async def _handoff_cluster(self, job, cluster_key):
+        """Release one job's ownership and keep the fleet for its successor."""
+        job_id = job["id"]
+        try:
+            self.clusters.release(cluster_key)
+        except Exception as e:
+            self.hub.emit("job.error", job_id=job_id,
+                          error=f"lease release failed: {e!r}")
+        # The queue is known, so say what happens to the fleet rather than
+        # leaving a timer to infer it. This also covers cancellation while
+        # acquisition was in flight: acquiring a fleet must not bypass the
+        # same-cluster handoff just because the driver never spawned.
+        nxt = self.next_waiting()
+        keep = nxt is not None and self._shares_cluster(job, nxt)
+        if keep:
+            self.hub.emit("job.cluster", job_id=job_id,
+                          cluster=cluster_key, action="kept",
+                          for_job=nxt["id"])
+            return
+        self.hub.emit("job.cluster", job_id=job_id,
+                      cluster=cluster_key, action="stopping")
+        try:
+            await self.clusters.down(cluster_key, force=True)
+        except Exception as e:
+            self.hub.emit("job.error", job_id=job_id,
+                          error=f"cluster stop failed: {e!r}")
 
     def _finish(self, job, rc):
         job_id = job["id"]
@@ -412,8 +491,14 @@ class Scheduler:
             raise KeyError(job_id)
         spec = dict(job["spec"])
         spec["resume"] = bool(resume)
-        if resume and job.get("run_dir"):
+        if resume:
+            if not job.get("run_dir"):
+                raise ValueError(f"job {job_id} has no run directory to resume")
             spec["run_dir"] = job["run_dir"]
+        else:
+            # A source job may itself be a resumed job whose stored spec owns
+            # a run_dir. Fresh means fresh: let `_run` allocate a new one.
+            spec.pop("run_dir", None)
         project_id = self.db.query_one(
             "SELECT project_id FROM jobs WHERE id = ?", (job_id,))["project_id"]
         new_id = jobs.submit(self.db, project_id, spec)

@@ -201,14 +201,17 @@ def build_mcp(state) -> MCPServer:
 
     @mcp.tool()
     async def cluster_up(project: str, cluster: str,
+                         ttl_minutes: int = 60,
                          confirm_cost_usd: float | None = None) -> dict:
         """Start a cluster. The daemon keeps it up while queued jobs want it
         and stops it when none do; confirm_cost_usd must cover an hour."""
         key = f"{project}/{cluster}"
         hourly = state.clusters.estimate_hourly(key)
-        _confirm(confirm_cost_usd, hourly,
-                 f"cluster {key} for an hour")
-        await state.clusters.up(key, purpose="agent")
+        estimate = (hourly * ttl_minutes / 60 if hourly is not None else None)
+        require_confirmed_cost(estimate, confirm_cost_usd,
+                               f"cluster {key} for {ttl_minutes} minutes")
+        await state.clusters.up(key, purpose="agent",
+                                ttl_minutes=ttl_minutes)
         return {"ok": True, "est_usd_per_hr": hourly}
 
     @mcp.tool()

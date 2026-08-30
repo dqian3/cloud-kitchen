@@ -4,10 +4,8 @@ import { api } from './api.js'
 // Job states and the outcomes a done job carries, in one map: the queue
 // shows whichever applies.
 const STATE_COLORS = {
-  // `starting` is not a stored state: a job stays `waiting` while its cluster
-  // comes up, which read as idle when the daemon was in fact busy on its
-  // behalf. The daemon reports the cluster through bringing_up; this names it.
-  waiting: 'gray', starting: 'purple', running: 'blue',
+  queued: 'gray', blocked: 'orange', retrying: 'purple',
+  running: 'blue', recorded: 'gray',
   ok: 'green', degraded: 'orange', failed: 'red', canceled: 'gray',
 }
 
@@ -83,10 +81,12 @@ function fmtTs(ts) {
   return ts ? ts.replace('T', ' ').slice(5, 19) : '—'
 }
 
-// Minutes until a daemon timestamp ("YYYY-MM-DD HH:MM:SS", UTC).
-function fmtUntil(ts) {
-  const ms = Date.parse(ts.replace(' ', 'T') + 'Z') - Date.now()
-  return ms <= 0 ? 'moments' : `${Math.max(1, Math.round(ms / 60000))}m`
+function fmtResultValue(value) {
+  if (value == null) return '—'
+  if (typeof value !== 'number') return String(value)
+  if (!Number.isFinite(value)) return String(value)
+  if (Math.abs(value) >= 1000) return Math.round(value).toLocaleString()
+  return Number.isInteger(value) ? String(value) : value.toFixed(2)
 }
 
 // ---------- clusters ----------
@@ -118,6 +118,11 @@ function ClusterCard({ c, onAction }) {
             kept up for the next job
           </div>
         )}
+        {c.stop_at && (
+          <div className="muted">
+            stops in {Math.max(1, Math.ceil((c.stop_at * 1000 - Date.now()) / 60000))}m
+          </div>
+        )}
         {c.used_by && (
           <div className="muted" title="the job or user this cluster is running for">
             in use by {c.used_by}
@@ -144,7 +149,7 @@ function ClusterCard({ c, onAction }) {
           <>
             <input type="number" value={ttl} min="1"
                    onChange={e => setTtl(+e.target.value)} title="TTL minutes" />
-            <button onClick={() => onAction('up', c, null, ttl)}>up (TTL {ttl}m)</button>
+            <button onClick={() => onAction('up', c, ttl)}>up (TTL {ttl}m)</button>
           </>
         )}
         {(c.state === 'running' || c.state === 'unmanaged') && (
@@ -154,46 +159,8 @@ function ClusterCard({ c, onAction }) {
                   onClick={() => onAction('down', c)}>down</button>
         )}
         <button onClick={() => onAction('refresh', c)}>refresh VMs</button>
-        {c.create && c.state !== 'running' && !busy && !c.create.running && (
-          <button title="provision the VMs via the repo's setup script — creates instances (money); restartable, existing VMs are skipped"
-                  onClick={() => onAction('create', c)}>create VMs</button>
-        )}
-        {c.create?.running && (
-          <>
-            <span className="muted">
-              provisioning · attempt {c.create.attempt}/{c.create.max_attempts}
-              {c.create.missing?.length > 0 && ` · ${c.create.missing.length} VMs missing`}
-              {c.create.next_at &&
-                ` · next in ${Math.max(1, Math.round((c.create.next_at * 1000 - Date.now()) / 60000))}m`}
-            </span>
-            <button className="link" onClick={() => onAction('create-cancel', c)}>stop</button>
-          </>
-        )}
         {busy && <span className="muted">waiting for gcloud…</span>}
       </div>
-      {c.create && !c.create.running && c.create.missing?.length > 0 && (
-        <div className="muted" title={c.create.missing.join(', ')}>
-          provisioning stopped with {c.create.missing.length} VM(s) missing
-        </div>
-      )}
-      {c.create && (c.create.running || c.create.log_tail?.length > 0) && (
-        // Open on failure, not only while running: a create that exited
-        // non-zero left its reason folded away behind a summary that said
-        // only "exited 1", which is the least useful moment to hide it.
-        <details className="logs"
-                 open={c.create.running || (c.create.rc != null && c.create.rc !== 0)}>
-          <summary>
-            provisioning log
-            {c.create.running && <span className="muted"> · running</span>}
-            {c.create.rc != null && !c.create.running &&
-              (c.create.rc === 0
-                ? <span className="muted"> · ok</span>
-                : <span className="error"> · failed (exit {c.create.rc})</span>)}
-            <span className="muted"> · {(c.create.log_tail || []).length} lines</span>
-          </summary>
-          <pre className="log">{(c.create.log_tail || []).join('\n') || '(no output yet)'}</pre>
-        </details>
-      )}
     </div>
   )
 }
@@ -262,15 +229,19 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
     setSelected([]); setManagedCluster(''); setAfter(''); setExpanded([])
   }, [project])
 
-  const hasCatalog = catalog && !catalog.error && catalog.experiments.length > 0
+  // Maintenance actions such as figure generation are intentionally not
+  // queue experiments. Keep them out of both normal and one-off selectors.
+  const selectableExperiments = (catalog?.experiments || [])
+    .filter(e => e.name !== 'figures')
+  const hasCatalog = catalog && !catalog.error && selectableExperiments.length > 0
   // One cluster per job: selecting an experiment greys out other clusters.
   const selectedQueues = new Set(
-    (catalog?.experiments || [])
+    selectableExperiments
       .filter(e => selected.includes(e.name) && e.queue)
       .map(e => e.queue))
 
   const byQueue = {}
-  for (const e of catalog?.experiments || []) {
+  for (const e of selectableExperiments) {
     (byQueue[e.queue || 'other'] ||= []).push(e)
   }
 
@@ -381,7 +352,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
           <label>base
             <select value={base} onChange={e => setBase(e.target.value)}>
               <option value="">(none)</option>
-              {(catalog?.experiments || []).map(e2 => (
+              {selectableExperiments.map(e2 => (
                 <option key={e2.name} value={e2.name}>{e2.name}</option>
               ))}
             </select>
@@ -600,8 +571,8 @@ function shortError(e) {
   return t.length > 90 ? t.slice(0, 90) + '…' : t
 }
 
-function JobRow({ job, onChanged, reorder, onMove, queueHead }) {
-  const { notify, askText } = useUI()
+function JobRow({ job, isHead, onChanged, onMove, canMoveUp, canMoveDown }) {
+  const { notify } = useUI()
   const [open, setOpen] = useState(false)
   const [log, setLog] = useState('')
   const [tall, setTall] = useState(false)
@@ -631,84 +602,61 @@ function JobRow({ job, onChanged, reorder, onMove, queueHead }) {
     try { await fn(); onChanged() } catch (e) { notify(e.message || e, 'error') }
   }
 
+  // A job acquiring its cluster is already the active queue head even though
+  // its persisted state remains `waiting` until the driver spawns.
+  // Includes the job acquiring a cluster: it holds the slot but has not
+  // run, and the daemon hands the slot over when it is outranked.
   const waiting = job.state === 'waiting'
   const done = job.state === 'done'
-  // The wait belongs to the job that earned it and holds the queue behind
-  // it, so it is shown once, on the head.
-  const retryIn = useCountdown(
-    waiting && queueHead && job.retry_in_s != null ? job.retry_in_s : null)
+  const retryIn = useCountdown(waiting ? job.retry_in_s : null)
+  // Cluster transitions belong to the cluster cards. Queue rows describe
+  // only the head job. Everything behind it is simply queued.
   const label = done ? job.outcome
-    : (job.bringing_up ? 'starting' : job.state)
+    : isHead && job.state === 'running' ? 'running'
+      : isHead && retryIn != null ? 'retrying' : 'queued'
   const spec = job.spec
+  // Fallback keeps the indicator correct against a daemon that has not yet
+  // restarted onto the derived `will_resume` API field.
+  const willResume = job.will_resume ?? Boolean(
+    job.run_dir && (spec.resume || job.attempts > 0))
 
   return (
     <>
       <tr className="job-row" onClick={() => setOpen(!open)}>
         <td>{job.id}</td>
         <td className="mono" title={(spec.command || []).join(' ')}>
-          {spec.name || (spec.experiments || []).join(' ') || 'job'}</td>
-        <td>{spec.queue || job.project}</td>
-        <td className="mono">{spec.cluster || <span className="muted">—</span>}</td>
-        <td><Chip text={label} color={STATE_COLORS[label]} />
-          {job.attempts > 1 && !done &&
-            <span className="muted" title="driver invocations so far">
-              {' '}attempt {job.attempts}/{job.max_attempts}</span>}
-          {/* The chip says `starting` and the cluster column names which one,
-              so the old "bringing up <cluster>…" text said it a third time. */}
-          {!job.bringing_up && retryIn != null &&
-            <span className="muted" title={job.last_error || 'waiting'}>
-              {' '}{retryIn > 0 ? `retrying in ${retryIn}s` : 'retrying…'}</span>}
-          {waiting && job.last_error && (
-            // Without this a job blocked for hours reads exactly like one
-            // retrying normally: the reason was only in a tooltip.
-            <span className="error" title={job.last_error}>
-              {' '}· {shortError(job.last_error)}</span>
-          )}
-          {waiting && spec.after &&
-            <span className="muted" title="waits for that job to finish with data">
-              {' '}after #{spec.after}</span>}
-          {job.state === 'running' && job.progress?.points && (() => {
-            const p = job.progress.points
-            const total = job.progress.totals_final?.points_total
-              ?? job.progress.est_points
-            // `done` counts attempted points, failures included: a sweep
-            // whose every point errored read the same as a finished one.
-            // The measured count is the headline; the rest is shown when
-            // it is not zero, so a failing run says so on the row.
-            return (
-              <>
-                <span className="muted"> {p.ok ?? p.done}
-                  {total ? `/${total}` : ''} pts</span>
-                {p.failed > 0 &&
-                  <span className="chip chip-red" title="points that errored">
-                    {p.failed} failed</span>}
-                {p.dead > 0 &&
-                  <span className="chip chip-orange" title="points whose run died">
-                    {p.dead} dead</span>}
-              </>
-            )
-          })()}
+          {spec.name || (spec.experiments || []).join(' ') || 'job'}
+          {willResume &&
+            <span className="muted" title="continues in the existing run directory">
+              {' '}· continues existing run</span>}</td>
+        <td className="job-status"><div className="job-status-scroll">
+            <Chip text={label} color={STATE_COLORS[label]} />
+            {isHead && job.attempts > 1 && !done &&
+              <span className="muted" title="driver invocations so far">
+                {' '}attempt {job.attempts}/{job.max_attempts}</span>}
+            {isHead && retryIn != null &&
+              <span className="muted" title={job.last_error || 'waiting'}>
+                {' '}{retryIn > 0 ? `retrying in ${retryIn}s` : 'retrying…'}</span>}
+            {isHead && waiting && job.last_error && (
+              <span className="error" title={job.last_error}>
+                {' '}· {shortError(job.last_error)}</span>
+            )}
+            {isHead && waiting && spec.after &&
+              <span className="muted" title="waits for that job to finish with data">
+                {' '}after #{spec.after}</span>}
+          </div>
         </td>
+        <td className="muted">{job.priority}</td>
         <td className="muted">{fmtTs(job.created_at)}</td>
         <td onClick={e => e.stopPropagation()}>
-          {waiting && !reorder && (
-            <button className="link" title="run this next"
-                    onClick={() => onMove(job.id, 'top')}>top</button>
-          )}
-          {waiting && !reorder && (
-            // Not gated on the countdown: an attempt takes most of the retry
-            // delay, so the countdown -- and with it this button -- was
-            // visible for only a few seconds of each cycle. The daemon
-            // refuses a retry while the cluster is already coming up, and
-            // says so, which is better than the button not being there.
-            <button className="link"
-                    title="stop waiting: try this job's cluster again now"
-                    onClick={() => act(() => api.retryNow(job.id))}>retry now</button>
-          )}
-          {waiting && reorder && (
+          {waiting && (
             <>
-              <button className="link" onClick={() => onMove(job.id, 'up')}>▲</button>
-              <button className="link" onClick={() => onMove(job.id, 'down')}>▼</button>
+              <button className="link" disabled={!canMoveUp}
+                      title="raise priority"
+                      onClick={() => onMove(job.id, 'up')}>▲</button>
+              <button className="link" disabled={!canMoveDown}
+                      title="lower priority"
+                      onClick={() => onMove(job.id, 'down')}>▼</button>
             </>
           )}
           {!done && (
@@ -718,13 +666,13 @@ function JobRow({ job, onChanged, reorder, onMove, queueHead }) {
         </td>
       </tr>
       {open && (
-        <tr><td colSpan="7" className="log-cell">
+        <tr><td colSpan="6" className="log-cell">
           <div className="muted">queue {spec.queue || job.project}
             {spec.cluster && <> · lease on {spec.cluster}</>}
             {' '}· up to {job.max_attempts} attempts, {spec.retry_delay_secs}s apart
-            {spec.resume && <> · resuming</>}
+            {willResume && <> · next attempt resumes this directory</>}
           </div>
-          <div className="mono wrap">{(spec.command || []).join(' ') ||
+          <div className="mono command-line">{(spec.command || []).join(' ') ||
             (spec.experiments || []).join(' ') || '(no command)'}</div>
           {job.run_dir && <div className="muted">run dir: <code>{job.run_dir}</code></div>}
           {job.last_error &&
@@ -749,32 +697,57 @@ function JobRow({ job, onChanged, reorder, onMove, queueHead }) {
 
 // ---------- runs ledger ----------
 
-// Fallback columns for projects whose adapter advertises no display()
-// metadata; adapters that do own their column set and order.
-const POINT_METRIC_COLS = [
-  ['throughput_msgs_per_sec', 'delivered/s'],
-  ['offered_rate', 'offered/s'],
-  ['e2e_p50', 'e2e p50'],
-  ['e2e_p99', 'e2e p99'],
-]
+// A result may retain job provenance, but its status belongs to the result.
+// A waiting or resumed job must never make completed data look "waiting".
+function ResultTable({ detail, display }) {
+  const rawPoints = detail.points || []
+  if (!rawPoints.length) return <p className="muted">No indexed measurements.</p>
+  const value = (point, name) => point.dims?.[name] ?? point.metrics?.[name]
+  const dims = (display?.dims || []).filter(d => d.name !== 'max_in_flight' &&
+    rawPoints.some(p => value(p, d.name) != null))
+  const compare = (a, b) => {
+    if (a == null) return b == null ? 0 : 1
+    if (b == null) return -1
+    if (typeof a === 'number' && typeof b === 'number') return a - b
+    return String(a).localeCompare(String(b), undefined, { numeric: true })
+  }
+  const points = [...rawPoints].sort((a, b) => {
+    for (const dim of dims) {
+      const order = compare(value(a, dim.name), value(b, dim.name))
+      if (order) return order
+    }
+    return compare(a.rate, b.rate) || compare(a.trial, b.trial) || a.id - b.id
+  })
+  const metrics = (display?.metrics || [])
+    .filter(m => points.some(p => p.metrics?.[m.name] != null))
+    .sort((a, b) => (a.name === 'offered_rate' ? -1 : 0) -
+      (b.name === 'offered_rate' ? -1 : 0))
 
-function fmtNum(v) {
-  if (v == null || typeof v !== 'number') return v ?? '—'
-  return Math.abs(v) >= 1000 ? Math.round(v).toLocaleString()
-    : Math.round(v * 100) / 100
+  return (
+    <div className="table-scroll"><table className="result-points">
+      <thead><tr>
+        {dims.map(d => <th key={d.name} title={d.description}>{d.label || d.name}</th>)}
+        <th>rate</th>
+        {metrics.map(m => <th key={m.name}>{m.label || m.name}</th>)}
+      </tr></thead>
+      <tbody>{points.map(p => (
+        <tr key={p.id}>
+          {dims.map(d => <td key={d.name}>{fmtResultValue(value(p, d.name))}</td>)}
+          <td>{fmtResultValue(p.rate)}</td>
+          {metrics.map(m => <td key={m.name}>{fmtResultValue(p.metrics?.[m.name])}</td>)}
+        </tr>
+      ))}</tbody>
+    </table></div>
+  )
 }
 
-// One entry per piece of work: a finished job joined to its ledger run.
-// Either side can be missing — a job that died before producing data has no
-// run; a backfilled old run has no job — and the row says which.
-function RunEntry({ entry, display, onChanged }) {
+function RunEntry({ entry, onChanged, display }) {
   const { job, run } = entry
   const { notify, ask, askText } = useUI()
   const [open, setOpen] = useState(false)
   const [detail, setDetail] = useState(null)
   const [log, setLog] = useState(null)
   const [note, setNote] = useState('')
-  const [sortBy, setSortBy] = useState('rate')   // 'rate' | 'time'
 
   useEffect(() => {
     if (!open) return
@@ -792,63 +765,32 @@ function RunEntry({ entry, display, onChanged }) {
     } catch (e) { notify(e.message || e, 'error') }
   }
 
-  const metricCols = display?.metrics?.length
-    ? display.metrics.map(m => [m.name, m.unit ? `${m.label} (${m.unit})` : m.label])
-    : POINT_METRIC_COLS
-  const cols = detail
-    ? metricCols.filter(([k]) => detail.points.some(p => k in p.metrics))
-    : []
-  // Points arrive in the order they ran; the natural reading order is by
-  // dims, then numeric rate, then trial.
-  const points = !detail ? [] : sortBy === 'time' ? detail.points
-    : [...detail.points].sort((a, b) => {
-        const da = JSON.stringify(a.dims), db = JSON.stringify(b.dims)
-        if (da !== db) return da < db ? -1 : 1
-        const ra = a.rate ?? -Infinity, rb = b.rate ?? -Infinity
-        if (ra !== rb) return ra - rb
-        return (a.trial ?? 0) - (b.trial ?? 0)
-      })
-
-  const state = job ? (job.state === 'done' ? job.outcome : job.state)
-                    : run.status
+  const state = run.status || 'recorded'
   const chipColor = STATE_COLORS[state] || 'gray'
-  const what = job
-    ? (job.spec.name || (job.spec.experiments || []).join(' ') || 'job')
-    : run.experiment
-  const when = job ? (job.finished_at || job.created_at) : run.started_at
+  const what = run.experiment || 'result'
+  const when = run.started_at
 
   return (
     <>
       <tr className="job-row" onClick={() => setOpen(!open)}>
-        <td className="muted">{job ? `#${job.id}` : ''}{run ? ` r${run.id}` : ''}</td>
+        <td className="muted">r{run.id}</td>
         <td className="mono">{what}</td>
         <td><Chip text={state || '?'} color={chipColor} />
-          {job && job.attempts > 1 &&
-            <span className="muted" title="driver invocations"> ×{job.attempts}</span>}
-        </td>
-        <td>
-          {run
-            ? <>{run.n_points ?? 0} pts
-                {detail?.mixed_build &&
-                  <span className="chip chip-orange" title={
-                    (detail.builds || []).map(b =>
-                      `${b.started_at} ${String(b.git_commit).slice(0, 8)}`
-                      + (b.git_dirty ? ' (dirty)' : '')).join('\n')
-                  }> mixed build</span>}
-                {!run.dir_exists && <span className="muted" title="run directory deleted; metrics kept in the ledger"> · dir gone</span>}</>
-            : <span className="muted" title="no ledger entry: the job produced no summaries">no results</span>}
-          {!job && <span className="muted" title="indexed from disk; no daemon job record"> · no job record</span>}
+          {detail?.mixed_build &&
+            <span className="chip chip-orange" title={
+              (detail.builds || []).map(b =>
+                `${b.started_at} ${String(b.git_commit).slice(0, 8)}`
+                + (b.git_dirty ? ' (dirty)' : '')).join('\n')
+            }>mixed build</span>}
+          {!run.dir_exists &&
+            <span className="muted" title="result directory deleted; summary retained"> dir gone</span>}
         </td>
         <td className="muted">{fmtTs(when)}</td>
         <td>{(run?.tags || []).map(t => <Chip key={t} text={t} color="blue" />)}</td>
         <td onClick={e => e.stopPropagation()}>
-          {job && (
+          {job?.state === 'done' && (
             <button className="link" title="submit the same job again in a fresh run dir"
                     onClick={() => act(() => api.resubmit(job.id, false))}>rerun</button>
-          )}
-          {job && ['degraded', 'failed', 'canceled'].includes(job.outcome) && job.run_dir && (
-            <button className="link" title="resubmit, resuming into the same run dir"
-                    onClick={() => act(() => api.resubmit(job.id, true))}>resume</button>
           )}
           {job?.spec.sweep && (
             <button className="link" title="save this one-off's params as a preset"
@@ -862,41 +804,31 @@ function RunEntry({ entry, display, onChanged }) {
           <button className="link"
                   title="remove this entry: its ledger run and/or job record (files on disk stay; a scan re-indexes them)"
                   onClick={async () => {
-                    const what = [run && `run r${run.id}`, job && `job #${job.id}`]
-                      .filter(Boolean).join(' and ')
-                    // A failed run is only worth keeping to rerun it, so it
-                    // goes on one click; anything that produced measurements
-                    // confirms — including an imported run, which has no job
-                    // row but is somebody's data.
-                    const failed = ['failed', 'canceled']
-                      .includes(job ? job.outcome : run.status)
+                    const what = `result r${run.id}`
+                    const failed = run.status === 'failed'
                     if (!failed && !await ask(
-                          `Delete ${what} and its data in ${job?.run_dir || run?.run_dir}? `
+                          `Delete ${what} and its data in ${run.run_dir}? `
                           + 'The measurements are not recoverable.', true)) return
                     setOpen(false)
-                    await act(async () => {
-                      if (run) await api.deleteRun(run.id, true)
-                      if (job) await api.deleteJob(job.id, true)
-                    }, false)
+                    await act(() => api.deleteRun(run.id, true), false)
                     notify(`deleted ${what} and its data`)
                   }}>delete</button>
         </td>
       </tr>
       {open && (
-        <tr><td colSpan="7" className="log-cell">
+        <tr><td colSpan="6" className="log-cell">
           {job && (
             <div className="muted">job #{job.id} · queue {job.spec.queue || job.project}
               {job.spec.cluster && <> · lease on {job.spec.cluster}</>}
               {job.run_dir && <> · dir <code>{job.run_dir}</code></>}
-              <div className="mono wrap">{(job.spec.command || []).join(' ') ||
+              <div className="mono command-line">{(job.spec.command || []).join(' ') ||
                 (job.spec.experiments || []).join(' ')}</div>
             </div>
           )}
-          {!job && run && <div className="muted">dir: <code>{run.run_dir}</code>
+          {!job && <div className="muted">dir: <code>{run.run_dir}</code>
             {run.git_commit && <> · commit <code>{run.git_commit.slice(0, 10)}</code></>}</div>}
-          {job?.progress && <ProgressPanel p={job.progress} />}
-          {run && detail === null && <p className="muted">loading results…</p>}
-          {run && detail && (
+          {detail === null && <p className="muted">loading result…</p>}
+          {detail && (
             <>
               <div className="run-actions" onClick={e => e.stopPropagation()}>
                 <input placeholder="add note (why it ran, what it showed)"
@@ -921,38 +853,7 @@ function RunEntry({ entry, display, onChanged }) {
                   ))}
                 </ul>
               )}
-              {detail.points.length === 0
-                ? <p className="muted">no points recorded</p>
-                : <table className="points">
-                    <thead><tr>
-                      <th>dims</th>
-                      <th>rate
-                        <button className="link" title="toggle point order: by rate or by when they ran"
-                                onClick={e => { e.stopPropagation(); setSortBy(sortBy === 'rate' ? 'time' : 'rate') }}>
-                          {sortBy === 'rate' ? '↑' : '⏱'}</button>
-                      </th><th>trial</th>
-                      {cols.map(([k, label]) => <th key={k}>{label}</th>)}
-                      <th></th>
-                    </tr></thead>
-                    <tbody>
-                      {points.map(p => (
-                        <tr key={p.id}>
-                          <td className="mono">{Object.entries(p.dims)
-                            .map(([k, v]) => `${k}=${v}`).join(' ') || '—'}</td>
-                          <td>{fmtNum(p.rate)}</td>
-                          <td>{p.trial ?? ''}</td>
-                          {cols.map(([k]) => <td key={k}>{fmtNum(p.metrics[k])}</td>)}
-                          <td>
-                            {p.metrics.status && <Chip text={p.metrics.status}
-                              color={p.metrics.status === 'dead' ? 'orange' : 'red'} />}
-                            <details className="raw"><summary>raw</summary>
-                              <pre>{JSON.stringify(p.metrics, null, 1)}</pre>
-                            </details>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>}
+              <ResultTable detail={detail} display={display} />
             </>
           )}
           {job && (
@@ -971,9 +872,9 @@ function RunEntry({ entry, display, onChanged }) {
   )
 }
 
-function RunsSection({ projects, entries, display, onChanged }) {
+function RunsSection({ projects, entries, onChanged, display }) {
   const [scanBusy, setScanBusy] = useState(false)
-  const { notify, ask } = useUI()
+  const { notify } = useUI()
 
   async function scan(name) {
     setScanBusy(true)
@@ -986,42 +887,27 @@ function RunsSection({ projects, entries, display, onChanged }) {
 
   return (
     <section>
-      <h2>Runs
+      <h2>Results
         {projects.map(p => (
           <button key={p.name} className="link" disabled={scanBusy}
                   title={`index existing run dirs under ${p.name}'s runs roots`}
                   onClick={() => scan(p.name)}>scan {p.name}</button>
         ))}
-        {projects.map(p => (
-          <button key={`purge-${p.name}`} className="link"
-                  title="delete failed, canceled, and interrupted jobs (ledger runs are kept)"
-                  onClick={async () => {
-                    if (!await ask(`Delete ${p.name}'s failed, canceled, and `
-                                   + 'interrupted jobs and everything they wrote?', true)) return
-                    try {
-                      const r = await api.purgeJobs(p.name); onChanged()
-                      notify(`purged ${r.purged.length} job(s)`
-                             + (r.removed_dirs.length ? `, ${r.removed_dirs.length} run dir(s)` : ''))
-                    }
-                    catch (e) { notify(e.message || e, 'error') }
-                  }}>purge failed</button>
-        ))}
       </h2>
       {!entries.length
-        ? <p className="muted">No finished jobs or recorded runs yet — use scan to
-            index old run dirs.</p>
-        : <table>
+        ? <p className="muted">No recorded results yet — use scan to index old result directories.</p>
+        : <div className="table-scroll"><table>
             <thead><tr>
               <th>id</th><th>experiment</th><th>status</th>
-              <th>results</th><th>when</th><th>tags</th><th></th>
+              <th>when</th><th>tags</th><th></th>
             </tr></thead>
             <tbody>
               {entries.map(e => (
-                <RunEntry key={e.job ? `j${e.job.id}` : `r${e.run.id}`}
-                          entry={e} display={display} onChanged={onChanged} />
+                <RunEntry key={`r${e.run.id}`}
+                          entry={e} onChanged={onChanged} display={display} />
               ))}
             </tbody>
-          </table>}
+          </table></div>}
     </section>
   )
 }
@@ -1099,8 +985,7 @@ function Dashboard() {
     try { localStorage.setItem('ck-project', name) } catch { /* ignore */ }
   }
 
-  // The catalog (experiments + adapter display metadata) feeds both the
-  // submit form and the runs table's metric columns.
+  // The catalog feeds the submit form.
   useEffect(() => {
     if (!selected) return
     setCatalog(null)
@@ -1114,6 +999,10 @@ function Dashboard() {
         api.jobs(), api.clusters(), api.runs(), api.health()])
       setJobs(j); setClusters(c); setRuns(r); setHealth(h)
     } catch { /* daemon down; the SSE handler flips the dot */ }
+  }, [])
+
+  const reloadClusters = useCallback(() => {
+    api.clusters().then(setClusters).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -1140,30 +1029,24 @@ function Dashboard() {
     }
     connect()
     const poll = setInterval(reload, 30000)
+    const clusterPoll = setInterval(reloadClusters, 5000)
     return () => {
       stopped = true
       if (es) es.close()
       clearTimeout(retry)
       clearInterval(poll)
+      clearInterval(clusterPoll)
     }
-  }, [reload])
+  }, [reload, reloadClusters])
 
-  async function clusterAction(kind, c, lease, ttl) {
+  async function clusterAction(kind, c, ttl) {
     try {
       if (kind === 'up') await api.clusterUp(c.key, ttl || 120)
       else if (kind === 'down') {
-        if (c.leases.length &&
-            !await ask(`${c.key} has live leases — force it down?`, true)) return
-        await api.clusterDown(c.key, c.leases.length > 0)
+        if (c.used_by &&
+            !await ask(`${c.key} is in use by ${c.used_by} — force it down?`, true)) return
+        await api.clusterDown(c.key, Boolean(c.used_by))
       } else if (kind === 'refresh') await api.clusterRefresh(c.key)
-      else if (kind === 'create') {
-        if (!await ask(`Provision ${c.key}'s VMs? This CREATES instances `
-                       + '(billed). Existing VMs are skipped.')) return
-        await api.clusterCreate(c.key)
-        notify(`provisioning ${c.key}`)
-      } else if (kind === 'create-cancel') {
-        await api.clusterCreateCancel(c.key)
-      }
       reload()
     } catch (e) { notify(e.message || e, 'error') }
   }
@@ -1175,35 +1058,27 @@ function Dashboard() {
   const inFlight = j => j.state !== 'done'
   // Queue shows dispatch order: running/starting first, then queued by
   // priority (high first) and age.
-  const rank = j => j.state === 'running' ? 0 : 1
+  const rank = j => (j.state === 'running' || j.bringing_up) ? 0 : 1
   const active = projJobs.filter(inFlight).sort((a, b) =>
     rank(a) - rank(b) || (b.priority - a.priority) || (a.id - b.id))
-  const done = projJobs.filter(j => !inFlight(j))
   const projClusters = clusters.filter(c => c.project === selected)
   const projRuns = runs.filter(r => r.project === selected)
   const projInfo = projects.find(p => p.name === selected)
 
-  // Finished jobs joined to their ledger runs, plus runs with no job.
-  const runByJob = {}
-  for (const r of projRuns) if (r.job_id) runByJob[r.job_id] = r
-  // A run whose job is still queued belongs here too: a job that measured
-  // points and went back to waiting (a resume, a partial sweep) had its data
-  // in neither list -- not a finished job, not an orphan run -- so it simply
-  // did not appear.
-  const doneIds = new Set(done.map(j => j.id))
-  const entries = [
-    ...done.map(j => ({ job: j, run: runByJob[j.id] || null })),
-    ...projRuns.filter(r => !r.job_id || !doneIds.has(r.job_id))
-      .map(r => ({ job: null, run: r })),
-  ].sort((a, b) => {
-    const ta = a.job ? (a.job.finished_at || a.job.created_at) : a.run.started_at
-    const tb = b.job ? (b.job.finished_at || b.job.created_at) : b.run.started_at
-    return (tb || '').localeCompare(ta || '')
-  })
+  // Results are results, not job-history rows. A job reference is retained
+  // only as provenance for the details panel.
+  const jobById = Object.fromEntries(projJobs.map(j => [j.id, j]))
+  const entries = projRuns
+    .map(r => ({ job: jobById[r.job_id] || null, run: r }))
+    .sort((a, b) => (b.run.started_at || '').localeCompare(a.run.started_at || ''))
 
-  const [reorder, setReorder] = useState(false)
   async function moveJob(id, how) {
-    const queued = active.filter(j => j.state === 'waiting').map(j => j.id)
+    // The cluster-acquiring job is included: it owns the queue slot but has
+    // not started, so the daemon can still hand the slot (and the fleet) to
+    // whoever this reorder puts in front of it. A running job cannot move.
+    const queued = active
+      .filter(j => j.state === 'waiting')
+      .map(j => j.id)
     const i = queued.indexOf(id)
     if (i < 0) return
     let order = [...queued]
@@ -1270,9 +1145,18 @@ function Dashboard() {
 
       <section>
         <h2>Queue
-          {active.some(j => j.state === 'waiting') && (
-            <button className="link" onClick={() => setReorder(!reorder)}>
-              {reorder ? 'done' : 'reorder'}</button>
+          {selected && (
+            <button className="link"
+                    title="delete failed, canceled, and interrupted jobs; results are kept"
+                    onClick={async () => {
+                      if (!await ask(`Delete ${selected}'s failed, canceled, and `
+                                     + 'interrupted jobs and their working directories?', true)) return
+                      try {
+                        const r = await api.purgeJobs(selected); reload()
+                        notify(`purged ${r.purged.length} job(s)`
+                          + (r.removed_dirs.length ? `, ${r.removed_dirs.length} directories` : ''))
+                      } catch (e) { notify(e.message || e, 'error') }
+                    }}>purge failed</button>
           )}
         </h2>
         {selected && (
@@ -1281,41 +1165,35 @@ function Dashboard() {
                       catalog={catalog}
                       onSubmitted={reload} />
         )}
-        <JobTable jobs={active} onChanged={reload} reorder={reorder}
+        <JobTable jobs={active} onChanged={reload}
                   onMove={moveJob} empty="Nothing queued or running." />
       </section>
 
       <RunsSection projects={projects.filter(p => p.name === selected)}
-                   entries={entries} display={catalog?.display}
-                   onChanged={reload} />
+                   entries={entries} onChanged={reload} display={catalog?.display} />
 
       <DaemonLog />
     </div>
   )
 }
 
-function JobTable({ jobs, onChanged, empty, reorder, onMove }) {
+function JobTable({ jobs, onChanged, empty, onMove }) {
   if (!jobs.length) return <p className="muted">{empty}</p>
+  const movable = jobs.filter(j => j.state === 'waiting')
+  const movableIndex = Object.fromEntries(movable.map((j, i) => [j.id, i]))
   return (
-    <table>
+    <div className="queue-table"><table>
       <thead><tr>
-        <th>id</th><th>experiments</th><th>queue</th><th>cluster</th>
-        <th>state</th><th>created</th><th></th>
+        <th>id</th><th>experiment</th>
+        <th>state</th><th>priority</th><th>created</th><th></th>
       </tr></thead>
       <tbody>
-        {(() => {
-          // First waiting job of each queue: the one the queue's wait is about.
-          const heads = new Set()
-          const seen = new Set()
-          for (const j of jobs) {
-            const q = j.queue || j.project
-            if (j.state === 'waiting' && !seen.has(q)) { seen.add(q); heads.add(j.id) }
-          }
-          return jobs.map(j => <JobRow key={j.id} job={j} onChanged={onChanged}
-                                      reorder={reorder} onMove={onMove}
-                                      queueHead={heads.has(j.id)} />)
-        })()}
+        {jobs.map((j, i) => <JobRow key={j.id} job={j} isHead={i === 0}
+                                  onChanged={onChanged} onMove={onMove}
+                                  canMoveUp={movableIndex[j.id] > 0}
+                                  canMoveDown={movableIndex[j.id] >= 0 &&
+                                    movableIndex[j.id] < movable.length - 1} />)}
       </tbody>
-    </table>
+    </table></div>
   )
 }

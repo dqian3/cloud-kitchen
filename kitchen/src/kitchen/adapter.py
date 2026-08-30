@@ -11,7 +11,7 @@ onto the right queue (one queue per cluster bucket, so experiments that share
 a cluster serialize). Later versions add run-native execution.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 

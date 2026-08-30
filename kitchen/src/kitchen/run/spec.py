@@ -35,6 +35,14 @@ class SweepSpec:
     condition and is not retried unless retry_dead is set, for the runs where
     an infra flake can masquerade as a dead protocol.
 
+    abort_on_error stops the experiment at the first point that ends in error
+    once its retries are spent, instead of carrying on to the next rate. A
+    rate search reads an errored point as "no result" and keeps climbing, so
+    without this a broken cluster produces a full grid of points at rates the
+    search chose from failures — hours of cluster time for a curve that cannot
+    be drawn. Points already on disk and reused by `resume` do not trip it:
+    resuming is how you fill in the gaps after giving up.
+
     resume_required_keys: a summary.json only counts as complete if these
     keys are present and non-None. None picks a default: the search-critical
     keys when searching (replaying a degenerate point would feed the search
@@ -56,6 +64,7 @@ class SweepSpec:
     resume: bool = False
     max_attempts: int = 1
     retry_dead: bool = False
+    abort_on_error: bool = False
     pause_secs: float = 0.0
     resume_required_keys: tuple[str, ...] | None = None
     coupled: tuple[tuple[str, ...], ...] = ()
