@@ -9,7 +9,7 @@ import pytest
 
 from kitchen.remote.mock import MockRemote
 from kitchend.core.clusters import ClusterManager, ManagedCluster
-from kitchend.core.db import open_db
+from kitchend.core.db import Db, open_db
 
 
 class FakeDb:
@@ -143,3 +143,39 @@ def test_unknown_old_schema_is_not_destroyed(tmp_path):
         assert conn.execute("SELECT value FROM important").fetchone()[0] == "keep me"
     finally:
         conn.close()
+
+
+# --- every gcloud cluster names its project -------------------------------
+
+def _registry(tmp_path, cluster_project, platform="gcloud"):
+    from kitchend.config import ClusterConfig, Config, ProjectConfig
+    yaml = tmp_path / "cluster.yaml"
+    yaml.write_text(f"platform: {platform}\nvms: [vm-a]\n")
+    project = ProjectConfig(
+        name="p", repo_path=tmp_path,
+        clusters=(ClusterConfig(name="c", config="cluster.yaml",
+                                hourly_usd=1.0, gcp_project=cluster_project),))
+    config = Config(db_path=tmp_path / "db.sqlite3",
+                    jobs_dir=tmp_path / "jobs", projects=(project,))
+    value = ClusterManager.__new__(ClusterManager)
+    value.config = config
+    value.db = Db(config.db_path)
+    value.hub = FakeHub()
+    value.clusters = {}
+    value._build_registry()
+    return value
+
+
+def test_gcloud_cluster_without_a_project_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="no gcp_project"):
+        _registry(tmp_path, cluster_project=None)
+
+
+def test_docker_cluster_needs_no_project(tmp_path):
+    mgr = _registry(tmp_path, cluster_project=None, platform="docker")
+    assert "p/c" in mgr.clusters
+
+
+def test_cluster_project_is_not_inherited_from_anywhere(tmp_path):
+    mgr = _registry(tmp_path, cluster_project="proj-x")
+    assert mgr.clusters["p/c"].remote.project == "proj-x"

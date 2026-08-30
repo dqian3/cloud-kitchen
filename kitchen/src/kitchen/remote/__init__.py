@@ -41,9 +41,8 @@ def load_remote(config, settings: RemoteSettings | None = None):
     settings = settings or get_default_settings()
     platform = _cfg_get(config, "platform")
     if platform == "gcloud":
-        # A config may still name either explicitly -- useful for a cluster in
-        # a different account, e.g. one whose VMs do have public addresses --
-        # but it does not have to, and checked-in configs deliberately do not.
+        # The cluster config names its project, beside the VM names it names.
+        # `settings` is only the fallback for a caller with no config file.
         project = _cfg_get(config, "project") or settings.gcp_project
         if not project:
             # Never fall through to gcloud's ambient project: the VMs named in

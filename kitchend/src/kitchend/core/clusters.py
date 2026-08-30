@@ -159,12 +159,6 @@ class ClusterManager:
     def _build_registry(self):
         for p in self.config.projects:
             for c in p.clusters:
-                # A cluster may live in its own GCP project: a fleet rebuilt
-                # elsewhere moves without dragging its siblings along.
-                settings = RemoteSettings(
-                    gcp_project=c.gcp_project or p.gcp_project,
-                    tunnel_through_iap=p.tunnel_through_iap,
-                )
                 key = f"{p.name}/{c.name}"
                 config_path = p.repo_path / c.config
                 row = self.db.query_one(
@@ -183,6 +177,29 @@ class ClusterManager:
                     platform, raw = platform_from_yaml(config_path)
                 except OSError:
                     platform, raw = "gcloud", {}
+                # The GCP project comes from the cluster YAML, beside the VM
+                # names it applies to and from the same key the driver reads,
+                # so the daemon and the driver cannot disagree about which
+                # fleet these names refer to. config.toml may name one for a
+                # YAML that does not; there is no wider default, because an
+                # unset project falls through to whatever gcloud is pointed
+                # at and that answers as though the VMs had been deleted.
+                yaml_project = raw.get("project")
+                if (yaml_project and c.gcp_project
+                        and yaml_project != c.gcp_project):
+                    raise ValueError(
+                        f"cluster {key} names project {yaml_project} in "
+                        f"{config_path.name} but {c.gcp_project} in "
+                        f"config.toml; they address different fleets")
+                project = yaml_project or c.gcp_project
+                if platform != "docker" and not project:
+                    raise ValueError(
+                        f"cluster {key} has no project; name it as `project:` "
+                        f"in {config_path.name}")
+                settings = RemoteSettings(
+                    gcp_project=project,
+                    tunnel_through_iap=p.tunnel_through_iap,
+                )
                 # Cluster management opens sessions too: arming the dead-man
                 # switch is an ssh to every VM, and the keep-alive repeats it
                 # every 30 minutes. On a 102-VM fleet that is one gcloud
