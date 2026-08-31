@@ -13,12 +13,14 @@
     kitchend cancel JOB_ID              cancel a waiting/running job
     kitchend resubmit JOB_ID            resubmit into the same run dir
     kitchend retry JOB_ID               stop waiting, try it now
+    kitchend restart [--force]          safely restart the user daemon
     kitchend clusters                   cluster states, VMs, burn
     kitchend spend [--days N]           what the clusters cost: probes vs runs
 """
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 import urllib.error
@@ -204,6 +206,33 @@ def cmd_retry(config, args):
     print(f"#{args.job_id} due now")
 
 
+def _restart_blockers(config):
+    """Jobs whose work or cluster lease a restart would interrupt."""
+    running = _api(config, "/api/jobs?state=running&limit=1000")
+    waiting = _api(config, "/api/jobs?state=waiting&limit=1000")
+    return running + [j for j in waiting if j.get("bringing_up")]
+
+
+def cmd_restart(config, args):
+    """Restart through the guarded operator path.
+
+    A job waiting for cluster bring-up already owns the scheduler slot and
+    capacity attempt, so it is just as active as a spawned driver here.
+    """
+    if not args.force:
+        blockers = _restart_blockers(config)
+        if blockers:
+            details = ", ".join(
+                f"#{j['id']} ({j.get('display_state') or j['state']})"
+                for j in blockers)
+            raise SystemExit(
+                f"refusing restart: active job(s) {details}; "
+                "wait for completion or pass --force")
+    subprocess.run(
+        ["systemctl", "--user", "restart", "kitchend.service"], check=True)
+    print("kitchend.service restarted")
+
+
 def cmd_resubmit(config, args):
     out = _api(config, f"/api/jobs/{args.job_id}/resubmit",
                body={"resume": not args.fresh})
@@ -303,6 +332,11 @@ def main(argv=None):
                        "and any cluster cooldown holding it")
     p.add_argument("job_id", type=int)
 
+    p = sub.add_parser("restart", help="restart the user daemon; refuses while "
+                       "a job is running or bringing up a cluster")
+    p.add_argument("--force", action="store_true",
+                   help="restart even if active work will be interrupted")
+
     p = sub.add_parser("resubmit", help="resubmit a finished job")
     p.add_argument("job_id", type=int)
     p.add_argument("--fresh", action="store_true",
@@ -345,6 +379,7 @@ def main(argv=None):
         "submit-argv": cmd_submit_argv, "jobs": cmd_jobs,
         "watch": cmd_watch, "log": cmd_log, "cancel": cmd_cancel,
         "resubmit": cmd_resubmit, "retry": cmd_retry,
+        "restart": cmd_restart,
         "clusters": cmd_clusters,
         "spend": cmd_spend,
         "purge": cmd_purge,

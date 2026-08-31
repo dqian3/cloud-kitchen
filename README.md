@@ -32,6 +32,17 @@ uv run --project kitchend kitchend serve                      # daemon on :8321
 uv run --project kitchend kitchend status
 ```
 
+Restart the installed user service through the guarded CLI:
+
+```bash
+uv run --project kitchend kitchend restart
+```
+
+It refuses while a driver is running or a job is bringing up a cluster.
+`--force` is required to knowingly interrupt active work. Avoid invoking
+`systemctl --user restart kitchend.service` directly because it bypasses this
+check.
+
 Daemon config: `~/.cloud-kitchen/config.toml` (see `kitchend/src/kitchend/config.py`
 for the format). State (SQLite DB, cluster state, archives) lives under
 `~/.cloud-kitchen/`.
