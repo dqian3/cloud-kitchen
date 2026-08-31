@@ -258,6 +258,31 @@ def build_mcp(state) -> MCPServer:
         return result
 
     @mcp.tool()
+    def retry_run_point(run_id: int, point_id: int,
+                        est_hours: float | None = None,
+                        confirm_cost_usd: float | None = None) -> dict:
+        """Overwrite one anomalous point using its existing dims/rate/trial.
+
+        Get point_id from get_run. The queued job reuses the result directory,
+        runs only that identity, and replaces it in summary and sweep results.
+        """
+        run = ledger.get_run(state.db, run_id)
+        if run is None:
+            raise ValueError(f"no run {run_id}")
+        source = (jobs.get(state.db, run.get("job_id"))
+                  if run.get("job_id") is not None else None)
+        if source is None:
+            raise ValueError(f"run {run_id} has no source job to resume")
+        project_cfg = _project(run["project"])
+        estimate = _job_cost_estimate(state, project_cfg, source["spec"],
+                                      est_hours)
+        require_confirmed_cost(estimate, confirm_cost_usd,
+                               f"retry point {point_id} in run {run_id}")
+        result = state.scheduler.retry_point(run_id, point_id)
+        result["estimate_usd"] = estimate
+        return result
+
+    @mcp.tool()
     def add_run_note(run_id: int, text: str) -> dict:
         """Attach a note to a run — why it ran, what it showed."""
         if ledger.get_run(state.db, run_id) is None:

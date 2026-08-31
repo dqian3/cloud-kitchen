@@ -309,6 +309,17 @@ def add_trials(run_id: int, body: TrialsAdd, request: Request):
         raise HTTPException(409, str(e))
 
 
+@router.post("/runs/{run_id}/points/{point_id}/retry")
+def retry_point(run_id: int, point_id: int, request: Request):
+    """Rerun and overwrite one exact dimension/rate/trial identity."""
+    try:
+        return request.app.state.scheduler.retry_point(run_id, point_id)
+    except KeyError:
+        raise HTTPException(404, f"no run {run_id}")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+
+
 class NoteAdd(BaseModel):
     text: str
 

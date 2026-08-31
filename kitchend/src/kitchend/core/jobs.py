@@ -378,6 +378,35 @@ def added_trials_spec(source: dict, run_dir: str, trials: int,
     return spec
 
 
+def retried_point_spec(source: dict, run_dir: str, point: dict) -> dict:
+    """Copy a job spec and target one existing point for replacement."""
+    trial = point.get("trial")
+    if trial is None or int(trial) < 0:
+        raise ValueError("point has no safe numbered trial to retry")
+    target = {"dims": point.get("dims") or {}, "rate": point.get("rate"),
+              "trial": int(trial)}
+    spec = dict(source)
+    argv = list(spec.get("command") or ()) + list(spec.get("extra_flags") or ())
+    if not argv:
+        raise ValueError("source job has no canonical command")
+    for flag in ("--trials", "--trial-offset", "--retry-point"):
+        argv = _without_cli_option(argv, flag)
+    argv = _set_cli_option(argv, "--trials", 1)
+    argv = _set_cli_option(argv, "--trial-offset", int(trial))
+    spec["command"] = _set_cli_option(
+        argv, "--retry-point", json.dumps(target, separators=(",", ":"),
+                                           sort_keys=True))
+    spec.pop("driver_args", None)
+    spec.pop("extra_flags", None)
+    spec.pop("after", None)
+    spec["run_dir"] = str(run_dir)
+    spec["resume"] = True
+    base_name = source.get("name") or "experiment"
+    spec["name"] = f"{base_name} (retry point trial {trial})"
+    spec["retried_point"] = target
+    return spec
+
+
 def _set_cli_option(argv: list, flag: str, value) -> list:
     """Set the last-value-wins form of a CLI option without stale repeats."""
     return _without_cli_option(argv, flag) + [flag, str(value)]

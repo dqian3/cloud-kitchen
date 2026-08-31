@@ -550,3 +550,37 @@ class Scheduler:
         self.wake()
         return {"job_id": new_id, "run_id": run_id, "trials": trials,
                 "trial_offset": offset, "parent": source_id}
+
+    def retry_point(self, run_id: int, point_id: int) -> dict:
+        """Queue one exact existing point to overwrite in its result dir."""
+        run = ledger.get_run(self.db, run_id)
+        if run is None:
+            raise KeyError(run_id)
+        if not run.get("dir_exists"):
+            raise ValueError(f"run {run_id} no longer has a result directory")
+        point = next((p for p in run["points"] if p["id"] == point_id), None)
+        if point is None:
+            raise ValueError(f"point {point_id} does not belong to run {run_id}")
+        source_id = run.get("job_id")
+        source = jobs.get(self.db, source_id) if source_id is not None else None
+        if source is None or not source.get("run_dir"):
+            raise ValueError(f"run {run_id} has no source job to resume")
+        if source["state"] != jobs.DONE:
+            raise ValueError(f"run {run_id}'s job {source_id} is still {source['state']}")
+        if len(source["spec"].get("experiments") or []) > 1:
+            raise ValueError("the source job contains multiple experiments")
+        pending = self.db.query_one(
+            "SELECT id FROM jobs WHERE run_dir = ? AND state != 'done' "
+            "ORDER BY id DESC LIMIT 1", (source["run_dir"],))
+        if pending:
+            raise ValueError(f"job {pending['id']} is already extending this result")
+        spec = jobs.retried_point_spec(source["spec"], source["run_dir"], point)
+        project_id = self.db.query_one(
+            "SELECT project_id FROM jobs WHERE id = ?", (source_id,))["project_id"]
+        new_id = jobs.submit(self.db, project_id, spec)
+        self.hub.emit("job.state", job_id=new_id, state=jobs.WAITING,
+                      retry_point_in=run_id, point_id=point_id)
+        self.wake()
+        return {"job_id": new_id, "run_id": run_id, "point_id": point_id,
+                "point": {"dims": point["dims"], "rate": point["rate"],
+                          "trial": point["trial"]}, "parent": source_id}

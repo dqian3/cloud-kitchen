@@ -582,7 +582,7 @@ function JobRow({ job, isHead, onChanged, onMove, canMoveUp, canMoveDown }) {
 
 // A result may retain job provenance, but its status belongs to the result.
 // A waiting or resumed job must never make completed data look "waiting".
-function ResultTable({ detail, display }) {
+function ResultTable({ detail, display, onRetryPoint }) {
   const rawPoints = detail.points || []
   if (!rawPoints.length) return <p className="muted">No indexed measurements.</p>
   const value = (point, name) => point.dims?.[name] ?? point.metrics?.[name]
@@ -612,12 +612,16 @@ function ResultTable({ detail, display }) {
         {dims.map(d => <th key={d.name} title={d.description}>{d.label || d.name}</th>)}
         <th>rate</th>
         {metrics.map(m => <th key={m.name}>{m.label || m.name}</th>)}
+        {onRetryPoint && <th></th>}
       </tr></thead>
       <tbody>{points.map(p => (
         <tr key={p.id}>
           {dims.map(d => <td key={d.name}>{fmtResultValue(value(p, d.name))}</td>)}
           <td>{fmtResultValue(p.rate)}</td>
           {metrics.map(m => <td key={m.name}>{fmtResultValue(p.metrics?.[m.name])}</td>)}
+          {onRetryPoint && <td><button className="link" title={
+            `overwrite this exact point (trial ${p.trial})`}
+            onClick={() => onRetryPoint(p)}>retry point</button></td>}
         </tr>
       ))}</tbody>
     </table></div>
@@ -752,7 +756,16 @@ function RunEntry({ entry, onChanged, display }) {
                   ))}
                 </ul>
               )}
-              <ResultTable detail={detail} display={display} />
+              <ResultTable detail={detail} display={display}
+                onRetryPoint={canAddTrials ? async p => {
+                  const label = Object.entries(p.dims || {})
+                    .map(([k, v]) => `${k}=${v}`).join(', ')
+                  if (!await ask(`Overwrite ${label}${label ? ', ' : ''}`
+                    + `rate=${p.rate}, trial=${p.trial}?`, true)) return
+                  if (await act(() => api.retryPoint(run.id, p.id))) {
+                    notify(`queued retry for trial ${p.trial}`)
+                  }
+                } : null} />
             </>
           )}
           {job && (

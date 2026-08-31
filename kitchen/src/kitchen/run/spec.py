@@ -68,6 +68,7 @@ class SweepSpec:
     pause_secs: float = 0.0
     resume_required_keys: tuple[str, ...] | None = None
     coupled: tuple[tuple[str, ...], ...] = ()
+    retry_point: dict | None = None
 
     def __post_init__(self):
         if self.rates and self.search is not None:
@@ -76,6 +77,13 @@ class SweepSpec:
             raise ValueError(f"{self.name}: trials must be >= 1")
         if self.max_attempts < 1:
             raise ValueError(f"{self.name}: max_attempts must be >= 1")
+        if self.retry_point is not None:
+            dims = self.retry_point.get("dims")
+            if not isinstance(dims, dict) or set(dims) != set(self.dims):
+                raise ValueError(f"{self.name}: retry point dimensions must be "
+                                 f"exactly {list(self.dims)}")
+            if self.retry_point.get("trial") is None:
+                raise ValueError(f"{self.name}: retry point needs a trial")
         seen: set[str] = set()
         for group in self.coupled:
             if len(group) < 2:
@@ -131,6 +139,8 @@ class SweepSpec:
 
     def est_points(self) -> int | None:
         """Total points, or None when a rate search makes it unknowable."""
+        if self.retry_point is not None:
+            return 1
         if self.search is not None:
             return None
         return self.trials * self.n_combos() * (len(self.rates) or 1)

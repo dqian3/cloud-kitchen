@@ -31,6 +31,9 @@ export const api = {
   addTrials: (id, trials) =>
     req(`/api/runs/${id}/trials`, {
       method: 'POST', body: JSON.stringify({ trials }) }),
+  retryPoint: (runId, pointId) =>
+    req(`/api/runs/${runId}/points/${pointId}/retry`, {
+      method: 'POST', body: '{}' }),
   deleteJob: (id, files = false) =>
     req(`/api/jobs/${id}?delete_files=${files}`, { method: 'DELETE' }),
   deleteRun: (id, files = false) =>

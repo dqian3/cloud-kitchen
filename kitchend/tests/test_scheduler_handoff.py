@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from kitchend.config import Config, ProjectConfig
 from kitchend.core import jobs
@@ -199,6 +200,37 @@ def test_add_trials_rejects_parallel_extension(tmp_path):
         assert False, "expected a parallel extension to be rejected"
     except ValueError as e:
         assert "already extending" in str(e)
+
+
+def test_retry_point_targets_exact_existing_identity(tmp_path):
+    scheduler, db, _, project_id = setup_scheduler(tmp_path, exit_code=0)
+    job_dir = tmp_path / "existing-result"
+    sweep_dir = job_dir / "exp"
+    sweep_dir.mkdir(parents=True)
+    source = jobs.submit(db, project_id, {
+        "project": "p", "name": "exp",
+        "command": ["fake-driver", "--rates", "1000", "2000"],
+        "run_dir": str(job_dir),
+    })
+    jobs.finish(db, scheduler.hub, source, jobs.OK)
+    run_id = db.insert(
+        "INSERT INTO runs (project_id, run_dir, experiment, job_id) "
+        "VALUES (?, ?, ?, ?)",
+        (project_id, str(sweep_dir), "exp", source))
+    point_id = db.insert(
+        "INSERT INTO run_points (run_id, dims_json, rate, trial, metrics_json) "
+        "VALUES (?, ?, 2000, 3, '{}')", (run_id, '{"gamma":1.2}'))
+
+    result = scheduler.retry_point(run_id, point_id)
+    queued = jobs.get(db, result["job_id"])
+    argv, _ = jobs.build_command(scheduler.config.project("p"), queued["spec"])
+
+    assert queued["run_dir"] == str(job_dir)
+    assert argv[argv.index("--trials") + 1] == "1"
+    assert argv[argv.index("--trial-offset") + 1] == "3"
+    target = json.loads(argv[argv.index("--retry-point") + 1])
+    assert target == {"dims": {"gamma": 1.2}, "rate": 2000.0, "trial": 3}
+    assert "--resume" in argv
 
 
 def test_global_pause_survives_daemon_restart(tmp_path):

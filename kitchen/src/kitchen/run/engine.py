@@ -255,7 +255,13 @@ class SweepEngine:
             searched = SearchedRates(sweep_dir) if spec.search else None
             for trial in range(spec.trial_offset,
                                spec.trial_offset + spec.trials):
+                if spec.retry_point is not None \
+                        and trial != spec.retry_point["trial"]:
+                    continue
                 for dims in spec.combos():
+                    if spec.retry_point is not None \
+                            and dims != spec.retry_point["dims"]:
+                        continue
                     self._run_combo(ctx, searched, dims, trial, result)
         except KeyboardInterrupt:
             self._write_results(sweep_dir, result, spec)
@@ -302,6 +308,10 @@ class SweepEngine:
 
     def _run_combo(self, ctx, searched, dims, trial, result) -> None:
         spec = ctx.spec
+        if spec.retry_point is not None:
+            self._run_point(ctx, dims, spec.retry_point.get("rate"), trial,
+                            result)
+            return
         if spec.search is None:
             for rate in (spec.rates or (None,)):
                 self._run_point(ctx, dims, rate, trial, result)
@@ -345,7 +355,7 @@ class SweepEngine:
             tags["rate"] = rate
         tags["trial"] = trial
 
-        if spec.resume:
+        if spec.resume and spec.retry_point is None:
             required = spec.resume_required_keys
             if required is None:
                 required = SEARCH_REQUIRED_KEYS if spec.search else ()
