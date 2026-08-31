@@ -10,7 +10,9 @@ raised — an error means "we don't know", which is not the same as "dead").
 """
 
 import json
+import shutil
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -299,11 +301,16 @@ class SweepEngine:
             return (tuple((name, entry.get(name)) for name in dim_names),
                     entry.get("rate"), entry.get("trial"))
 
-        replacements = {identity(entry) for entry in result.entries}
+        written = result.entries
+        if spec.retry_point is not None:
+            # A failed replacement is diagnostic state for this invocation,
+            # not a replacement for the valid measurement still on disk.
+            written = [entry for entry in written if "error" not in entry]
+        replacements = {identity(entry) for entry in written}
         merged = [entry for entry in existing
                   if not isinstance(entry, dict)
                   or identity(entry) not in replacements]
-        merged.extend(result.entries)
+        merged.extend(written)
         _write_json(path, merged)
 
     def _run_combo(self, ctx, searched, dims, trial, result) -> None:
@@ -372,9 +379,16 @@ class SweepEngine:
 
         if self.points_run and spec.pause_secs:
             self._sleep(spec.pause_secs)
-        point_dir.mkdir(parents=True, exist_ok=True)
+        transactional = spec.retry_point is not None
+        if transactional:
+            point_dir.parent.mkdir(parents=True, exist_ok=True)
+            work_dir = Path(tempfile.mkdtemp(
+                prefix=f".{point_dir.name}.retry-", dir=point_dir.parent))
+        else:
+            point_dir.mkdir(parents=True, exist_ok=True)
+            work_dir = point_dir
         point = SweepPoint(dims=dict(dims), rate=rate, trial=trial,
-                           rel_dir=rel, dir=point_dir)
+                           rel_dir=rel, dir=work_dir)
 
         attempt = 0
         while True:
@@ -391,7 +405,7 @@ class SweepEngine:
                     raise TypeError(f"analyze returned {type(metrics).__name__},"
                                     f" expected dict")
                 entry = {**metrics, **tags}
-                _write_json(point_dir / "summary.json", entry)
+                _write_json(work_dir / "summary.json", entry)
                 status = "dead" if self._point_dead(entry) else "ok"
             except Exception as e:
                 entry = {"error": f"{type(e).__name__}: {e}", **tags}
@@ -406,7 +420,27 @@ class SweepEngine:
                        max_attempts=spec.max_attempts,
                        reason=entry.get("error", "committed nothing"))
 
-        self._emit("point.finished", experiment=spec.name, dims=dims,
+        if transactional and status != "error":
+            backup = point_dir.with_name(
+                f".{point_dir.name}.replaced-{time.time_ns()}")
+            had_original = point_dir.exists()
+            if had_original:
+                point_dir.rename(backup)
+            try:
+                work_dir.rename(point_dir)
+            except Exception:
+                if had_original and backup.exists():
+                    backup.rename(point_dir)
+                raise
+            if backup.exists():
+                shutil.rmtree(backup, ignore_errors=True)
+        elif transactional:
+            shutil.rmtree(work_dir, ignore_errors=True)
+
+        event_type = ("point.retry_failed"
+                      if transactional and status == "error"
+                      else "point.finished")
+        self._emit(event_type, experiment=spec.name, dims=dims,
                    rate=rate, trial=trial, rel_dir=rel, status=status,
                    duration_s=duration, metrics=metrics or {})
         self._record(result, entry, status)

@@ -17,6 +17,7 @@ must tolerate extras and absences):
   point.finished      experiment, dims, rate, trial, rel_dir, status
                       (ok|dead|error), duration_s, metrics
   point.retrying      attempt, max_attempts, reason
+  point.retry_failed  exact replacement failed; original remains intact
   point.skipped       reason (resume)
   search.decision     dims, rate, action
                       (start|climb|halve|refine|abandon|replay), note
@@ -32,7 +33,8 @@ SCHEMA_VERSION = 1
 EVENT_TYPES = frozenset({
     "run.started", "run.phase", "run.finished", "run.interrupted",
     "experiment.started", "experiment.finished",
-    "point.started", "point.finished", "point.retrying", "point.skipped",
+    "point.started", "point.finished", "point.retrying", "point.retry_failed",
+    "point.skipped",
     "search.decision", "hosts.released",
     "cluster.state", "cluster.lease", "cluster.keepalive",
 })
