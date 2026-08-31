@@ -605,12 +605,20 @@ function ResultTable({ detail, display, onRetryPoint }) {
     .filter(m => points.some(p => p.metrics?.[m.name] != null))
     .sort((a, b) => (a.name === 'offered_rate' ? -1 : 0) -
       (b.name === 'offered_rate' ? -1 : 0))
+  const showTrial = points.some(p => p.trial != null)
 
   return (
-    <div className="table-scroll"><table className="result-points">
+    <div>
+      {onRetryPoint && <p className="muted">
+        Replace point queues a separate job for one exact dimension/rate/trial
+        combination. The current measurement stays in the result unless the
+        replacement succeeds; no other points are rerun.
+      </p>}
+      <div className="table-scroll"><table className="result-points">
       <thead><tr>
         {dims.map(d => <th key={d.name} title={d.description}>{d.label || d.name}</th>)}
         <th>rate</th>
+        {showTrial && <th>trial</th>}
         {metrics.map(m => <th key={m.name}>{m.label || m.name}</th>)}
         {onRetryPoint && <th></th>}
       </tr></thead>
@@ -618,13 +626,15 @@ function ResultTable({ detail, display, onRetryPoint }) {
         <tr key={p.id}>
           {dims.map(d => <td key={d.name}>{fmtResultValue(value(p, d.name))}</td>)}
           <td>{fmtResultValue(p.rate)}</td>
+          {showTrial && <td>{fmtResultValue(p.trial)}</td>}
           {metrics.map(m => <td key={m.name}>{fmtResultValue(p.metrics?.[m.name])}</td>)}
           {onRetryPoint && <td><button className="link" title={
-            `overwrite this exact point (trial ${p.trial})`}
-            onClick={() => onRetryPoint(p)}>retry point</button></td>}
+            `queue a one-point job; replace trial ${p.trial} only after success`}
+            onClick={() => onRetryPoint(p)}>replace point</button></td>}
         </tr>
       ))}</tbody>
-    </table></div>
+      </table></div>
+    </div>
   )
 }
 
@@ -760,10 +770,12 @@ function RunEntry({ entry, onChanged, display }) {
                 onRetryPoint={canAddTrials ? async p => {
                   const label = Object.entries(p.dims || {})
                     .map(([k, v]) => `${k}=${v}`).join(', ')
-                  if (!await ask(`Overwrite ${label}${label ? ', ' : ''}`
-                    + `rate=${p.rate}, trial=${p.trial}?`, true)) return
+                  if (!await ask(`Queue a separate job to replace ${label}`
+                    + `${label ? ', ' : ''}rate=${p.rate}, trial=${p.trial}? `
+                    + 'The current measurement will remain untouched unless '
+                    + 'the replacement succeeds.', true)) return
                   if (await act(() => api.retryPoint(run.id, p.id))) {
-                    notify(`queued retry for trial ${p.trial}`)
+                    notify(`queued one-point replacement job for trial ${p.trial}`)
                   }
                 } : null} />
             </>
