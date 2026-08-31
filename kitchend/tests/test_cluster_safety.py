@@ -167,7 +167,7 @@ def _registry(tmp_path, cluster_project, platform="gcloud"):
 
 
 def test_gcloud_cluster_without_a_project_is_refused(tmp_path):
-    with pytest.raises(ValueError, match="no gcp_project"):
+    with pytest.raises(ValueError, match="has no project"):
         _registry(tmp_path, cluster_project=None)
 
 

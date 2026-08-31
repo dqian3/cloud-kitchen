@@ -22,7 +22,7 @@ broken environment, not a flaky run.
 import asyncio
 import time
 
-from . import jobs
+from . import jobs, ledger
 
 
 class Scheduler:
@@ -506,3 +506,47 @@ class Scheduler:
                       resubmit_of=job_id)
         self.wake()
         return new_id
+
+    def add_trials(self, run_id: int, trials: int) -> dict:
+        """Queue additional trial numbers into an existing result directory."""
+        if trials < 1:
+            raise ValueError("trials must be >= 1")
+        run = ledger.get_run(self.db, run_id)
+        if run is None:
+            raise KeyError(run_id)
+        if not run.get("dir_exists"):
+            raise ValueError(f"run {run_id} no longer has a result directory")
+        source_id = run.get("job_id")
+        source = jobs.get(self.db, source_id) if source_id is not None else None
+        if source is None or not source.get("run_dir"):
+            raise ValueError(
+                f"run {run_id} has no source job to resume; scanned results "
+                "cannot have trials added automatically")
+        if source["state"] != jobs.DONE:
+            raise ValueError(f"run {run_id}'s job {source_id} is still {source['state']}")
+        experiments = source["spec"].get("experiments") or []
+        if len(experiments) > 1:
+            raise ValueError(
+                "the source job contains multiple experiments; adding trials "
+                "to one result would also rerun the others")
+        pending = self.db.query_one(
+            "SELECT id FROM jobs WHERE run_dir = ? AND state != 'done' "
+            "ORDER BY id DESC LIMIT 1", (source["run_dir"],))
+        if pending:
+            raise ValueError(
+                f"job {pending['id']} is already extending this result")
+        offset = ledger.next_trial(self.db, run_id)
+        if offset is None:
+            raise ValueError(
+                f"run {run_id} has no numbered trials; its next offset "
+                "cannot be determined safely")
+        spec = jobs.added_trials_spec(source["spec"], source["run_dir"],
+                                      trials, offset)
+        project_id = self.db.query_one(
+            "SELECT project_id FROM jobs WHERE id = ?", (source_id,))["project_id"]
+        new_id = jobs.submit(self.db, project_id, spec)
+        self.hub.emit("job.state", job_id=new_id, state=jobs.WAITING,
+                      add_trials_to=run_id, trial_offset=offset, trials=trials)
+        self.wake()
+        return {"job_id": new_id, "run_id": run_id, "trials": trials,
+                "trial_offset": offset, "parent": source_id}

@@ -12,8 +12,7 @@ A job spec (stored verbatim as spec_json):
     {
       "project":     "aspen-bft",
       "experiments": ["aspen", "flutter"],     # driver args, or
-      "command":     ["python3", "x.py"],      # explicit command (overrides driver)
-      "extra_flags": ["--trials", "3"],
+      "command":     ["python3", "x.py"],      # canonical argv after submission
       "queue":       "main",                   # display grouping; default = project
       "run_dir":     null,                     # assigned at first spawn
       "resume":      false,
@@ -276,8 +275,12 @@ def reorder(db, hub, ids: list[int]) -> None:
 
 
 def build_command(project_cfg, spec: dict):
-    """(argv, cwd) for a job. Explicit `command` wins; otherwise the project's
-    driver + experiments + extra flags, with run-dir/resume flags appended."""
+    """(argv, cwd) for a job, with runtime-owned output/resume flags.
+
+    New submissions always carry one canonical `command`. The driver,
+    driver_args, and extra_flags branches remain for jobs queued by older
+    daemon versions so a restart does not invalidate existing work.
+    """
     if spec.get("command"):
         argv = list(spec["command"])
     else:
@@ -314,6 +317,87 @@ def build_command(project_cfg, spec: dict):
             f"{interp} not found in {cwd} — create the checkout's environment "
             "before submitting")
     return argv, cwd
+
+
+def canonicalize_command(project_cfg, spec: dict) -> None:
+    """Collapse every command input into the sole executable argv in-place.
+
+    Catalog commands, classic driver arguments, and caller extra flags are
+    submission-time inputs. Keeping them separate in a queued job made its
+    displayed command differ from what dispatch actually ran. Runtime-owned
+    output-dir and resume flags deliberately remain separate.
+    """
+    if spec.get("command"):
+        argv = list(spec["command"])
+    else:
+        if not project_cfg.driver:
+            raise ValueError(
+                f"project '{project_cfg.name}' has no driver configured and "
+                "the job spec has no explicit command")
+        args = spec.get("driver_args") or spec.get("experiments", [])
+        argv = list(project_cfg.driver) + list(args)
+    argv += [str(f) for f in spec.get("extra_flags", [])]
+    spec["command"] = [str(a) for a in argv]
+    spec.pop("driver_args", None)
+    spec.pop("extra_flags", None)
+
+
+def added_trials_spec(source: dict, run_dir: str, trials: int,
+                      trial_offset: int) -> dict:
+    """Copy a job spec and make it run new trial numbers in its old dir."""
+    if trials < 1:
+        raise ValueError("trials must be >= 1")
+    if trial_offset < 0:
+        raise ValueError("trial offset must be >= 0")
+    spec = dict(source)
+    if spec.get("command"):
+        # Include a legacy queued job's separate flags, then leave the new job
+        # in canonical form.
+        argv = list(spec["command"]) + list(spec.get("extra_flags") or ())
+        argv = _without_cli_option(argv, "--trials")
+        argv = _without_cli_option(argv, "--trial-offset")
+        argv = _set_cli_option(argv, "--trials", trials)
+        spec["command"] = _set_cli_option(argv, "--trial-offset", trial_offset)
+        spec.pop("driver_args", None)
+        spec.pop("extra_flags", None)
+    else:
+        # Compatibility for a classic driver job queued before commands were
+        # canonicalized at submission.
+        flags = _without_cli_option(list(spec.get("extra_flags") or ()),
+                                    "--trials")
+        flags = _without_cli_option(flags, "--trial-offset")
+        flags = _set_cli_option(flags, "--trials", trials)
+        spec["extra_flags"] = _set_cli_option(
+            flags, "--trial-offset", trial_offset)
+    spec["run_dir"] = str(run_dir)
+    spec["resume"] = True
+    spec.pop("after", None)
+    base_name = source.get("name") or "experiment"
+    spec["name"] = f"{base_name} (+{trials} trial{'s' if trials != 1 else ''})"
+    spec["added_trials"] = {"count": trials, "offset": trial_offset}
+    return spec
+
+
+def _set_cli_option(argv: list, flag: str, value) -> list:
+    """Set the last-value-wins form of a CLI option without stale repeats."""
+    return _without_cli_option(argv, flag) + [flag, str(value)]
+
+
+def _without_cli_option(argv: list, flag: str) -> list:
+    """Remove both ``--flag value`` and ``--flag=value`` forms."""
+    out = []
+    i = 0
+    while i < len(argv):
+        arg = str(argv[i])
+        if arg == flag:
+            i += 2 if i + 1 < len(argv) else 1
+            continue
+        if arg.startswith(flag + "="):
+            i += 1
+            continue
+        out.append(argv[i])
+        i += 1
+    return out
 
 
 def recover_orphans(db, hub):

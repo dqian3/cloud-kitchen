@@ -130,11 +130,10 @@ td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--line);
 .bar-fill { height: 100%; background: var(--blue);
   transition: width 0.5s ease; }
 
-.oneoff { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem;
-  align-items: flex-start; margin: 0.4rem 0; font-size: 0.85rem; }
-.oneoff label { display: inline-flex; gap: 0.3rem; align-items: center; }
-.oneoff textarea { font-family: ui-monospace, monospace; font-size: 0.8rem; }
-.oneoff input[type="number"] { width: 5rem; }
+.argv-entry { display: flex; gap: 0.6rem; align-items: flex-start; margin: 0.4rem 0; }
+.argv-entry input { min-width: 12rem; }
+.argv-entry textarea { flex: 1; min-width: 20rem; font-family: ui-monospace, monospace;
+  font-size: 0.8rem; }
 .run-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center;
   margin: 0.3rem 0; }
 .run-actions input { flex: 1 1 18rem; min-width: 0; max-width: 100%; }

@@ -168,69 +168,24 @@ function ClusterCard({ c, onAction }) {
 // ---------- jobs ----------
 
 function SubmitForm({ project, clusters, catalog, onSubmitted }) {
-  const { notify, askText } = useUI()
   const [selected, setSelected] = useState([])
-  const [freeText, setFreeText] = useState('')
-  const [flags, setFlags] = useState('')
+  const [argvMode, setArgvMode] = useState(false)
+  const [argvText, setArgvText] = useState('[]')
+  const [jobName, setJobName] = useState('')
   const [priority, setPriority] = useState(0)
   const [attempts, setAttempts] = useState(20)
   const [after, setAfter] = useState('')          // chain: wait for job #
   const [managedCluster, setManagedCluster] = useState('')  // daemon-owned
   const [err, setErr] = useState(null)
-  // One-off sweep mode: generic params the project adapter translates.
-  const [oneoff, setOneoff] = useState(false)
-  const [base, setBase] = useState('')
-  const [dims, setDims] = useState('')           // one NAME=v1,v2 per line
-  const [rates, setRates] = useState('')
-  const [search, setSearch] = useState(false)
-  const [trials, setTrials] = useState('')
-  const [duration, setDuration] = useState('')
-  const [sweeps, setSweeps] = useState([])       // saved presets
   const [expanded, setExpanded] = useState([])   // bases with variants shown
-
-  const loadSweeps = useCallback(() => {
-    if (project) api.sweeps(project).then(setSweeps).catch(() => setSweeps([]))
-  }, [project])
-  useEffect(loadSweeps, [loadSweeps])
-
-  function buildSweep() {
-    const sweep = {}
-    if (base) sweep.base = base
-    const dimObj = {}
-    for (const line of dims.split('\n').map(s => s.trim()).filter(Boolean)) {
-      const [name, vals] = line.split('=')
-      if (!name || !vals) { setErr(`bad dim line: ${line}`); return null }
-      dimObj[name.trim()] = vals.split(',').map(s => s.trim()).filter(Boolean)
-    }
-    if (Object.keys(dimObj).length) sweep.dims = dimObj
-    const rateList = rates.split(/[\s,]+/).filter(Boolean).map(Number)
-    if (rateList.length) sweep.rates = rateList
-    if (search) sweep.rate_search = true
-    if (trials) sweep.trials = +trials
-    if (duration) sweep.duration_secs = +duration
-    if (flags.trim()) sweep.extra_flags = flags.split(/\s+/).filter(Boolean)
-    if (managedCluster) sweep.cluster = managedCluster
-    return sweep
-  }
-
-  function applyPreset(params) {
-    setBase(params.base || '')
-    setDims(Object.entries(params.dims || {})
-      .map(([k, v]) => `${k}=${v.join(',')}`).join('\n'))
-    setRates((params.rates || []).join(' '))
-    setSearch(Boolean(params.rate_search))
-    setTrials(params.trials ?? '')
-    setDuration(params.duration_secs ?? '')
-    setFlags((params.extra_flags || []).join(' '))
-    setManagedCluster(params.cluster || '')
-  }
 
   useEffect(() => {
     setSelected([]); setManagedCluster(''); setAfter(''); setExpanded([])
+    setArgvMode(false); setArgvText('[]'); setJobName('')
   }, [project])
 
   // Maintenance actions such as figure generation are intentionally not
-  // queue experiments. Keep them out of both normal and one-off selectors.
+  // queue experiments. Keep them out of the normal selector.
   const selectableExperiments = (catalog?.experiments || [])
     .filter(e => e.name !== 'figures')
   const hasCatalog = catalog && !catalog.error && selectableExperiments.length > 0
@@ -255,23 +210,24 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
     try {
       const common = { project, priority: +priority, max_attempts: +attempts }
       if (after) common.after = +after
-      if (oneoff) {
-        const sweep = buildSweep()
-        if (sweep === null) return
-        await api.submit({ ...common, sweep })
-      } else {
-        const experiments = hasCatalog
-          ? selected
-          : freeText.split(/\s+/).filter(Boolean)
-        if (!experiments.length) { setErr('pick at least one experiment'); return }
+      if (argvMode || !hasCatalog) {
+        let command
+        try { command = JSON.parse(argvText) }
+        catch { setErr('argv must be a JSON array of strings'); return }
+        if (!Array.isArray(command) || !command.length
+            || command.some(arg => typeof arg !== 'string')) {
+          setErr('argv must be a non-empty JSON array of strings')
+          return
+        }
+        if (jobName.trim()) common.name = jobName.trim()
         if (managedCluster) common.cluster = managedCluster
-        await api.submit({
-          ...common,
-          experiments,
-          extra_flags: flags.split(/\s+/).filter(Boolean),
-        })
+        await api.submit({ ...common, command })
+      } else {
+        if (!selected.length) { setErr('pick at least one experiment'); return }
+        if (managedCluster) common.cluster = managedCluster
+        await api.submit({ ...common, experiments: selected })
       }
-      setSelected([]); setFreeText('')
+      setSelected([])
       onSubmitted()
     } catch (e2) { setErr(String(e2.message || e2)) }
   }
@@ -279,9 +235,10 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
   return (
     <form className="submit-form-block" onSubmit={submit}>
       <div className="submit-form">
-        <label title="ad-hoc sweep: override dims/rates/trials; the project adapter builds the command">
-          <input type="checkbox" checked={oneoff}
-                 onChange={e => setOneoff(e.target.checked)} /> one-off
+        <label title="submit one exact argv instead of a catalog experiment">
+          <input type="checkbox" checked={argvMode || !hasCatalog}
+                 disabled={!hasCatalog}
+                 onChange={e => setArgvMode(e.target.checked)} /> argv
         </label>
         {(clusters || []).length > 0 && (
           <label title="daemon-owned: the cluster comes up before the job, and stays up if the next queued job wants it">
@@ -297,107 +254,29 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
           after #<input type="number" min="1" className="after-input"
                         value={after} onChange={e => setAfter(e.target.value)} />
         </label>
-        {!oneoff && !hasCatalog && (
-          <input placeholder={catalog?.error
-                   ? `no catalog (${catalog.error}) — raw driver args`
-                   : 'experiments (space-separated)'}
-                 value={freeText} onChange={e => setFreeText(e.target.value)} />
-        )}
-        <input placeholder="extra flags" value={flags}
-               onChange={e => setFlags(e.target.value)} />
         <label>prio <input type="number" value={priority}
                onChange={e => setPriority(e.target.value)} /></label>
         <label>attempts <input type="number" value={attempts} min="1"
                onChange={e => setAttempts(e.target.value)} /></label>
         <button type="submit">
-          queue job{!oneoff && selected.length > 1 ? ` (${selected.length})` : ''}
+          queue job{!argvMode && hasCatalog && selected.length > 1
+            ? ` (${selected.length})` : ''}
         </button>
         {err && <span className="error">{err}</span>}
       </div>
 
-      {oneoff && sweeps.length > 0 && (
-        <div className="agg-row">
-          {sweeps.map(s => (
-            <button key={s.id} type="button" className="agg"
-                    title={JSON.stringify(s.params)}
-                    onClick={() => applyPreset(s.params)}>
-              {s.name}
-            </button>
-          ))}
-          <button type="button" className="agg" title="delete a preset"
-                  onClick={async () => {
-                    const n = await askText('delete which preset?',
-                                            sweeps[0]?.name || '')
-                    const hit = sweeps.find(s2 => s2.name === n)
-                    if (hit) api.deleteSweep(hit.id).then(loadSweeps)
-                    else if (n) notify(`no preset named ${n}`, 'error')
-                  }}>✕</button>
-        </div>
-      )}
-      {oneoff && (
-        <div className="oneoff">
-          <button type="button" className="link"
-                  title="save these params as a named preset"
-                  onClick={async () => {
-                    const sweep = buildSweep()
-                    if (sweep === null) return
-                    const n = await askText('preset name:')
-                    if (!n) return
-                    try {
-                      await api.saveSweep(project, n.trim(), sweep)
-                      loadSweeps()
-                      notify(`saved preset ${n.trim()}`)
-                    } catch (e2) { setErr(String(e2.message || e2)) }
-                  }}>save preset</button>
-          <label>base
-            <select value={base} onChange={e => setBase(e.target.value)}>
-              <option value="">(none)</option>
-              {selectableExperiments.map(e2 => (
-                <option key={e2.name} value={e2.name}>{e2.name}</option>
-              ))}
-            </select>
-          </label>
-          <label>dims
-            <textarea rows="2" placeholder={'payload_size=16,1024\ngamma=1.2'}
-                      value={dims} onChange={e => setDims(e.target.value)} />
-          </label>
-          {(catalog?.display?.dims || []).length > 0 && (
-            <span className="agg-row">
-              {catalog.display.dims.map(d => (
-                <button key={d.name} type="button" className="agg"
-                        title={[d.description, d.unit && `unit: ${d.unit}`]
-                          .filter(Boolean).join(' — ')}
-                        onClick={() => setDims(v => {
-                          if (v.split('\n').some(l =>
-                            l.trim().startsWith(`${d.name}=`))) return v
-                          const line = `${d.name}=${d.example || ''}`
-                          return v.trim() ? `${v.trimEnd()}\n${line}` : line
-                        })}>
-                  +{d.label}
-                </button>
-              ))}
-            </span>
-          )}
-          <label>rates
-            <input placeholder="1000 2000 4000" value={rates}
-                   onChange={e => setRates(e.target.value)} />
-          </label>
-          <label>
-            <input type="checkbox" checked={search}
-                   onChange={e => setSearch(e.target.checked)} /> rate search
-          </label>
-          <label>trials
-            <input type="number" min="1" placeholder="1" value={trials}
-                   onChange={e => setTrials(e.target.value)} />
-          </label>
-          <label>duration s
-            <input type="number" step="any" placeholder="(default)" value={duration}
-                   onChange={e => setDuration(e.target.value)} />
-          </label>
+      {(argvMode || !hasCatalog) && (
+        <div className="argv-entry">
+          <input placeholder="job name (optional)" value={jobName}
+                 onChange={e => setJobName(e.target.value)} />
+          <textarea rows="5" spellCheck="false"
+                    aria-label="argv JSON array"
+                    placeholder={'[".venv/bin/python", "sweep.py", "--rate-search"]'}
+                    value={argvText} onChange={e => setArgvText(e.target.value)} />
         </div>
       )}
 
-      {!oneoff && hasCatalog && (
+      {!argvMode && hasCatalog && (
         <div className="catalog">
           {Object.keys(catalog.aggregates).length > 0 && (
             <div className="agg-row">
@@ -615,6 +494,10 @@ function JobRow({ job, isHead, onChanged, onMove, canMoveUp, canMoveDown }) {
     : isHead && job.state === 'running' ? 'running'
       : isHead && retryIn != null ? 'retrying' : 'queued'
   const spec = job.spec
+  const command = [
+    ...(spec.command || spec.experiments || []),
+    ...(spec.extra_flags || []),
+  ]
   // Fallback keeps the indicator correct against a daemon that has not yet
   // restarted onto the derived `will_resume` API field.
   const willResume = job.will_resume ?? Boolean(
@@ -624,11 +507,12 @@ function JobRow({ job, isHead, onChanged, onMove, canMoveUp, canMoveDown }) {
     <>
       <tr className="job-row" onClick={() => setOpen(!open)}>
         <td>{job.id}</td>
-        <td className="mono" title={(spec.command || []).join(' ')}>
+        <td className="mono" title={command.join(' ')}>
           {spec.name || (spec.experiments || []).join(' ') || 'job'}
           {willResume &&
             <span className="muted" title="continues in the existing run directory">
               {' '}· continues existing run</span>}</td>
+        <td className="muted">{spec.cluster || '—'}</td>
         <td className="job-status"><div className="job-status-scroll">
             <Chip text={label} color={STATE_COLORS[label]} />
             {isHead && job.attempts > 1 && !done &&
@@ -666,14 +550,13 @@ function JobRow({ job, isHead, onChanged, onMove, canMoveUp, canMoveDown }) {
         </td>
       </tr>
       {open && (
-        <tr><td colSpan="6" className="log-cell">
+        <tr><td colSpan="7" className="log-cell">
           <div className="muted">queue {spec.queue || job.project}
             {spec.cluster && <> · lease on {spec.cluster}</>}
             {' '}· up to {job.max_attempts} attempts, {spec.retry_delay_secs}s apart
             {willResume && <> · next attempt resumes this directory</>}
           </div>
-          <div className="mono command-line">{(spec.command || []).join(' ') ||
-            (spec.experiments || []).join(' ') || '(no command)'}</div>
+          <div className="mono command-line">{command.join(' ') || '(no command)'}</div>
           {job.run_dir && <div className="muted">run dir: <code>{job.run_dir}</code></div>}
           {job.last_error &&
             <div className="error wrap">last error: {job.last_error}</div>}
@@ -762,13 +645,20 @@ function RunEntry({ entry, onChanged, display }) {
       await fn()
       if (run && refresh) setDetail(await api.run(run.id))
       onChanged()
-    } catch (e) { notify(e.message || e, 'error') }
+      return true
+    } catch (e) {
+      notify(e.message || e, 'error')
+      return false
+    }
   }
 
   const state = run.status || 'recorded'
   const chipColor = STATE_COLORS[state] || 'gray'
   const what = run.experiment || 'result'
   const when = run.started_at
+  const canAddTrials = run.dir_exists && run.job_id != null
+    && (!job || (job.state === 'done'
+      && (job.spec.experiments || []).length <= 1))
 
   return (
     <>
@@ -792,12 +682,21 @@ function RunEntry({ entry, onChanged, display }) {
             <button className="link" title="submit the same job again in a fresh run dir"
                     onClick={() => act(() => api.resubmit(job.id, false))}>rerun</button>
           )}
-          {job?.spec.sweep && (
-            <button className="link" title="save this one-off's params as a preset"
+          {canAddTrials && (
+            <button className="link"
+                    title="resume this result with new numbered trials"
                     onClick={async () => {
-                      const n = await askText('preset name:')
-                      if (n) act(() => api.saveSweep(job.project, n.trim(), job.spec.sweep))
-                    }}>save</button>
+                      const raw = await askText('additional trials:', '1')
+                      if (raw == null) return
+                      const n = Number(raw)
+                      if (!Number.isInteger(n) || n < 1) {
+                        notify('additional trials must be a positive integer', 'error')
+                        return
+                      }
+                      if (await act(() => api.addTrials(run.id, n))) {
+                        notify(`queued ${n} additional trial${n === 1 ? '' : 's'}`)
+                      }
+                    }}>add trials</button>
           )}
           <button className="link" onClick={() => setOpen(!open)}>
             {open ? 'hide' : 'details'}</button>
@@ -1184,7 +1083,7 @@ function JobTable({ jobs, onChanged, empty, onMove }) {
   return (
     <div className="queue-table"><table>
       <thead><tr>
-        <th>id</th><th>experiment</th>
+        <th>id</th><th>experiment</th><th>cluster</th>
         <th>state</th><th>priority</th><th>created</th><th></th>
       </tr></thead>
       <tbody>

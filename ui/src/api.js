@@ -25,13 +25,12 @@ export const api = {
     method: 'POST', body: JSON.stringify({ paused }) }),
   resubmit: (id, resume = true) =>
     req(`/api/jobs/${id}/resubmit`, { method: 'POST', body: JSON.stringify({ resume }) }),
-  sweeps: (project) => req(`/api/sweeps?project=${encodeURIComponent(project)}`),
-  saveSweep: (project, name, params) =>
-    req('/api/sweeps', { method: 'POST', body: JSON.stringify({ project, name, params }) }),
-  deleteSweep: (id) => req(`/api/sweeps/${id}`, { method: 'DELETE' }),
   runs: (project) =>
     req(`/api/runs?limit=100${project ? `&project=${encodeURIComponent(project)}` : ''}`),
   run: (id) => req(`/api/runs/${id}`),
+  addTrials: (id, trials) =>
+    req(`/api/runs/${id}/trials`, {
+      method: 'POST', body: JSON.stringify({ trials }) }),
   deleteJob: (id, files = false) =>
     req(`/api/jobs/${id}?delete_files=${files}`, { method: 'DELETE' }),
   deleteRun: (id, files = false) =>

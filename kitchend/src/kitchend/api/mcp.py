@@ -13,8 +13,6 @@ serve` — the tailnet is the auth boundary, and the proxied Host header would
 fail a loopback allowlist.
 """
 
-import json
-
 from mcp.server.mcpserver import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -68,7 +66,7 @@ def build_mcp(state) -> MCPServer:
             "every dollar-burning call requires confirm_cost_usd. Job "
             "progress comes from get_job (points done/total, ETA); results "
             "land in the run ledger (list_runs/get_run). Record what a "
-            "one-off showed with add_run_note."),
+            "run showed with add_run_note."),
     )
 
     def _project(name):
@@ -91,39 +89,30 @@ def build_mcp(state) -> MCPServer:
 
     @mcp.tool()
     def list_experiments(project: str) -> dict:
-        """The project's experiment catalog (from its kitchen_adapter.py),
-        plus aggregates and saved one-off presets."""
-        project_cfg = _project(project)
-        cat = adapters.catalog(project_cfg)
-        project_id = jobs.ensure_project_row(state.db, project_cfg)
-        cat["saved_sweeps"] = [
-            {"name": r["name"], "params": json.loads(r["params_json"])}
-            for r in state.db.query(
-                "SELECT name, params_json FROM saved_sweeps "
-                "WHERE project_id = ? ORDER BY name", (project_id,))]
-        return cat
+        """The project's experiment catalog and named aggregates."""
+        return adapters.catalog(_project(project))
 
     # --- jobs ---
 
     @mcp.tool()
     def submit_job(project: str, experiments: list[str] | None = None,
-                   sweep: dict | None = None, queue: str | None = None,
+                   command: list[str] | None = None,
+                   name: str | None = None,
+                   queue: str | None = None,
                    cluster: str | None = None,
                    after: int | None = None,
                    priority: int = 0, max_attempts: int = 20,
                    est_hours: float | None = None,
                    confirm_cost_usd: float | None = None) -> dict:
-        """Queue a job. Give catalog `experiments` OR a one-off `sweep`
-        (base, dims {name: [values]}, rates, rate_search, trials,
-        duration_secs — translated by the project's adapter). Jobs whose
+        """Queue a job. Give catalog `experiments` OR one exact `command`
+        argv. Jobs whose
         queue maps to a costed cluster require est_hours plus
         confirm_cost_usd >= the returned estimate.
 
         `cluster` (a daemon-configured cluster name) hands the fleet to the
         daemon: VMs come up before the driver spawns and are kept up if the
         next queued job wants them, stopped otherwise — a chained job on
-        the same cluster inherits it without a VM cycle. A sweep whose
-        params name a configured cluster gets this automatically. `after`
+        the same cluster inherits it without a VM cycle. `after`
         holds the job until that job is done with data (ok or
         degraded); one that ends failed or canceled cancels this job
         instead — chain jobs to cycle clusters between phases
@@ -131,10 +120,12 @@ def build_mcp(state) -> MCPServer:
         project_cfg = _project(project)
         spec = {"project": project, "priority": priority,
                 "max_attempts": max_attempts}
+        if name:
+            spec["name"] = name
         if experiments:
             spec["experiments"] = experiments
-        if sweep:
-            spec["sweep"] = sweep
+        if command:
+            spec["command"] = command
         if queue:
             spec["queue"] = queue
         if cluster:
@@ -224,7 +215,7 @@ def build_mcp(state) -> MCPServer:
     @mcp.tool()
     def list_runs(project: str | None = None, experiment: str | None = None,
                   tag: str | None = None, limit: int = 20) -> dict:
-        """Recorded runs (paper sweeps and one-offs), newest first.
+        """Recorded runs, newest first.
         dir_exists=0 means the directory was deleted but metrics survive."""
         return {"runs": ledger.list_runs(state.db, project=project,
                                          experiment=experiment, tag=tag,
@@ -237,6 +228,34 @@ def build_mcp(state) -> MCPServer:
         if run is None:
             raise ValueError(f"no run {run_id}")
         return run
+
+    @mcp.tool()
+    def add_trials_to_run(run_id: int, trials: int = 1,
+                          est_hours: float | None = None,
+                          confirm_cost_usd: float | None = None) -> dict:
+        """Add numbered trials to an existing result, reusing its run dir.
+
+        The original job command is resumed with --trials and the
+        next safe --trial-offset. Costed clusters require est_hours and a
+        matching confirm_cost_usd, as submit_job does.
+        """
+        if trials < 1:
+            raise ValueError("trials must be >= 1")
+        run = ledger.get_run(state.db, run_id)
+        if run is None:
+            raise ValueError(f"no run {run_id}")
+        source = (jobs.get(state.db, run.get("job_id"))
+                  if run.get("job_id") is not None else None)
+        if source is None:
+            raise ValueError(f"run {run_id} has no source job to resume")
+        project_cfg = _project(run["project"])
+        estimate = _job_cost_estimate(state, project_cfg, source["spec"],
+                                      est_hours)
+        require_confirmed_cost(estimate, confirm_cost_usd,
+                               f"{trials} additional trial(s) for run {run_id}")
+        result = state.scheduler.add_trials(run_id, trials)
+        result["estimate_usd"] = estimate
+        return result
 
     @mcp.tool()
     def add_run_note(run_id: int, text: str) -> dict:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from kitchend.core import adapters, jobs, ledger, spend, submission
 
@@ -26,12 +26,12 @@ def list_experiments(project: str, request: Request):
 # --- jobs ---
 
 class JobSubmit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     project: str
     name: str | None = None        # what to call it in the queue
     experiments: list[str] = Field(default_factory=list)
     command: list[str] | None = None
-    sweep: dict | None = None      # ad-hoc sweep params → adapter.oneoff()
-    extra_flags: list[str] = Field(default_factory=list)
     queue: str | None = None
     cluster: str | None = None     # daemon-managed lease: up before, down after
     after: int | None = None       # wait for this job to finish with data
@@ -276,60 +276,6 @@ def daemon_log(request: Request, limit: int = 200):
     return out
 
 
-# --- saved sweeps: one-offs promoted to reusable presets ---
-
-class SweepSave(BaseModel):
-    project: str
-    name: str
-    params: dict
-
-
-@router.get("/sweeps")
-def list_sweeps(project: str, request: Request):
-    app = request.app
-    try:
-        project_cfg = app.state.config.project(project)
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    project_id = jobs.ensure_project_row(app.state.db, project_cfg)
-    return [
-        {"id": r["id"], "name": r["name"], "created_at": r["created_at"],
-         "params": json.loads(r["params_json"])}
-        for r in app.state.db.query(
-            "SELECT * FROM saved_sweeps WHERE project_id = ? ORDER BY name",
-            (project_id,))
-    ]
-
-
-@router.post("/sweeps")
-def save_sweep(body: SweepSave, request: Request):
-    """Keep a one-off sweep's params under a name. Validates through the
-    adapter now, so a preset that can't build a command is rejected at save
-    rather than discovered at submit."""
-    app = request.app
-    try:
-        project_cfg = app.state.config.project(body.project)
-        adapters.oneoff_command(project_cfg, body.params)
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    except ValueError as e:
-        raise HTTPException(422, str(e))
-    project_id = jobs.ensure_project_row(app.state.db, project_cfg)
-    app.state.db.execute(
-        "INSERT INTO saved_sweeps (project_id, name, params_json) "
-        "VALUES (?, ?, ?) ON CONFLICT(project_id, name) "
-        "DO UPDATE SET params_json = excluded.params_json",
-        (project_id, body.name, json.dumps(body.params)))
-    return {"ok": True}
-
-
-@router.delete("/sweeps/{sweep_id}")
-def delete_sweep(sweep_id: int, request: Request):
-    request.app.state.db.execute("DELETE FROM saved_sweeps WHERE id = ?",
-                                 (sweep_id,))
-    return {"ok": True}
-
-
 # --- run ledger ---
 
 @router.get("/runs")
@@ -346,6 +292,21 @@ def get_run(run_id: int, request: Request):
     if run is None:
         raise HTTPException(404, f"no run {run_id}")
     return run
+
+
+class TrialsAdd(BaseModel):
+    trials: int = Field(ge=1)
+
+
+@router.post("/runs/{run_id}/trials")
+def add_trials(run_id: int, body: TrialsAdd, request: Request):
+    """Append new numbered trials to a result using its source job."""
+    try:
+        return request.app.state.scheduler.add_trials(run_id, body.trials)
+    except KeyError:
+        raise HTTPException(404, f"no run {run_id}")
+    except ValueError as e:
+        raise HTTPException(409, str(e))
 
 
 class NoteAdd(BaseModel):

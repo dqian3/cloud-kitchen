@@ -6,6 +6,7 @@
     kitchend submit PROJECT NAME...     queue experiments (native ones use
                                         their cluster; fan-out prints one
                                         line per job)
+    kitchend submit-argv PROJECT JSON   queue one exact argv JSON array
     kitchend jobs [--state S] [-n N]    recent jobs
     kitchend watch JOB_ID               follow a job to completion
     kitchend log JOB_ID [-n N]          tail a job's driver output
@@ -102,8 +103,6 @@ def cmd_submit(config, args):
         spec["cluster"] = args.cluster
     if args.after is not None:
         spec["after"] = args.after
-    if args.flags:
-        spec["extra_flags"] = args.flags
     out = _api(config, "/api/jobs", body=spec)
     ids = out.get("ids", [out["id"]])
     jobs = {j["id"]: j for j in _api(config, "/api/jobs?limit=100")}
@@ -122,6 +121,26 @@ def cmd_submit(config, args):
                 line += f"  (uses {cluster}: ~${rate:.2f}/hr while running)"
         print(line)
     print(f"{len(ids)} job(s) queued; follow with: kitchend watch {ids[0]}")
+
+
+def cmd_submit_argv(config, args):
+    try:
+        command = json.loads(args.argv)
+    except ValueError as e:
+        raise SystemExit(f"argv must be a JSON array of strings: {e}")
+    if not isinstance(command, list) or not command \
+            or any(not isinstance(a, str) for a in command):
+        raise SystemExit("argv must be a non-empty JSON array of strings")
+    spec = {"project": args.project, "command": command,
+            "priority": args.priority, "max_attempts": args.retries}
+    if args.name:
+        spec["name"] = args.name
+    if args.cluster:
+        spec["cluster"] = args.cluster
+    if args.after is not None:
+        spec["after"] = args.after
+    out = _api(config, "/api/jobs", body=spec)
+    print(f"#{out['id']} queued; follow with: kitchend watch {out['id']}")
 
 
 def cmd_jobs(config, args):
@@ -255,8 +274,15 @@ def main(argv=None):
                    help="driver invocations before giving up")
     p.add_argument("--after", type=int, default=None,
                    help="run after this job's retry chain succeeds")
-    p.add_argument("--flags", nargs="+", default=None,
-                   help="extra driver flags")
+
+    p = sub.add_parser("submit-argv", help="queue one exact argv JSON array")
+    p.add_argument("project")
+    p.add_argument("argv", help='JSON array, e.g. ["python3","run.py"]')
+    p.add_argument("--name")
+    p.add_argument("--cluster", help="daemon-managed lease on this cluster")
+    p.add_argument("--priority", type=int, default=0)
+    p.add_argument("--attempts", type=int, default=20, dest="retries")
+    p.add_argument("--after", type=int, default=None)
 
     p = sub.add_parser("jobs", help="recent jobs")
     p.add_argument("--state")
@@ -315,7 +341,8 @@ def main(argv=None):
         print(json.dumps(_api(config, "/api/health"), indent=2))
         return 0
     handler = {
-        "catalog": cmd_catalog, "submit": cmd_submit, "jobs": cmd_jobs,
+        "catalog": cmd_catalog, "submit": cmd_submit,
+        "submit-argv": cmd_submit_argv, "jobs": cmd_jobs,
         "watch": cmd_watch, "log": cmd_log, "cancel": cmd_cancel,
         "resubmit": cmd_resubmit, "retry": cmd_retry,
         "clusters": cmd_clusters,

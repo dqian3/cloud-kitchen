@@ -1,6 +1,6 @@
 """Job submission: one resolution path shared by the HTTP API and MCP.
 
-Takes a raw spec (experiments, an ad-hoc sweep, or an explicit command) and
+Takes a raw spec (catalog experiments or an explicit command) and
 resolves it against the project's adapter into one or more job specs. A
 submission is usually one job; catalog experiments that carry their own
 native command fan out into sibling jobs — one per experiment, so each has
@@ -14,27 +14,10 @@ from . import adapters, jobs
 
 def prepare_specs(project_cfg, spec: dict) -> list[dict]:
     """Resolve and validate a submission. Returns the job specs it becomes."""
-    if not spec.get("experiments") and not spec.get("command") \
-            and not spec.get("sweep"):
-        raise ValueError("spec needs experiments, a sweep, or an explicit command")
-    # An ad-hoc sweep resolves to an explicit command at submit time, so a
-    # later adapter edit can't silently change what a queued job will run.
-    if spec.get("sweep"):
-        if spec.get("experiments") or spec.get("command"):
-            raise ValueError("sweep excludes experiments/command")
-        argv, queue = adapters.oneoff_command(project_cfg, spec["sweep"])
-        spec["command"] = argv
-        if queue and not spec.get("queue"):
-            spec["queue"] = f"{project_cfg.name}/{queue}"
-        # A sweep that names a daemon-configured cluster gets the managed
-        # lease: the daemon brings the cluster up before the job and releases
-        # it after (one-off executors assume VMs are running). Names that
-        # don't match a configured cluster (a catalog alias, a local run)
-        # only route the queue.
-        cluster = spec["sweep"].get("cluster")
-        if cluster and not spec.get("cluster") and \
-                any(c.name == cluster for c in project_cfg.clusters):
-            spec["cluster"] = cluster
+    if not spec.get("experiments") and not spec.get("command"):
+        raise ValueError("spec needs catalog experiments or an explicit command argv")
+    if spec.get("experiments") and spec.get("command"):
+        raise ValueError("experiments and command are mutually exclusive")
     if spec.get("after") is not None:
         spec["after"] = int(spec["after"])
 
@@ -78,7 +61,12 @@ def prepare_specs(project_cfg, spec: dict) -> list[dict]:
         # Stamp the label once, here, so the queue reads the same in the UI,
         # the CLI and MCP — and never as a wall of argv.
         s["name"] = jobs.label(s, project_cfg)
-        # Validate now so a bad spec fails at submit, not at dispatch.
+        # Resolution ends here. The queue stores one authoritative argv, not
+        # a base command plus driver args and overrides whose effective value
+        # depends on argument-parser precedence.
+        jobs.canonicalize_command(project_cfg, s)
+        # Validate the canonical command now so a bad spec fails at submit,
+        # not at dispatch.
         jobs.build_command(project_cfg, s)
     return specs
 

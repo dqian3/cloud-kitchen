@@ -130,6 +130,8 @@ SCHEMA = """
         text TEXT NOT NULL
     );
 
+    -- Retained for schema compatibility with existing installations. The
+    -- structured one-off feature that used it has no API surface anymore.
     CREATE TABLE saved_sweeps (
         id INTEGER PRIMARY KEY,
         project_id INTEGER NOT NULL REFERENCES projects(id),
@@ -138,6 +140,7 @@ SCHEMA = """
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         UNIQUE (project_id, name)
     );
+
 """
 
 SCHEMA_VERSION = 4

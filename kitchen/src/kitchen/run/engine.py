@@ -258,21 +258,47 @@ class SweepEngine:
                 for dims in spec.combos():
                     self._run_combo(ctx, searched, dims, trial, result)
         except KeyboardInterrupt:
-            self._write_results(sweep_dir, result)
+            self._write_results(sweep_dir, result, spec)
             raise
         except Exception as e:
             # A failure outside any point (deploy, the search plumbing) fails
             # the experiment; the points that did run keep their data.
             result.fatal = f"{type(e).__name__}: {e}"
-        self._write_results(sweep_dir, result)
+        self._write_results(sweep_dir, result, spec)
         self._emit("experiment.finished", name=spec.name,
                    status=result.status, detail=result.detail())
         return result
 
-    def _write_results(self, sweep_dir: Path, result: ExperimentResult) -> None:
+    def _write_results(self, sweep_dir: Path, result: ExperimentResult,
+                       spec: SweepSpec) -> None:
         # Written before any reporting that could fail, so a multi-hour
         # sweep's measurements survive a formatting bug.
-        _write_json(sweep_dir / "sweep_results.json", result.entries)
+        path = sweep_dir / "sweep_results.json"
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+            if not isinstance(existing, list):
+                existing = []
+        except (OSError, ValueError):
+            existing = []
+
+        # A sweep dir may be extended by later --trial-offset invocations.
+        # Preserve their predecessors while replacing any point this
+        # invocation resumed or retried. Dimensions come from the live spec,
+        # so project-specific metric names cannot accidentally become part of
+        # point identity.
+        dim_names = tuple(spec.dims)
+
+        def identity(entry):
+            return (tuple((name, entry.get(name)) for name in dim_names),
+                    entry.get("rate"), entry.get("trial"))
+
+        replacements = {identity(entry) for entry in result.entries}
+        merged = [entry for entry in existing
+                  if not isinstance(entry, dict)
+                  or identity(entry) not in replacements]
+        merged.extend(result.entries)
+        _write_json(path, merged)
 
     def _run_combo(self, ctx, searched, dims, trial, result) -> None:
         spec = ctx.spec

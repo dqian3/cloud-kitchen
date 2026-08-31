@@ -148,35 +148,3 @@ def resolve_jobs(project_cfg, names: list[str]) -> list[dict]:
                       "queue": (queues.pop() if queues else None),
                       "driver_args": driver_args})
     return plans
-
-
-def oneoff_command(project_cfg, params: dict):
-    """Resolve an ad-hoc sweep to (argv, queue) via the project's adapter.
-
-    The adapter's optional `oneoff(params) -> argv` owns the translation from
-    generic sweep parameters (base experiment, dims, rates/search, trials,
-    duration) to that project's driver flags — it is the only place that
-    knows the flag names. Adapters without the hook can't run one-offs.
-    """
-    handle = load_adapter(project_cfg)
-    if not handle.ok:
-        raise ValueError(f"one-off sweeps need a working adapter: {handle.error}")
-    build = getattr(handle.adapter, "oneoff", None)
-    if build is None:
-        raise ValueError(f"project '{project_cfg.name}' adapter does not "
-                         "support one-off sweeps (no oneoff() hook)")
-    argv = build(dict(params))
-    if not argv:
-        raise ValueError("adapter returned an empty one-off command")
-    # Queue precedence: explicit queue, then the cluster the sweep names
-    # (one-offs on a costed cluster must land on that cluster's queue so
-    # they serialize with its other jobs and get cost-gated), then the base
-    # experiment's queue.
-    queue = params.get("queue") or params.get("cluster")
-    base = params.get("base")
-    if not queue and base:
-        by_name = {e.name: e for e in handle.adapter.experiments()}
-        if base not in by_name:
-            raise ValueError(f"unknown base experiment '{base}'")
-        queue = by_name[base].queue or None
-    return [str(a) for a in argv], queue

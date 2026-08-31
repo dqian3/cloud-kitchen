@@ -2,8 +2,8 @@
 
 Deliberately thin — a registry and metrics store, not a results browser.
 Plotting and deep analysis stay in each repo's own analyze scripts over the
-run dirs; the ledger's job is that a run (a paper sweep or a one-off launched
-on a hunch) is findable later with its provenance, per-point metrics, and a
+run dirs; the ledger's job is that a run is findable later with its
+provenance, per-point metrics, and a
 note about why it ran and what it showed — even after its directory has been
 deleted to reclaim disk.
 
@@ -316,6 +316,20 @@ def get_run(db, run_id):
     # binaries and says nothing about it.
     run["mixed_build"] = len({b["git_commit"] for b in run["builds"]}) > 1
     return run
+
+
+def next_trial(db, run_id) -> int | None:
+    """The first unused trial number in a run, or None for legacy data.
+
+    Native sweep points always carry a trial tag. Older scanned summaries may
+    not, and guessing an offset for those could overwrite data on disk.
+    """
+    row = db.query_one(
+        "SELECT MAX(trial) AS last_trial, COUNT(*) AS n FROM run_points "
+        "WHERE run_id = ?", (run_id,))
+    if row is None or not row["n"] or row["last_trial"] is None:
+        return None
+    return int(row["last_trial"]) + 1
 
 
 def builds_of(run_dir) -> list:

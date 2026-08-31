@@ -71,19 +71,9 @@ class DisplayInfo:
 class ProjectAdapter(Protocol):
     """Required surface. Adapters may additionally implement
 
-        def oneoff(self, params: dict) -> list[str]
-
-    returning a full argv for an ad-hoc sweep: params carries generic sweep
-    fields (base experiment, dims {name: [values]}, rates, rate_search,
-    trials, duration_secs, extra_flags) and the adapter translates them to
-    its driver's flags. Not part of the Protocol so isinstance checks keep
-    passing for catalog-only adapters; the daemon probes with getattr.
-
-    A second optional hook,
-
         def display(self) -> DisplayInfo
 
-    advertises how this project's dims and metrics should be shown: the
+    `display()` advertises how this project's dims and metrics should be shown: the
     catalog endpoint passes it through so UIs can build parameter forms and
     result columns per project instead of hardcoding names. Metric order is
     the column order; unknown dims stay submittable (dims here are hints,

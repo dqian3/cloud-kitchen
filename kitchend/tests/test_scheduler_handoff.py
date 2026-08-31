@@ -138,6 +138,69 @@ def test_resubmit_resume_and_fresh_have_distinct_directories(tmp_path):
     assert fresh["will_resume"] is False
 
 
+def test_add_trials_resumes_result_at_next_offset(tmp_path):
+    scheduler, db, _, project_id = setup_scheduler(tmp_path, exit_code=0)
+    job_dir = tmp_path / "existing-result"
+    sweep_dir = job_dir / "exp"
+    sweep_dir.mkdir(parents=True)
+    source = jobs.submit(db, project_id, {
+        "project": "p", "name": "exp", "experiments": ["exp"],
+        "command": ["fake-driver", "--trials", "3"],
+        "extra_flags": ["--trial-offset=0"], "run_dir": str(job_dir),
+    })
+    jobs.finish(db, scheduler.hub, source, jobs.OK)
+    run_id = db.insert(
+        "INSERT INTO runs (project_id, run_dir, experiment, job_id) "
+        "VALUES (?, ?, ?, ?)",
+        (project_id, str(sweep_dir), "exp", source))
+    for trial in (0, 1, 2):
+        db.insert(
+            "INSERT INTO run_points (run_id, dims_json, rate, trial, metrics_json) "
+            "VALUES (?, '{}', 1000, ?, '{}')", (run_id, trial))
+
+    result = scheduler.add_trials(run_id, 2)
+    added = jobs.get(db, result["job_id"])
+    argv, _ = jobs.build_command(scheduler.config.project("p"), added["spec"])
+
+    assert result["trial_offset"] == 3
+    assert added["run_dir"] == str(job_dir)
+    assert added["will_resume"] is True
+    assert "extra_flags" not in added["spec"]
+    assert argv.count("--trials") == 1
+    assert argv[argv.index("--trials") + 1] == "2"
+    assert argv.count("--trial-offset") == 1
+    assert argv[argv.index("--trial-offset") + 1] == "3"
+    assert argv[argv.index("--output-dir") + 1] == str(job_dir)
+    assert "--resume" in argv
+
+
+def test_add_trials_rejects_parallel_extension(tmp_path):
+    scheduler, db, _, project_id = setup_scheduler(tmp_path, exit_code=0)
+    job_dir = tmp_path / "existing-result"
+    sweep_dir = job_dir / "exp"
+    sweep_dir.mkdir(parents=True)
+    source = jobs.submit(db, project_id, {
+        "project": "p", "name": "exp", "experiments": ["exp"],
+        "command": ["fake-driver"], "run_dir": str(job_dir),
+    })
+    jobs.finish(db, scheduler.hub, source, jobs.OK)
+    run_id = db.insert(
+        "INSERT INTO runs (project_id, run_dir, experiment, job_id) "
+        "VALUES (?, ?, ?, ?)",
+        (project_id, str(sweep_dir), "exp", source))
+    db.insert(
+        "INSERT INTO run_points (run_id, dims_json, rate, trial, metrics_json) "
+        "VALUES (?, '{}', 1000, 0, '{}')", (run_id,))
+
+    scheduler.add_trials(run_id, 1)
+
+    try:
+        scheduler.add_trials(run_id, 1)
+        assert False, "expected a parallel extension to be rejected"
+    except ValueError as e:
+        assert "already extending" in str(e)
+
+
 def test_global_pause_survives_daemon_restart(tmp_path):
     scheduler, db, clusters, _ = setup_scheduler(tmp_path, exit_code=0)
     db.insert(
