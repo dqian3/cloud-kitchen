@@ -17,24 +17,12 @@ and either pass them explicitly or install them process-wide:
     set_default_settings(SETTINGS)
 
 Recognized environment variables, tried per prefix in order (first prefix that
-has the variable set wins): {P}GCP_PROJECT, {P}GCP_IAP, {P}VM_START_ATTEMPTS,
-{P}VM_START_RETRY_DELAY_S.
+has the variable set wins): {P}GCP_PROJECT, {P}GCP_IAP, {P}SSH_ATTEMPTS,
+{P}SSH_RETRY_DELAY_S.
 """
 
 import os
 from dataclasses import dataclass, field
-
-# Starting a stopped cluster asks one zone for N machines of one type at once,
-# and a zone that is short right now is usually fine seconds later. Without a
-# retry the whole run ends on a condition that resolves itself. Only capacity
-# is worth retrying: bad machine type, permissions, or a VM that does not
-# exist fail the same way every time.
-DEFAULT_VM_START_RETRY_MARKERS = (
-    "ZONE_RESOURCE_POOL_EXHAUSTED",
-    "does not have enough resources available",
-    "resource pool exhausted",
-    "Internal error",
-)
 
 # A single ssh that dies on connection setup (VM still booting, IAP hiccup,
 # sshd not yet up) is usually fine seconds later. Only connection-layer
@@ -58,19 +46,16 @@ _FALSY = ("0", "false", "False", "no", "")
 class RemoteSettings:
     gcp_project: str | None = None
     tunnel_through_iap: bool = False
-    vm_start_attempts: int = 4
-    vm_start_retry_delay_s: int = 20
-    vm_start_retry_markers: tuple[str, ...] = field(
-        default=DEFAULT_VM_START_RETRY_MARKERS
-    )
     # Connection setup is retried; a command that ran and exited nonzero is
-    # not (see GCloudRemote.ssh). A large fan-out opens connections faster
-    # than a jump host services them, and one refused during setup is worth
-    # a second try 5s later -- without it, three points of a 102-VM sweep
-    # died on a single dropped scp. Each retry is printed, so this recovers
-    # from a burst without hiding a real fault.
-    ssh_attempts: int = 3
-    ssh_retry_delay_s: int = 5
+    # not (see GCloudRemote.ssh). This covers two things with one mechanism:
+    # a jump host that refuses one connection in a large fan-out (without a
+    # retry, three points of a 102-VM sweep died on a single dropped scp),
+    # and a VM that was just started and whose sshd is not listening yet.
+    # The second sets the budget: a cold boot plus key propagation runs to a
+    # minute or two, where the fan-out case clears in seconds. Each retry is
+    # printed, so this recovers from a burst without hiding a real fault.
+    ssh_attempts: int = 12
+    ssh_retry_delay_s: int = 10
     ssh_transient_markers: tuple[str, ...] = field(
         default=DEFAULT_SSH_TRANSIENT_MARKERS
     )
@@ -101,14 +86,6 @@ class RemoteSettings:
         iap = _lookup("GCP_IAP")
         if iap is not None:
             kwargs["tunnel_through_iap"] = iap not in _FALSY
-
-        attempts = _lookup("VM_START_ATTEMPTS")
-        if attempts:
-            kwargs["vm_start_attempts"] = int(attempts)
-
-        delay = _lookup("VM_START_RETRY_DELAY_S")
-        if delay:
-            kwargs["vm_start_retry_delay_s"] = int(delay)
 
         ssh_attempts = _lookup("SSH_ATTEMPTS")
         if ssh_attempts:

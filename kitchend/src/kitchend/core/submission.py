@@ -73,8 +73,18 @@ def prepare_specs(project_cfg, spec: dict) -> list[dict]:
 
 def enqueue(db, hub, scheduler, project_cfg, spec: dict) -> int:
     project_id = jobs.ensure_project_row(db, project_cfg)
+    # `after` places the job and is then spent: the queue order is the whole
+    # of the relationship, so it is not kept on the spec for anyone to read
+    # back as though it still meant something.
+    after = spec.pop("after", None)
+    # Checked before the row exists: a placement that cannot be honoured must
+    # not leave the job queued anyway, at the priority-0 bottom it was trying
+    # to avoid.
+    if after is not None and after not in jobs.waiting_order(db):
+        raise ValueError(f"cannot queue after job {after}: it is not waiting")
     job_id = jobs.submit(db, project_id, spec)
     hub.emit("job.state", job_id=job_id, state=jobs.WAITING)
+    jobs.place(db, hub, job_id, after)
     scheduler.wake()
     return job_id
 

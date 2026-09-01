@@ -4,7 +4,7 @@ import { api } from './api.js'
 // Job states and the outcomes a done job carries, in one map: the queue
 // shows whichever applies.
 const STATE_COLORS = {
-  queued: 'gray', blocked: 'orange', retrying: 'purple',
+  queued: 'gray', retrying: 'purple',
   running: 'blue', recorded: 'gray',
   ok: 'green', degraded: 'orange', failed: 'red', canceled: 'gray',
 }
@@ -77,8 +77,23 @@ function UIProvider({ children }) {
   )
 }
 
+// The daemon stores SQLite `datetime('now')`: UTC, carrying no zone marker.
+// A browser reads that as local time, so every timestamp in the UI used to be
+// off by the local offset. Stamp the zone on before parsing, then render in
+// the reader's own.
+function toDate(ts) {
+  if (!ts) return null
+  const s = String(ts).trim().replace(' ', 'T')
+  const d = new Date(/[Zz]$|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + 'Z')
+  return Number.isNaN(d.getTime()) ? null : d
+}
+
 function fmtTs(ts) {
-  return ts ? ts.replace('T', ' ').slice(5, 19) : '—'
+  const d = toDate(ts)
+  if (!d) return ts ? String(ts) : '—'
+  const p = n => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
 }
 
 function fmtResultValue(value) {
@@ -128,6 +143,22 @@ function ClusterCard({ c, onAction }) {
             in use by {c.used_by}
           </div>
         )}
+        {/* A failed bring-up leaves the cluster back in `terminated`, so the
+            state chip alone cannot say whether it was just tried. */}
+        {c.last_attempt && (
+          <div className={'attempt ' +
+                 (c.last_attempt.outcome === 'failed' ? 'error' : 'muted')}
+               title={c.last_attempt.error || 'the most recent bring-up'}>
+            last bring-up {fmtTs(c.last_attempt.started_at)}
+            {' · '}
+            {c.last_attempt.outcome === 'running' ? 'succeeded'
+              : c.last_attempt.outcome === 'starting' ? 'in progress'
+                : 'failed'}
+            {c.last_attempt.error && (
+              <div className="attempt-why">{shortError(c.last_attempt.error)}</div>
+            )}
+          </div>
+        )}
         {c.vms && Object.keys(c.vms).length > 0 && (
           <ul className="vm-list">
             {Object.entries(c.vms)
@@ -172,9 +203,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
   const [argvMode, setArgvMode] = useState(false)
   const [argvText, setArgvText] = useState('[]')
   const [jobName, setJobName] = useState('')
-  const [priority, setPriority] = useState(0)
-  const [attempts, setAttempts] = useState(20)
-  const [after, setAfter] = useState('')          // chain: wait for job #
+  const [after, setAfter] = useState('')          // queue behind job #
   const [managedCluster, setManagedCluster] = useState('')  // daemon-owned
   const [err, setErr] = useState(null)
   const [expanded, setExpanded] = useState([])   // bases with variants shown
@@ -208,7 +237,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
     e.preventDefault()
     setErr(null)
     try {
-      const common = { project, priority: +priority, max_attempts: +attempts }
+      const common = { project }
       if (after) common.after = +after
       if (argvMode || !hasCatalog) {
         let command
@@ -250,14 +279,10 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
             </select>
           </label>
         )}
-        <label title="chain: run only after this job's retry chain ends with data; a failed chain cancels this job">
+        <label title="queue directly behind this job; leave blank to fall in behind the last job on the same cluster">
           after #<input type="number" min="1" className="after-input"
                         value={after} onChange={e => setAfter(e.target.value)} />
         </label>
-        <label>prio <input type="number" value={priority}
-               onChange={e => setPriority(e.target.value)} /></label>
-        <label>attempts <input type="number" value={attempts} min="1"
-               onChange={e => setAttempts(e.target.value)} /></label>
         <button type="submit">
           queue job{!argvMode && hasCatalog && selected.length > 1
             ? ` (${selected.length})` : ''}
@@ -309,13 +334,11 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
               return (
                 <label key={e.name}
                        className={`exp ${disabled ? 'exp-disabled' : ''} ${e.group ? 'exp-variant' : ''}`}
-                       title={e.native
-                         ? `${e.description}\n\nnative: runs on the SweepEngine as its own job; the daemon owns ${e.queue} around it`
-                         : e.description}>
+                       title={`${e.description}\n\nruns on the SweepEngine as its own job; the daemon owns ${e.queue} around it`}>
                   <input type="checkbox" disabled={disabled}
                          checked={selected.includes(e.name)}
                          onChange={() => toggle(e.name)} />
-                  {e.name}{e.native && <span className="native-mark">⚡</span>}
+                  {e.name}
                 </label>
               )
             }
@@ -494,14 +517,8 @@ function JobRow({ job, isHead, onChanged, onMove, canMoveUp, canMoveDown }) {
     : isHead && job.state === 'running' ? 'running'
       : isHead && retryIn != null ? 'retrying' : 'queued'
   const spec = job.spec
-  const command = [
-    ...(spec.command || spec.experiments || []),
-    ...(spec.extra_flags || []),
-  ]
-  // Fallback keeps the indicator correct against a daemon that has not yet
-  // restarted onto the derived `will_resume` API field.
-  const willResume = job.will_resume ?? Boolean(
-    job.run_dir && (spec.resume || job.attempts > 0))
+  const command = spec.command || spec.experiments || []
+  const willResume = job.will_resume
 
   return (
     <>
@@ -513,21 +530,18 @@ function JobRow({ job, isHead, onChanged, onMove, canMoveUp, canMoveDown }) {
             <span className="muted" title="continues in the existing run directory">
               {' '}· continues existing run</span>}</td>
         <td className="muted">{spec.cluster || '—'}</td>
-        <td className="job-status"><div className="job-status-scroll">
+        <td className="job-status"><div className="job-status-body">
             <Chip text={label} color={STATE_COLORS[label]} />
             {isHead && job.attempts > 1 && !done &&
               <span className="muted" title="driver invocations so far">
-                {' '}attempt {job.attempts}/{job.max_attempts}</span>}
+                attempt {job.attempts}/{job.max_attempts}</span>}
             {isHead && retryIn != null &&
               <span className="muted" title={job.last_error || 'waiting'}>
-                {' '}{retryIn > 0 ? `retrying in ${retryIn}s` : 'retrying…'}</span>}
+                {retryIn > 0 ? `retrying in ${retryIn}s` : 'retrying…'}</span>}
             {isHead && waiting && job.last_error && (
               <span className="error" title={job.last_error}>
-                {' '}· {shortError(job.last_error)}</span>
+                {shortError(job.last_error)}</span>
             )}
-            {isHead && waiting && spec.after &&
-              <span className="muted" title="waits for that job to finish with data">
-                {' '}after #{spec.after}</span>}
           </div>
         </td>
         <td className="muted">{job.priority}</td>
@@ -683,7 +697,7 @@ function RunEntry({ entry, onChanged, display }) {
           {detail?.mixed_build &&
             <span className="chip chip-orange" title={
               (detail.builds || []).map(b =>
-                `${b.started_at} ${String(b.git_commit).slice(0, 8)}`
+                `${fmtTs(b.started_at)} ${String(b.git_commit).slice(0, 8)}`
                 + (b.git_dirty ? ' (dirty)' : '')).join('\n')
             }>mixed build</span>}
           {!run.dir_exists &&
@@ -868,7 +882,7 @@ function DaemonLog() {
               .filter(([k]) => !skip.has(k))
               .map(([k, v]) => `${k}=${typeof v === 'object' ? JSON.stringify(v) : v}`)
               .join(' ')
-            return `${(e.ts || '').slice(5, 19)}  ${e.type}`
+            return `${fmtTs(e.ts)}  ${e.type}`
               + (e.job_id != null ? `  job#${e.job_id}` : '')
               + (e.cluster ? `  ${e.cluster}` : '')
               + (extra ? `  ${extra}` : '')
@@ -886,7 +900,7 @@ export default function App() {
 }
 
 function Dashboard() {
-  const { notify, ask, askText } = useUI()
+  const { notify, ask } = useUI()
   const [health, setHealth] = useState(null)
   const [projects, setProjects] = useState([])
   const [jobs, setJobs] = useState([])
@@ -1006,8 +1020,7 @@ function Dashboard() {
     const i = queued.indexOf(id)
     if (i < 0) return
     let order = [...queued]
-    if (how === 'top') { order.splice(i, 1); order.unshift(id) }
-    else if (how === 'up' && i > 0) { [order[i - 1], order[i]] = [order[i], order[i - 1]] }
+    if (how === 'up' && i > 0) { [order[i - 1], order[i]] = [order[i], order[i - 1]] }
     else if (how === 'down' && i < order.length - 1) {
       [order[i + 1], order[i]] = [order[i], order[i + 1]]
     } else return
@@ -1055,6 +1068,22 @@ function Dashboard() {
         {health?.paused &&
           <Chip text="paused" color="orange" />}
       </header>
+
+      {/* One expired credential stops every cluster, so it belongs at the top
+          of the page rather than buried in a per-cluster error. */}
+      {health?.auth_error && (
+        <div className="banner-error" role="alert">
+          <b>gcloud is not authenticated.</b> Every cluster poll and bring-up
+          fails until this is fixed — run <code>gcloud auth login</code> in a
+          terminal.
+          {health.auth_error_since && (
+            <span className="muted"> Failing since{' '}
+              {fmtTs(new Date(health.auth_error_since * 1000).toISOString())}.
+            </span>
+          )}
+          <div className="banner-detail">{health.auth_error}</div>
+        </div>
+      )}
 
       {projClusters.length > 0 && (
         <section>

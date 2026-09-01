@@ -67,8 +67,13 @@ def create_app(config: Config) -> FastAPI:
 
     @app.get("/api/health")
     def health():
+        # gcloud auth is daemon-wide: one dead credential stops every cluster,
+        # so it belongs beside the daemon's own status, not on a cluster card.
+        clusters = app.state.clusters
         return {"status": "ok", "version": __version__,
-                "paused": app.state.scheduler.paused()}
+                "paused": app.state.scheduler.paused(),
+                "auth_error": clusters.auth_error,
+                "auth_error_since": clusters.auth_error_since}
 
     @app.get("/api/projects")
     def projects():

@@ -36,7 +36,7 @@ from pathlib import Path
 DEFAULT_MAX_ATTEMPTS = 20
 DEFAULT_RETRY_DELAY_SECS = 600
 
-WAITING = "waiting"         # in the queue: its turn, a dependency, or a cluster
+WAITING = "waiting"         # in the queue: waiting its turn, or for a cluster
 RUNNING = "running"         # a driver process is alive
 DONE = "done"
 
@@ -159,9 +159,8 @@ def label(spec: dict, project_cfg=None) -> str:
 def queue_key(job: dict) -> str:
     """What to group this job under in the UI.
 
-    Once the serialization key: dispatch ran a queue at a time and this chose
-    which. There is one queue now, in priority order, so nothing serializes by
-    it and it survives only as a label.
+    A label, nothing more. Dispatch is one global queue in priority order and
+    never consults this.
     """
     return job["spec"].get("queue") or job["spec"].get("cluster") or job["project"]
 
@@ -258,21 +257,69 @@ def _detach_and_delete(db, job_id) -> None:
     db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
 
+def _rank(db, ids: list[int]) -> None:
+    """Write `ids` back as priorities N..1, so the list is the dispatch order.
+
+    Priority is a dense rank, not a class: the only thing that reads it is
+    `ORDER BY priority DESC, id ASC`, so any change of order is a renumber.
+    """
+    n = len(ids)
+    for i, job_id in enumerate(ids):
+        db.execute("UPDATE jobs SET priority = ? WHERE id = ? AND state = 'waiting'",
+                   (n - i, job_id))
+
+
+def waiting_order(db) -> list[int]:
+    """Waiting job ids in dispatch order."""
+    return [r["id"] for r in db.query(
+        "SELECT id FROM jobs WHERE state = ? ORDER BY priority DESC, id ASC",
+        (WAITING,))]
+
+
 def reorder(db, hub, ids: list[int]) -> None:
-    """Make the waiting jobs in `ids` dispatch in that order: priorities are
-    assigned N..1 down the list (dispatch is priority DESC, id ASC). Jobs
-    that are running or done are refused."""
+    """Make the waiting jobs in `ids` dispatch in that order. Jobs that are
+    running or done are refused."""
     for job_id in ids:
         job = get(db, job_id)
         if job is None:
             raise KeyError(job_id)
         if job["state"] != WAITING:
             raise ValueError(f"job {job_id} is {job['state']}, not waiting")
-    n = len(ids)
-    for i, job_id in enumerate(ids):
-        db.execute("UPDATE jobs SET priority = ? WHERE id = ? AND state = 'waiting'",
-                   (n - i, job_id))
+    _rank(db, ids)
     hub.emit("job.reordered", ids=list(ids))
+
+
+def place(db, hub, job_id: int, after: int | None = None) -> int | None:
+    """Position a freshly queued job, returning the job it now sits behind.
+
+    `after` names the job to queue behind. Without it the job falls in behind
+    the last one already queued for its own cluster, which is where the next
+    piece of that cluster's work belongs — appending to the very end instead
+    would put it behind every other cluster's queue, and a bare submit would
+    mean something different before and after someone reorders (a new job
+    defaults to priority 0, which sinks below a reordered set).
+    """
+    order = waiting_order(db)
+    if job_id not in order:
+        return None                      # already dispatched, or gone
+    order.remove(job_id)
+    if after is not None:
+        if after not in order:
+            raise ValueError(
+                f"cannot queue after job {after}: it is not waiting")
+        index = order.index(after) + 1
+    else:
+        after, index = None, len(order)
+        cluster = (get(db, job_id) or {}).get("spec", {}).get("cluster")
+        if cluster is not None:
+            for i, other_id in enumerate(order):
+                other = get(db, other_id)
+                if other and other["spec"].get("cluster") == cluster:
+                    after, index = other_id, i + 1
+    order.insert(index, job_id)
+    _rank(db, order)
+    hub.emit("job.placed", job_id=job_id, after=after)
+    return after
 
 
 def build_command(project_cfg, spec: dict):

@@ -15,9 +15,28 @@ def arm_shutdown_cmd(minutes=60, cancel_first=True):
     return f"{cancel}nohup sudo shutdown -h +{minutes} >/dev/null 2>&1 &"
 
 
+def _why_unarmed(results, vms) -> str:
+    """Why the arm did not land. run_on_all keeps the exception it caught per
+    host; reporting only the host names left the reason unread, so a VM that
+    was still booting and one with a broken key read identically."""
+    for vm in vms:
+        out = results.get(vm)
+        if isinstance(out, Exception):
+            lines = [ln.strip() for ln in str(out).splitlines() if ln.strip()]
+            if lines:
+                return f"{vm}: {lines[-1][:200]}"
+    return "no output from any of them"
+
+
 def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120):
     """Arm (or re-arm) the auto-shutdown timer on all VMs. A no-op for
-    backends whose hosts can't shut themselves down (containers)."""
+    backends whose hosts can't shut themselves down (containers).
+
+    Waiting for a just-started VM's sshd is `remote.ssh`'s job, not this
+    one's: a refused connection is retried there long enough to cover a cold
+    boot. If it still cannot connect, the VM is not coming up and the caller
+    stops it.
+    """
     if not getattr(remote, "supports_deadman", True):
         return {}
     results = remote.run_on_all(
@@ -27,7 +46,7 @@ def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120):
     if failed:
         error = RuntimeError(
             f"could not arm shutdown timer on {len(failed)} VM(s): "
-            f"{', '.join(failed)}")
+            f"{', '.join(failed)} ({_why_unarmed(results, failed)})")
         error.failed_vms = failed
         raise error
     return results
@@ -134,7 +153,9 @@ def start_vms(remote, vms, deadman_minutes=60, drain_first=True,
             arm_shutdown(remote, started, minutes=deadman_minutes)
         raise
     # Fresh boots have no pending timer, but re-arming unconditionally is
-    # harmless and covers the VMs that were already running.
+    # harmless and covers the VMs that were already running. This is the arm
+    # that races the boot: the VMs were asked to start a moment ago, so give
+    # sshd time to come up rather than reading a closed connection as a fault.
     try:
         arm_shutdown(remote, vms, minutes=deadman_minutes)
     except Exception:

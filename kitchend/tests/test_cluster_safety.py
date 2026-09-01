@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from kitchen.remote.mock import MockRemote
-from kitchend.core.clusters import ClusterManager, ManagedCluster
+from kitchend.core.clusters import ClusterManager, ManagedCluster, vms_from_yaml
 from kitchend.core.db import Db, open_db
 
 
@@ -41,6 +41,16 @@ def manager():
     value.db = FakeDb()
     value.hub = FakeHub()
     return value
+
+
+def test_cluster_yaml_leases_placement_pool_and_clients(tmp_path):
+    config = tmp_path / "geo.yaml"
+    config.write_text(
+        "platform: gcloud\n"
+        "replica:\n  pool: [r0, r1, r2]\n  port: 9000\n"
+        "client:\n  vms: [c0]\n  port: 9100\n")
+
+    assert vms_from_yaml(config) == ["r0", "r1", "r2", "c0"]
 
 
 def test_failed_stop_stays_unmanaged_and_keeps_session_open():

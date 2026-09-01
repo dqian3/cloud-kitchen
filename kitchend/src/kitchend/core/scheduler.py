@@ -87,9 +87,7 @@ class Scheduler:
 
         One queue, one job at a time. The head owns the daemon: if it is
         waiting out a failed attempt, nothing else tries — the clusters share
-        VMs, so a job behind it would only ask the same question. A job whose
-        `after` dependency has not finished is skipped rather than blocking,
-        since it cannot run at all yet.
+        VMs, so a job behind it would only ask the same question.
         """
         if self._running is not None:
             return
@@ -102,16 +100,6 @@ class Scheduler:
             "ORDER BY j.priority DESC, j.id ASC", (jobs.WAITING,)
         ):
             job = jobs.get(self.db, row["id"])
-            gate = self._after_gate(job)
-            if gate == "wait":
-                continue
-            if gate == "cancel":
-                jobs.finish(self.db, self.hub, job["id"], jobs.CANCELED,
-                            last_error=f"job {job['spec'].get('after')} it "
-                                       "waited for did not produce data")
-                self.hub.emit("job.dependency_canceled", job_id=job["id"],
-                              after=job["spec"].get("after"))
-                continue
             if self._waiting(job["id"]):
                 return          # the head is waiting: so is everything else
             self._running = job["id"]
@@ -148,8 +136,6 @@ class Scheduler:
             return "starting"
         if job["state"] == jobs.RUNNING:
             return "running"
-        if self._after_gate(job) == "wait":
-            return "blocked"
         if self._waiting(job["id"]):
             return "retrying"
         return "queued"
@@ -175,18 +161,18 @@ class Scheduler:
             self.hub.emit("job.blocked", job_id=job["id"], reason=reason)
 
     def next_waiting(self):
-        """The first waiting job that can eventually dispatch, or None.
+        """The head of the queue, or None.
 
-        Dependency-blocked jobs are skipped just as `_dispatch` skips them;
-        otherwise a blocked job on another cluster could make us tear down
-        the fleet needed by the job that will actually run next.
+        Read by the cluster keep-alive to decide whether the fleet now in use
+        is the one the next job wants. The loop only guards against a job
+        deleted between the query and the read.
         """
         for row in self.db.query(
             "SELECT id FROM jobs WHERE state = ? "
             "ORDER BY priority DESC, id ASC", (jobs.WAITING,)
         ):
             job = jobs.get(self.db, row["id"])
-            if self._after_gate(job) == "ready":
+            if job is not None:
                 return job
         return None
 
@@ -200,9 +186,8 @@ class Scheduler:
         changing the queue order is free. Once the driver spawns the order is
         settled until the job ends.
 
-        Uses `_dispatch`'s gates, so the slot only changes hands to a job that
-        could actually take it: a dependency-blocked job is skipped the way
-        dispatch skips it, and a retry-delayed job ahead of us stops the scan
+        Uses `_dispatch`'s rule, so the slot only changes hands to a job that
+        could actually take it: a retry-delayed job ahead of us stops the scan
         the way it stops dispatch — if nothing would run, there is no reason
         to give the fleet up.
         """
@@ -213,7 +198,7 @@ class Scheduler:
             if row["id"] == job["id"]:
                 return None                     # still the head
             other = jobs.get(self.db, row["id"])
-            if other is None or self._after_gate(other) != "ready":
+            if other is None:
                 continue
             if self._waiting(other["id"]):
                 return None
@@ -230,25 +215,6 @@ class Scheduler:
         """
         ca, cb = a["spec"].get("cluster"), b["spec"].get("cluster")
         return bool(ca) and ca == cb and a["project"] == b["project"]
-
-    def _after_gate(self, job) -> str:
-        """'ready' | 'wait' | 'cancel' for a job's `after` dependency.
-
-        One row per job means there is no chain to walk: the dependency is
-        ready when it is done and produced data, and a dependency that ended
-        without data cancels the dependent — silently burning cluster money
-        after a broken predecessor is the worse default; resubmit the
-        canceled job to run it anyway.
-        """
-        after = job["spec"].get("after")
-        if after is None:
-            return "ready"
-        dep = jobs.get(self.db, after)
-        if dep is None:
-            return "cancel"     # dangling reference
-        if dep["state"] != jobs.DONE:
-            return "wait"
-        return "ready" if dep["outcome"] in (jobs.OK, jobs.DEGRADED) else "cancel"
 
     async def _execute(self, job):
         job_id = job["id"]

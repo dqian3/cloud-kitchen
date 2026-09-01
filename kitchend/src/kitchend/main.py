@@ -82,16 +82,13 @@ def cmd_catalog(config, args):
     for queue in {**by_queue, **orphan_groups}:
         print(f"[{queue}]")
         for e in by_queue.get(queue, []):
-            mark = " ⚡" if e.get("native") else ""
-            print(f"  {e['name']}{mark}  — {e['description']}")
+            print(f"  {e['name']}  — {e['description']}")
             for v in variants.get(e["name"], []):
-                vmark = " ⚡" if v.get("native") else ""
-                print(f"      {v['name']}{vmark}  — {v['description']}")
+                print(f"      {v['name']}  — {v['description']}")
         for group, members in orphan_groups.get(queue, {}).items():
             print(f"  {group}/")
             for v in members:
-                vmark = " ⚡" if v.get("native") else ""
-                print(f"      {v['name']}{vmark}  — {v['description']}")
+                print(f"      {v['name']}  — {v['description']}")
     if cat.get("aggregates"):
         print("[aggregates]")
         for name, members in cat["aggregates"].items():
@@ -302,7 +299,8 @@ def main(argv=None):
     p.add_argument("--attempts", type=int, default=20, dest="retries",
                    help="driver invocations before giving up")
     p.add_argument("--after", type=int, default=None,
-                   help="run after this job's retry chain succeeds")
+                   help="queue directly behind this job "
+                        "(default: behind the last job on the same cluster)")
 
     p = sub.add_parser("submit-argv", help="queue one exact argv JSON array")
     p.add_argument("project")

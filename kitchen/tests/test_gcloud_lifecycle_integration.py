@@ -50,7 +50,7 @@ class FakeGcp:
 
 def remote(fake, monkeypatch):
     monkeypatch.setattr("kitchen.remote.gcloud.subprocess.run", fake)
-    settings = RemoteSettings(vm_start_attempts=1, ssh_attempts=1)
+    settings = RemoteSettings(ssh_attempts=1)
     return GCloudRemote(project="mock-project", settings=settings)
 
 

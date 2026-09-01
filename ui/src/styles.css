@@ -27,20 +27,26 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
 .chip-green { background: var(--green); } .chip-red { background: var(--red); }
 .chip-orange { background: var(--orange); } .chip-purple { background: var(--purple); }
 
-.cards { display: flex; flex-wrap: wrap; gap: 0.75rem; }
-/* min-width:0 lets a card shrink to its row. Without it a `white-space: pre`
+/* A grid, not wrapping flex: flex lets the last row's cards stretch to fill
+   it, so a cluster alone on its row rendered three times the width of its
+   neighbours. auto-fill keeps every card one track wide. */
+.cards { display: grid; gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr)); }
+/* min-width:0 lets a card shrink to its track. Without it a `white-space: pre`
    log inside is shrink-to-fit: it sizes to its longest line and pushes the
    card off the right edge instead of scrolling inside it. */
 .card { background: var(--card); border: 1px solid var(--line);
   border-radius: 8px; padding: 0.75rem 1rem;
-  flex: 1 1 22rem; min-width: 0; max-width: 100%; }
+  min-width: 0; max-width: 100%; }
 .card-head { display: flex; justify-content: space-between; gap: 1rem;
   align-items: center; }
 .card-actions { margin-top: 0.5rem; display: flex; gap: 0.4rem;
   align-items: center; flex-wrap: wrap; }
 .card-actions input[type=number] { width: 4.5rem; }
 .burn { color: var(--orange); font-weight: 600; }
-.leases { margin: 0.3rem 0; padding-left: 1.1rem; }
+.attempt { margin-top: 0.3rem; font-size: 0.8rem; }
+.attempt-why { font-family: ui-monospace, monospace; font-size: 0.75rem;
+  overflow-wrap: anywhere; }
 .vm-list { margin: 0.4rem 0 0; padding: 0; list-style: none;
   max-height: 14rem; overflow-y: auto;
   font-family: ui-monospace, monospace; font-size: 0.76rem; }
@@ -58,7 +64,6 @@ h1 { font-size: 1.3rem; } h2 { font-size: 1.05rem; margin: 1.5rem 0 0.5rem; }
 .submit-form input, .submit-form select, .card-actions input {
   background: var(--card); color: var(--fg); border: 1px solid var(--line);
   border-radius: 4px; padding: 0.25rem 0.4rem; }
-.submit-form input[type=number] { width: 3.5rem; }
 button { background: var(--blue); color: #fff; border: 0; border-radius: 4px;
   padding: 0.3rem 0.7rem; cursor: pointer; }
 button:hover { filter: brightness(1.1); }
@@ -78,7 +83,6 @@ button.agg { background: none; border: 1px solid var(--blue);
 .exp { display: inline-flex; gap: 0.3rem; align-items: center;
   font-family: ui-monospace, monospace; font-size: 0.85rem; cursor: pointer; }
 .exp-disabled { opacity: 0.35; cursor: not-allowed; }
-.native-mark { color: var(--orange); font-size: 0.75rem; margin-left: 0.15rem; }
 .exp-variant { opacity: 0.75; font-size: 0.8rem; }
 .exp-virtual { color: var(--muted); cursor: default; }
 button.variant-toggle { padding: 0 0.35rem; font-size: 0.72rem;
@@ -88,15 +92,24 @@ button.variant-toggle { padding: 0 0.35rem; font-size: 0.72rem;
   overflow-x: auto; overscroll-behavior-inline: contain; }
 .queue-table { width: 100%; min-width: 0; }
 .queue-table table { width: 100%; min-width: 0; table-layout: fixed; }
-.queue-table th:nth-child(1) { width: 3rem; }
-.queue-table th:nth-child(2) { width: 24%; }
-.queue-table th:nth-child(4) { width: 8rem; }
-.queue-table th:nth-child(5) { width: 11rem; }
-.queue-table td:not(.job-status):not(.log-cell) { overflow: hidden;
+/* Columns 1-3 and 5-7 hold known-short values, so they are sized to their
+   content and the state column -- the only one whose text is open-ended --
+   gets whatever is left. */
+.queue-table th:nth-child(1) { width: 3rem; }    /* id */
+.queue-table th:nth-child(2) { width: 20%; }     /* experiment */
+.queue-table th:nth-child(3) { width: 6rem; }    /* cluster */
+.queue-table th:nth-child(5) { width: 4.5rem; }  /* priority */
+.queue-table th:nth-child(6) { width: 9.5rem; }  /* created */
+.queue-table th:nth-child(7) { width: 7.5rem; }  /* actions */
+.queue-table td:not(.job-status):not(.log-cell):not(.mono) { overflow: hidden;
   text-overflow: ellipsis; }
+/* Wrap rather than scroll. A retry reason is the one thing the reader needs
+   off this row, and it does not survive being read through a 7rem window. */
+.queue-table td.mono, .job-status { white-space: normal;
+  overflow-wrap: anywhere; }
 .job-status { min-width: 0; }
-.job-status-scroll { width: 100%; max-width: 100%; overflow-x: auto;
-  white-space: nowrap; overscroll-behavior-inline: contain; padding-bottom: 2px; }
+.job-status-body { display: flex; flex-wrap: wrap; align-items: baseline;
+  column-gap: 0.3rem; row-gap: 0.1rem; }
 table { width: max-content; min-width: 100%; border-collapse: collapse; }
 th { text-align: left; color: var(--muted); font-weight: 500;
   border-bottom: 1px solid var(--line); padding: 0.25rem 0.5rem; }
@@ -176,8 +189,6 @@ h2 button.link { margin-left: 0.6rem; font-size: 0.75rem; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem;
   align-items: center; margin-top: 0.8rem; }
 button.danger { background: var(--red); }
-.modal-check { display: flex; gap: 0.4rem; align-items: center;
-  margin-top: 0.5rem; font-size: 0.85rem; color: var(--red); }
 
 .pub-link { margin-left: auto; margin-right: .8rem; font-size: .9em; }
 
@@ -187,8 +198,19 @@ button.danger { background: var(--red); }
   header h1 { width: 100%; margin: 0.25rem 0; }
   .tabs { order: 2; width: 100%; margin-left: 0; }
   .pub-link { margin-left: 0; }
-  .card { flex-basis: 100%; padding: 0.7rem; }
+  .cards { grid-template-columns: 1fr; }
+  .card { padding: 0.7rem; }
   .card-head { align-items: flex-start; }
   .submit-form > * { max-width: 100%; }
   .toasts { left: 0.75rem; right: 0.75rem; max-width: none; }
 }
+
+/* Daemon-wide conditions the reader must act on before anything else. */
+.banner-error { margin: 0.75rem 0 0; padding: 0.6rem 0.85rem;
+  border: 1px solid var(--red); border-left-width: 3px; border-radius: 6px;
+  background: color-mix(in srgb, var(--red) 8%, transparent); }
+.banner-detail { margin-top: 0.3rem; font-family: ui-monospace, monospace;
+  font-size: 0.78rem; overflow-wrap: anywhere; }
+.banner-error code { font-family: ui-monospace, monospace;
+  background: color-mix(in srgb, var(--red) 14%, transparent);
+  padding: 0 0.25rem; border-radius: 3px; }

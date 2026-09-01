@@ -54,8 +54,11 @@ def submit_job(body: JobSubmit, request: Request):
         specs = submission.prepare_specs(project_cfg, spec)
     except ValueError as e:
         raise HTTPException(422, str(e))
-    ids = submission.enqueue_all(app.state.db, app.state.hub,
-                                 app.state.scheduler, project_cfg, specs)
+    try:
+        ids = submission.enqueue_all(app.state.db, app.state.hub,
+                                     app.state.scheduler, project_cfg, specs)
+    except ValueError as e:
+        raise HTTPException(422, str(e))
     return {"id": ids[0], "ids": ids}
 
 

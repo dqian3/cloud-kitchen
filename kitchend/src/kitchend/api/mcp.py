@@ -112,11 +112,10 @@ def build_mcp(state) -> MCPServer:
         `cluster` (a daemon-configured cluster name) hands the fleet to the
         daemon: VMs come up before the driver spawns and are kept up if the
         next queued job wants them, stopped otherwise — a chained job on
-        the same cluster inherits it without a VM cycle. `after`
-        holds the job until that job is done with data (ok or
-        degraded); one that ends failed or canceled cancels this job
-        instead — chain jobs to cycle clusters between phases
-        (e.g. scaling sweeps per committee size, geo runs per deployment)."""
+        the same cluster inherits it without a VM cycle. `after` places
+        the job directly behind that one in the queue; without it a job
+        falls in behind the last one already queued for its own cluster,
+        which keeps a cluster's work together instead of interleaving it."""
         project_cfg = _project(project)
         spec = {"project": project, "priority": priority,
                 "max_attempts": max_attempts}
@@ -131,7 +130,7 @@ def build_mcp(state) -> MCPServer:
         if cluster:
             spec["cluster"] = cluster
         if after is not None:
-            spec["after"] = after
+            spec["after"] = after        # placement; spent at enqueue
         specs = submission.prepare_specs(project_cfg, spec)
         # One submission = one confirmation: the gate covers the sum over
         # every job it fans out into (native aggregates are N sibling jobs).

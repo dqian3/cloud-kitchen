@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 
 from kitchend.config import Config, ProjectConfig
 from kitchend.core import jobs
@@ -298,18 +299,16 @@ def test_head_keeps_the_slot_when_nothing_outranks_it(tmp_path):
     assert not any(k == "job.preempted" for k, _ in scheduler.hub.events)
 
 
-def test_slot_is_not_yielded_to_a_blocked_job(tmp_path):
-    """A job that outranks the head but cannot dispatch is not a reason to give
-    up the slot -- yielding to it would leave the fleet up with nothing to run."""
+def test_slot_is_not_yielded_to_a_retry_delayed_job(tmp_path):
+    """A job that outranks the head but is waiting out a retry delay is not a
+    reason to give up the slot -- yielding to it would leave the fleet up with
+    nothing to run."""
     scheduler, db, _, project_id = setup_scheduler(tmp_path, exit_code=0)
     head = submit(db, project_id)
-    unfinished = submit(db, project_id)
-    blocked = jobs.submit(db, project_id, {
-        "project": "p", "command": ["fake-driver"], "cluster": "c",
-        "after": unfinished, "max_attempts": 3, "retry_delay_secs": 120,
-    })
+    delayed = submit(db, project_id)
+    scheduler._wait_until[delayed] = time.monotonic() + 3600
     clusters = ReorderingClusters(
-        lambda: jobs.reorder(db, scheduler.hub, [blocked, head, unfinished]))
+        lambda: jobs.reorder(db, scheduler.hub, [delayed, head]))
     scheduler.clusters = clusters
 
     asyncio.run(scheduler._run(jobs.get(db, head)))

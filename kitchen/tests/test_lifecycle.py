@@ -23,6 +23,17 @@ def test_start_stops_vm_when_deadman_cannot_be_armed():
     assert remote.vm_states["vm-a"] == "TERMINATED"
 
 
+def test_arm_error_says_why_not_just_which_vms():
+    """A VM still booting and one with a broken key used to read identically:
+    the failure named the hosts and dropped the exception."""
+    remote = MockRemote()
+    remote.script("shutdown -h", host="vm-a",
+                  raises=RuntimeError("Permission denied (publickey)"))
+
+    with pytest.raises(RuntimeError, match="publickey"):
+        arm_shutdown(remote, ["vm-a"])
+
+
 def test_stop_vms_returns_survivors():
     class FailedStop(MockRemote):
         def vm_stop(self, vm_names):

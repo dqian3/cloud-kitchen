@@ -11,6 +11,47 @@ from .base import Remote
 from .settings import RemoteSettings, get_default_settings
 
 
+class GCloudAuthError(RuntimeError):
+    """gcloud has no usable credentials.
+
+    Worth its own type rather than an exit status: every gcloud call fails
+    this way at once until someone logs in again, and the fix is the same one
+    line whichever call reported it first.
+    """
+
+
+# What gcloud writes to stderr once the refresh token is dead. It cannot
+# prompt from a systemd unit, so an expired login surfaces here rather than
+# as an interactive reauth.
+_AUTH_STDERR_MARKERS = (
+    "problem refreshing your current auth tokens",
+    "Reauthentication failed",
+    "do not have any valid credentials",
+    "does not have any valid credentials",
+    "credentials were not found",
+    "Your default credentials were not found",
+)
+
+
+def raise_for_auth(result) -> None:
+    """Raise GCloudAuthError if a finished gcloud call died for want of a login.
+
+    CalledProcessError captures stderr but keeps it out of its own message, so
+    a failed 102-VM status poll reported two kilobytes of `name=... OR ...`
+    argv and never mentioned the reason sitting in stderr.
+    """
+    if result.returncode == 0:
+        return
+    err = (result.stderr or "").strip()
+    if not any(m in err for m in _AUTH_STDERR_MARKERS):
+        return
+    detail = next((ln.strip() for ln in err.splitlines()
+                   if ln.strip().startswith("ERROR:")), "")
+    raise GCloudAuthError(
+        "gcloud has no usable credentials; run `gcloud auth login`"
+        + (f" — {detail}" if detail else ""))
+
+
 class GCloudRemote(Remote):
     """Uses gcloud compute ssh/scp. Hosts are VM instance names.
 
@@ -363,37 +404,22 @@ class GCloudRemote(Remote):
         if not vm_names:
             return
         self._discover_all(vm_names)
-        attempts = self.settings.vm_start_attempts
-        retry_delay = self.settings.vm_start_retry_delay_s
-        markers = self.settings.vm_start_retry_markers
 
+        # One attempt. A zone that is short right now may be fine in a minute,
+        # but retrying here is not how that is handled: the caller retries the
+        # whole bring-up on a timer, and asks for only the VMs that came up
+        # short last time, so a retry costs two VMs rather than a fleet. This
+        # loop predates both and only made each failure slower to report.
         def _start_one(vm):
             cmd = [
                 "gcloud", "compute", "instances", "start",
                 vm, *self._base_args(vm),
             ]
-            detail = "(no output)"
-            for attempt in range(attempts):
-                result = subprocess.run(cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    if attempt:
-                        print(f"[{vm}] started on attempt {attempt + 1}")
-                    return
-                detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-                # Zone capacity is a transient condition, not a broken config: a
-                # cluster of stopped VMs is asking the zone for its machine type
-                # back all at once, and a zone that cannot supply all of them
-                # this second usually can a few seconds later. Retrying turned a
-                # run-ending "vm_start failed for 5/8" into a clean start on the
-                # second attempt. Anything else -- bad machine type, permissions,
-                # a VM that does not exist -- fails the same way every time, so
-                # only capacity is worth retrying.
-                if not any(m in detail for m in markers):
-                    break
-                if attempt + 1 < attempts:
-                    print(f"[{vm}] zone out of capacity, retrying "
-                          f"({attempt + 2}/{attempts})...")
-                    time.sleep(retry_delay)
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            raise_for_auth(result)
+            if result.returncode == 0:
+                return
+            detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
             raise RuntimeError(f"Failed to start VM '{vm}': {detail}")
 
         failures: list[tuple[str, Exception]] = []
@@ -434,7 +460,11 @@ class GCloudRemote(Remote):
         ]
         if self.project:
             cmd.append(f"--project={self.project}")
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        raise_for_auth(result)
+        if result.returncode != 0:
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, result.stdout, result.stderr)
         statuses = {}
         for line in result.stdout.strip().splitlines():
             parts = line.split()
@@ -452,6 +482,7 @@ class GCloudRemote(Remote):
                 vm, *self._base_args(vm),
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
+            raise_for_auth(result)
             if result.returncode != 0:
                 detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
                 raise RuntimeError(f"Failed to stop VM '{vm}' (exit {result.returncode}): {detail}")

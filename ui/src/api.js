@@ -34,8 +34,6 @@ export const api = {
   retryPoint: (runId, pointId) =>
     req(`/api/runs/${runId}/points/${pointId}/retry`, {
       method: 'POST', body: '{}' }),
-  deleteJob: (id, files = false) =>
-    req(`/api/jobs/${id}?delete_files=${files}`, { method: 'DELETE' }),
   deleteRun: (id, files = false) =>
     req(`/api/runs/${id}?delete_files=${files}`, { method: 'DELETE' }),
   addNote: (id, text) =>

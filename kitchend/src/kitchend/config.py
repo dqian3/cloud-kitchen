@@ -24,7 +24,8 @@ Example:
       gcp_project = "my-gcp-project"   # required unless platform: docker
 
 The daemon reads each cluster's YAML just to learn the VM list; it understands
-the aspen shape (replica.vms + client.vms), the vsac role-keyed shape, and a
+the aspen shape (replica.vms or replica.pool + client.vms), the vsac
+role-keyed shape, and a
 plain `vms: [...]` list.
 """
 

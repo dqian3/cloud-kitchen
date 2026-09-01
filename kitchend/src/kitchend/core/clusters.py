@@ -12,6 +12,7 @@ switch on the VMs bounds the damage to the dead-man window.
 """
 
 import asyncio
+import json
 import socket
 import subprocess
 import time
@@ -23,15 +24,24 @@ import yaml
 from kitchen.cluster import (ClusterState, KeepAlive, arm_shutdown,
                              start_vms, stop_vms)
 from kitchen.remote import DockerRemote, GCloudRemote, RemoteSettings
+from kitchen.remote.gcloud import GCloudAuthError
 
 
 def _group_vms(group: dict) -> list[str]:
-    """VMs of one role group: an explicit `vms` list, a single `vm`, or the
-    generative `vm_prefix` + `count` naming (vsac corfu's client pool)."""
+    """VMs of one role group: a runnable roster, a placement pool, a single
+    VM, or generative `vm_prefix` + `count` naming.
+
+    A placement pool is the fleet the daemon leases even though the executor
+    later selects a smaller committee from it.  `vms` and `pool` are mutually
+    exclusive in the Aspen config model; prefer `vms` if malformed input has
+    both so this reader remains deterministic.
+    """
     if not isinstance(group, dict):
         return []
     if "vms" in group:
         return list(group["vms"])
+    if "pool" in group:
+        return list(group["pool"])
     if "vm" in group and group["vm"]:
         return [group["vm"]]
     if "vm_prefix" in group and "count" in group:
@@ -138,7 +148,7 @@ class ClusterManager:
     POLL_RUNNING_S = 10         # running or unmanaged: keep billing state fresh
     POLL_IDLE_S = 10            # terminated, including externally started VMs
     # How long a fleet stays up with no lease while its queue still has work.
-    # Long enough to ride out a failed bring-up and its 120s retry, short
+    # Long enough to ride out the default 600s failed-bring-up retry, short
     # enough that a genuinely stalled queue does not idle a cluster for long.
     HOLD_FOR_QUEUE_S = 15 * 60
 
@@ -147,6 +157,10 @@ class ClusterManager:
         self.db = db
         self.hub = hub
         self.clusters: dict[str, ManagedCluster] = {}
+        # One shared credential backs every cluster, so a dead login is a
+        # daemon-wide condition rather than a per-cluster error.
+        self.auth_error: str | None = None
+        self.auth_error_since: float | None = None
         self._build_registry()
         # A daemon killed mid-transition leaves 'starting'/'stopping' rows
         # behind; this daemon isn't doing either, so say so. The VMs
@@ -462,7 +476,12 @@ class ClusterManager:
                     f"not be created: {', '.join(still[:6])}"
                     + (" …" if len(still) > 6 else "")
                     + (f" — {why}" if why else ""))
-        except Exception:
+        except Exception as e:
+            # The job's last_error carried this alone, so a cluster that had
+            # been failing to come up all morning showed nothing but
+            # `terminated` on its card.
+            self.hub.emit("cluster.error", cluster_id=mc.db_id,
+                          cluster=mc.key, error=self.describe_error(e))
             await self._stop_whole_cluster(mc)
             raise
         return made
@@ -650,6 +669,45 @@ class ClusterManager:
             return self.POLL_RUNNING_S
         return self.POLL_IDLE_S
 
+    @staticmethod
+    def describe_error(e) -> str:
+        """An error line a reader can act on.
+
+        repr() of a CalledProcessError is its whole argv: for a 102-VM status
+        poll that is two kilobytes of `name=... OR ...`, with the reason —
+        which lives in stderr — left out of it entirely.
+        """
+        if isinstance(e, GCloudAuthError):
+            return str(e)
+        if isinstance(e, subprocess.CalledProcessError):
+            lines = [ln.strip() for ln in
+                     ((e.stderr or "") + (e.output or "")).splitlines() if ln.strip()]
+            first = next((ln for ln in lines if ln.startswith("ERROR:")),
+                         lines[0] if lines else "")
+            cmd = e.cmd if isinstance(e.cmd, (list, tuple)) else [e.cmd]
+            head = " ".join(str(a) for a in cmd[:4])
+            return f"{head} exited {e.returncode}" + (f": {first}" if first else "")
+        return repr(e)
+
+    def _note_auth_failure(self, msg: str) -> None:
+        """Record a dead login once, not once per cluster per poll.
+
+        One expired credential fails every cluster on every tick: the last
+        outage wrote 2,428 identical events in two hours and buried the one
+        line that said what to do.
+        """
+        if self.auth_error == msg:
+            return
+        self.auth_error = msg
+        self.auth_error_since = time.time()
+        self.hub.emit("gcloud.auth_failed", error=msg)
+
+    def _note_auth_ok(self) -> None:
+        if self.auth_error is None:
+            return
+        self.auth_error, self.auth_error_since = None, None
+        self.hub.emit("gcloud.auth_ok")
+
     async def status_poll_loop(self):
         due: dict[str, float] = {}
         while True:
@@ -659,9 +717,13 @@ class ClusterManager:
                     continue
                 try:
                     await self.poll_status(mc)
+                    self._note_auth_ok()
+                except GCloudAuthError as e:
+                    self._note_auth_failure(str(e))
                 except Exception as e:
                     self.hub.emit("cluster.error", cluster_id=mc.db_id,
-                                  cluster=mc.key, error=f"status poll: {e!r}")
+                                  cluster=mc.key,
+                                  error=f"status poll: {self.describe_error(e)}")
                 due[mc.key] = time.monotonic() + self.poll_interval(mc)
             await asyncio.sleep(5)
 
@@ -703,8 +765,43 @@ class ClusterManager:
                 "burn_usd_per_hr": burn,
                 "est_usd_per_hr": est_hourly,   # whole-cluster rate if up
                 "session_cost_usd": self._session_cost(mc),
+                "last_attempt": self._last_bringup(mc),
             })
         return out
+
+    def _last_bringup(self, mc):
+        """The most recent bring-up: when it started and how it ended.
+
+        Read off the event trail, not the cluster row. A bring-up that fails
+        puts the cluster back in `terminated`, which is also where it sits
+        having never been tried at all; only the events tell the two apart.
+        """
+        start = self.db.query_one(
+            "SELECT id, ts FROM events WHERE cluster_id = ? "
+            "AND type = 'cluster.state' "
+            "AND json_extract(payload_json, '$.state') = 'starting' "
+            "ORDER BY id DESC LIMIT 1", (mc.db_id,))
+        if start is None:
+            return None
+        # The first state the cluster settled into after that start decides
+        # the outcome; errors logged on the way there give the reason.
+        rows = self.db.query(
+            "SELECT type, ts, payload_json FROM events "
+            "WHERE cluster_id = ? AND id > ? AND (type = 'cluster.error' "
+            "OR (type = 'cluster.state' AND json_extract(payload_json, "
+            "'$.state') IN ('running', 'terminated'))) ORDER BY id", (
+                mc.db_id, start["id"]))
+        outcome, ended_at, error = "starting", None, None
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            if row["type"] == "cluster.error":
+                error = error or payload.get("error")
+                continue
+            outcome = "running" if payload["state"] == "running" else "failed"
+            ended_at = row["ts"]
+            break
+        return {"started_at": start["ts"], "ended_at": ended_at,
+                "outcome": outcome, "error": error}
 
     def _session_cost(self, mc):
         if mc.hourly_usd is None:
