@@ -18,7 +18,7 @@ A job spec (stored verbatim as spec_json):
       "resume":      false,
       "priority":    0,
       "max_attempts": 20,
-      "retry_delay_secs": 120
+      "retry_delay_secs": 600
     }
 
 Exit-code contract (from the drivers): 0 clean → ok; 2 degraded but data
@@ -31,9 +31,10 @@ from pathlib import Path
 
 # Attempts are cheap next to a lost measurement: a failed run resumes into
 # its directory, and a cluster that would not come up (a zone stockout) is
-# probed again after a short cooldown rather than given up on.
+# probed again after a cooldown rather than given up on. Ten minutes avoids
+# turning a regional stockout into enough create calls to trigger API limits.
 DEFAULT_MAX_ATTEMPTS = 20
-DEFAULT_RETRY_DELAY_SECS = 120
+DEFAULT_RETRY_DELAY_SECS = 600
 
 WAITING = "waiting"         # in the queue: its turn, a dependency, or a cluster
 RUNNING = "running"         # a driver process is alive

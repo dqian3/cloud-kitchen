@@ -3,7 +3,12 @@ from pydantic import ValidationError
 
 from kitchend.api.routes import JobSubmit
 from kitchend.config import ProjectConfig
-from kitchend.core import submission
+from kitchend.core import jobs, submission
+
+
+def test_default_retry_delay_is_ten_minutes():
+    assert jobs.DEFAULT_RETRY_DELAY_SECS == 600
+    assert JobSubmit(project="p", command=["runner"]).retry_delay_secs == 600
 
 
 def test_http_submission_rejects_removed_structured_sweep_fields():
