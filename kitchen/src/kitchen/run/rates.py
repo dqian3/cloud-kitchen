@@ -7,11 +7,18 @@ descent, and an abort when halving makes delivered/offered *worse* (i.e. the
 saturation was never load-caused). Both were paid for in postmortems; the
 comments that explain them moved with the code.
 
-The shape is: double the offered rate until a point saturates, which brackets
-the knee in O(log) runs, then sample that bracket at even arithmetic steps.
-The climb is geometric because it only has to *find* the bracket; the knee can
-sit anywhere inside it, so uniform resolution is what is wanted there. A start
+The shape is: raise the offered rate until a point saturates, which brackets
+the knee, then sample that bracket at even arithmetic steps. The climb is
+geometric because it only has to *find* the bracket; the knee can sit
+anywhere inside it, so uniform resolution is what is wanted there. A start
 rate that is already saturated halves instead.
+
+The climb doubles only while the step stays under `max_step`, then continues
+in steps of that size. Unbounded doubling brackets the knee in fewer runs but
+leaves a bracket as wide as the last good rate: a protocol serving 64k and
+saturating at 128k is bracketed across 64k of range, which three refinement
+points resolve to 16k. Capping the step keeps the bracket a bounded width
+wherever the knee turns out to be, at the cost of a few more runs high up.
 """
 
 from __future__ import annotations
@@ -163,9 +170,19 @@ def saturated(point: Optional[Measurement],
     return False, ""
 
 
+# The widest the climb will step. Doubling below this, additive above it.
+MAX_CLIMB_STEP = 32000.0
+
+
+def next_climb_rate(rate: float, max_step: float) -> float:
+    """The next rate up: double, but never by more than `max_step`."""
+    return rate + min(rate, max_step)
+
+
 def search(measure: Callable[[float], Optional[Measurement]],
            *, start: float = 1000.0, max_rate: float = 200000.0,
            min_rate: float = 100.0, refine_steps: int = 3,
+           max_step: float = MAX_CLIMB_STEP,
            on_decision: Optional[Callable[[str, float, str], None]] = None,
            saturated_fn: Callable[..., tuple[bool, str]] = None) -> None:
     """Drive `measure` over a searched rate sequence.
@@ -226,7 +243,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
         last_good = rate
         prev_delivered = point.delivered
         if first_bad is None:
-            rate *= 2
+            rate = next_climb_rate(rate, max_step)
             while rate <= max_rate:
                 decide("climb", rate)
                 point = measure(rate)
@@ -238,7 +255,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
                     below_good = last_good
                     last_good = rate
                     prev_delivered = point.delivered
-                rate *= 2
+                rate = next_climb_rate(rate, max_step)
 
     if last_good is None or first_bad is None:
         where = ("never saturated" if first_bad is None
