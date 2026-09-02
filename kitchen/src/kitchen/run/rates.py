@@ -21,13 +21,22 @@ points resolve to 16k. Capping the step keeps the bracket a bounded width
 wherever the knee turns out to be, at the cost of a few more runs high up.
 
 Refinement then repeats on whichever sub-bracket still straddles the
-transition, until the bracket is within `knee_tolerance` of the knee rate. One
-pass of fixed width cannot do this: the bracket it starts from is set by the
-climb, so the resolution it reaches is a fraction of the *climb* rather than
-of the answer. A 32k-wide bracket resolves a 96k knee to 8% and a 24k knee to
-33%, for the same three runs. A relative target spends the runs where the
-answer is imprecise, and the pass that reaches the target costs nothing on a
-protocol the first pass already resolved.
+transition, until the bracket is within `knee_tolerance` of the knee rate (or
+`min_resolution`, whichever is wider). One pass of fixed width cannot do this:
+the bracket it starts from is set by the climb, so the resolution it reaches
+is a fraction of the *climb* rather than of the answer. A 32k-wide bracket
+resolves a 96k knee to 8% and a 24k knee to 33%, for the same three runs. A
+relative target spends the runs where the answer is imprecise, and the pass
+that reaches the target costs nothing on a protocol the first pass already
+resolved.
+
+Each pass samples `refine_steps` points across its bracket rather than
+bisecting it, so the bracket narrows by refine_steps + 1 per pass. Bisection
+would reach the same target in fewer *decisions* but not fewer runs, and it
+would spend all of them adjacent to the knee: here every probe is a benchmark
+that stays in the curve, and the ones that land past the knee are what draws
+the collapse. `refine_steps=1` is binary search, if that is what a protocol
+wants.
 
 Everything below the knee is then sampled at that same relative spacing, down
 to the last rate measured under the bracket. Those points are not there to
@@ -191,10 +200,14 @@ def saturated(point: Optional[Measurement],
 MAX_CLIMB_STEP = 32000.0
 
 # How close the bracket must get to the knee before refinement stops, as a
-# fraction of the knee rate. 10% is the coarsest spacing that still separates
-# the protocols these sweeps compare; tighter costs a run per pass for a
-# distinction the trial-to-trial spread would swallow.
-KNEE_TOLERANCE = 0.10
+# fraction of the knee rate.
+KNEE_TOLERANCE = 0.05
+# ...but never finer than this many msgs/sec. Below a knee of about 20k the
+# fraction asks for a resolution the measurement cannot support: trial spread
+# and the client generator's own jitter are both wider than the step, so the
+# extra passes resolve noise. It also bounds the run-up fill, which is spaced
+# by the same rule and would otherwise grow as the knee rate falls.
+MIN_KNEE_RESOLUTION = 1000.0
 
 
 def next_climb_rate(rate: float, max_step: float) -> float:
@@ -206,6 +219,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
            *, start: float = 1000.0, max_rate: float = 200000.0,
            min_rate: float = 100.0, refine_steps: int = 3,
            knee_tolerance: float = KNEE_TOLERANCE,
+           min_resolution: float = MIN_KNEE_RESOLUTION,
            max_step: float = MAX_CLIMB_STEP,
            on_decision: Optional[Callable[[str, float, str], None]] = None,
            saturated_fn: Callable[..., tuple[bool, str]] = None) -> None:
@@ -237,6 +251,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
         return measured[rate]
 
     rate = float(start)
+    verdicts: dict[float, bool] = {}     # measured rate -> saturated?
     prev_delivered: Optional[float] = None
     last_good: Optional[float] = None
     first_bad: Optional[float] = None
@@ -245,6 +260,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
     decide("start", rate)
     point = visit(rate)
     sat, note = sat_fn(point, None)
+    verdicts[rate] = sat
     if dead(point):
         decide("abandon", rate,
                "committed nothing at the start rate; a protocol silent here "
@@ -268,6 +284,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
                    "committed nothing; halving lower cannot commit more")
             return
         sat, note = sat_fn(point, None)
+        verdicts[rate] = sat
         if sat and point is not None and point.ratio <= prev_ratio:
             decide("abandon", rate,
                    f"halving made delivered/offered worse "
@@ -284,6 +301,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
                 decide("climb", rate)
                 point = visit(rate)
                 sat, note = sat_fn(point, prev_delivered)
+                verdicts[rate] = sat
                 if sat:
                     first_bad = rate
                     break
@@ -304,7 +322,9 @@ def search(measure: Callable[[float], Optional[Measurement]],
     # well as short of it -- the collapse beyond the knee is part of the curve
     # these sweeps draw -- and then re-brackets on the transition its own
     # points found.
-    while first_bad - last_good > knee_tolerance * last_good:
+    reported_stray = False
+    while first_bad - last_good > max(knee_tolerance * last_good,
+                                     min_resolution):
         step = (first_bad - last_good) / (refine_steps + 1)
         pass_rates = [round(last_good + step * i)
                       for i in range(1, refine_steps + 1)]
@@ -329,11 +349,33 @@ def search(measure: Callable[[float], Optional[Measurement]],
                 continue    # no result: no evidence either way about the knee
             # prev_delivered is deliberately not passed: the plateau rule
             # compares a doubling's gain, and these steps are a fraction of one.
-            sat, _ = sat_fn(point, None)
-            if sat:
-                first_bad = min(first_bad, r)
-            else:
-                last_good = max(last_good, r)
+            verdicts[r], _ = sat_fn(point, None)
+
+        # Re-bracket off every verdict taken so far rather than off this pass
+        # in isolation. Saturation is not guaranteed monotone in the rate --
+        # one point inside the healthy region can read saturated, and updating
+        # the ends independently then puts last_good above first_bad, which
+        # reads as a bracket of negative width and quietly ends the refinement
+        # at a knee above a rate already seen to saturate. Taking the lowest
+        # saturated rate and the highest healthy rate under it keeps the
+        # bracket well formed, makes first_bad monotonically non-increasing so
+        # the loop still terminates, and claims the earliest saturation, which
+        # is the honest reading when the two disagree.
+        first_bad = min(r for r, sat in verdicts.items() if sat)
+        good_below = [r for r, sat in verdicts.items()
+                      if not sat and r < first_bad]
+        if not good_below:
+            decide("abandon", first_bad,
+                   f"every rate measured under {first_bad:g} also saturated; "
+                   f"the knee is not bracketed here")
+            return
+        last_good = max(good_below)
+        stray = [r for r, sat in verdicts.items() if not sat and r > first_bad]
+        if stray and not reported_stray:
+            reported_stray = True
+            decide("refine", first_bad,
+                   f"saturation is not monotone: {min(stray):g} measured "
+                   f"healthy above a saturated {first_bad:g}")
 
     # Below the knee at the knee's own scale, down to the last rate measured
     # under the bracket (a doubling under it; the same distance when the
@@ -342,7 +384,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
     # That gap is at most half the knee rate, so this adds at most 1/(2*tol)
     # runs -- five at the default, and the tolerance is the only knob that
     # buys more.
-    spacing = knee_tolerance * last_good
+    spacing = max(knee_tolerance * last_good, min_resolution)
     floor = below_good if below_good is not None else last_good / 2
     lower = []
     i = 1
@@ -353,10 +395,19 @@ def search(measure: Callable[[float], Optional[Measurement]],
         i += 1
     for j, r in enumerate(reversed(lower)):
         decide("refine", r, f"below the knee at {last_good:g}" if j == 0 else "")
-        if dead(visit(r)):
+        point = visit(r)
+        if dead(point):
             decide("abandon", r,
                    "committed nothing; stopping the refinement here")
             return
+        # These are curve points, not search points -- the knee is settled by
+        # now and nothing below it re-opens the question. But one reading as
+        # saturated says the curve is not the step the bracket assumed, which
+        # is worth having in the log next to the number it undercuts.
+        if point is not None and sat_fn(point, None)[0]:
+            decide("refine", r,
+                   f"saturated below the knee at {last_good:g}: the run-up is "
+                   f"not clean")
 
 
 # --- persistence: the rates a search visited, so later trials replay them ---

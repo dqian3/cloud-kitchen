@@ -24,7 +24,7 @@ from pathlib import Path
 from kitchen.remote.local import LocalRemote
 
 from .engine import run_experiments
-from .rates import KNEE_TOLERANCE
+from .rates import KNEE_TOLERANCE, MIN_KNEE_RESOLUTION
 from .spec import RateSearchSpec, SweepSpec
 
 CLIENT_SCRIPT = """\
@@ -140,6 +140,7 @@ def main(argv=None) -> int:
     p.add_argument("--rate-search-max", type=float, default=200000.0)
     p.add_argument("--refine-steps", type=int, default=3)
     p.add_argument("--knee-tolerance", type=float, default=KNEE_TOLERANCE)
+    p.add_argument("--knee-resolution", type=float, default=MIN_KNEE_RESOLUTION)
     args = p.parse_args(argv)
 
     out_root = Path(args.output_dir)
@@ -151,7 +152,8 @@ def main(argv=None) -> int:
                                min_rate=args.rate_search_min,
                                max_rate=args.rate_search_max,
                                refine_steps=args.refine_steps,
-                               knee_tolerance=args.knee_tolerance)
+                               knee_tolerance=args.knee_tolerance,
+                               min_resolution=args.knee_resolution)
                 if args.rate_search else None),
         trials=args.trials,
         trial_offset=args.trial_offset,

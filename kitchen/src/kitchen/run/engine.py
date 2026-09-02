@@ -352,6 +352,7 @@ class SweepEngine:
                min_rate=spec.search.min_rate, max_rate=spec.search.max_rate,
                refine_steps=spec.search.refine_steps,
                knee_tolerance=spec.search.knee_tolerance,
+               min_resolution=spec.search.min_resolution,
                on_decision=on_decision, saturated_fn=self._saturated)
         searched.finish(dims)
 
