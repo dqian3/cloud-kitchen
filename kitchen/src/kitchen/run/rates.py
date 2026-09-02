@@ -38,15 +38,13 @@ that stays in the curve, and the ones that land past the knee are what draws
 the collapse. `refine_steps=1` is binary search, if that is what a protocol
 wants.
 
-Below the knee the curve is whatever the climb measured -- a handful of
-doublings -- and nothing is added. Every rate here costs a benchmark run, and
-a grid under a knee that is already located spends them without asking a
-question: the points that decide something are the ones the bracket straddles.
-The cost is resolution in the run-up, which is where a *latency* knee shows
-up: the rules below are all throughput rules, so a protocol whose latency has
-left the floor while delivered still tracks offered reads as healthy here, and
-after the climb there are no points in that stretch to show it. Sweeps that
-need the run-up drawn should ask for the rates directly.
+Each pass also takes one point a step under the last healthy rate. Below the
+knee the climb leaves only doublings, and the run-up is where a *latency* knee
+shows up -- the rules below are all throughput rules, so a protocol whose
+latency has left the floor while delivered still tracks offered reads as
+healthy, and nothing else will find it. A grid under a settled knee costs more
+runs than the search itself and steers nothing; one point per pass costs one
+run and lands closer in each time, since the step shrinks with the bracket.
 """
 
 from __future__ import annotations
@@ -333,14 +331,35 @@ def search(measure: Callable[[float], Optional[Measurement]],
             # Rounding has collapsed the bracket onto rates already run; there
             # is no finer question left to ask at integer rates.
             break
-        for i, r in enumerate(pass_rates):
-            decide("refine", r,
-                   f"knee between {last_good:g} and {first_bad:g}"
-                   if i == 0 else "")
+        # One step under the last healthy rate as well. The climb leaves the
+        # approach to the knee sampled in doublings, and a curve read only at
+        # the knee and above cannot show where the run-up left the floor --
+        # which the throughput rules here do not see, so nothing else will
+        # find it. One point per pass keeps that cheap and puts each pass's
+        # point closer in than the last, since the step shrinks with the
+        # bracket.
+        below = round(last_good - step)
+        if below > min_rate and below not in measured:
+            pass_rates.insert(0, below)
+        for r in pass_rates:
+            if r < last_good:
+                note = f"one step under the last healthy {last_good:g}"
+            elif r == min(x for x in pass_rates if x > last_good):
+                note = f"knee between {last_good:g} and {first_bad:g}"
+            else:
+                note = ""
+            decide("refine", r, note)
             point = visit(r)
-            # Refining upward from the last good rate, so once a point commits
-            # nothing every higher one will too.
             if dead(point):
+                # Refining upward from the last good rate, so once a point
+                # commits nothing every higher one will too. Downward that
+                # reasoning does not hold: a rate under one that served and
+                # committing nothing is a broken run, not a ceiling.
+                if r < last_good:
+                    decide("refine", r,
+                           "committed nothing below a rate that served; not a "
+                           "load limit, so the refinement continues")
+                    continue
                 decide("abandon", r,
                        "committed nothing; stopping the refinement here")
                 return
