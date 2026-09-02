@@ -9,6 +9,7 @@ contract (0 all points produced data, 2 some committed nothing, 1 anything
 raised — an error means "we don't know", which is not the same as "dead").
 """
 
+import dataclasses
 import json
 import shutil
 import sys
@@ -324,7 +325,8 @@ class SweepEngine:
                 self._run_point(ctx, dims, rate, trial, result)
             return
 
-        replay = searched.get(dims)
+        params = dataclasses.asdict(spec.search)
+        replay = searched.get(dims, params)
         if replay is not None:
             for rate in replay:
                 self._emit("search.decision", dims=dims, rate=rate,
@@ -332,7 +334,7 @@ class SweepEngine:
                 self._run_point(ctx, dims, rate, trial, result)
             return
 
-        searched.start(dims)
+        searched.start(dims, params)
 
         def measure(rate):
             searched.record(dims, rate)
@@ -349,6 +351,7 @@ class SweepEngine:
         search(measure, start=spec.search.start,
                min_rate=spec.search.min_rate, max_rate=spec.search.max_rate,
                refine_steps=spec.search.refine_steps,
+               knee_tolerance=spec.search.knee_tolerance,
                on_decision=on_decision, saturated_fn=self._saturated)
         searched.finish(dims)
 

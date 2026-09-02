@@ -19,6 +19,23 @@ leaves a bracket as wide as the last good rate: a protocol serving 64k and
 saturating at 128k is bracketed across 64k of range, which three refinement
 points resolve to 16k. Capping the step keeps the bracket a bounded width
 wherever the knee turns out to be, at the cost of a few more runs high up.
+
+Refinement then repeats on whichever sub-bracket still straddles the
+transition, until the bracket is within `knee_tolerance` of the knee rate. One
+pass of fixed width cannot do this: the bracket it starts from is set by the
+climb, so the resolution it reaches is a fraction of the *climb* rather than
+of the answer. A 32k-wide bracket resolves a 96k knee to 8% and a 24k knee to
+33%, for the same three runs. A relative target spends the runs where the
+answer is imprecise, and the pass that reaches the target costs nothing on a
+protocol the first pass already resolved.
+
+Everything below the knee is then sampled at that same relative spacing, down
+to the last rate measured under the bracket. Those points are not there to
+locate the saturation knee -- that is settled by then -- but to carry the
+approach to it, which is where a latency knee shows up. The saturation rules
+here are all throughput rules, so a protocol whose latency has already left
+the floor while delivered still tracks offered reads as healthy; sampling the
+run-up at the knee's own scale is what puts points in that stretch.
 """
 
 from __future__ import annotations
@@ -173,6 +190,12 @@ def saturated(point: Optional[Measurement],
 # The widest the climb will step. Doubling below this, additive above it.
 MAX_CLIMB_STEP = 32000.0
 
+# How close the bracket must get to the knee before refinement stops, as a
+# fraction of the knee rate. 10% is the coarsest spacing that still separates
+# the protocols these sweeps compare; tighter costs a run per pass for a
+# distinction the trial-to-trial spread would swallow.
+KNEE_TOLERANCE = 0.10
+
 
 def next_climb_rate(rate: float, max_step: float) -> float:
     """The next rate up: double, but never by more than `max_step`."""
@@ -182,6 +205,7 @@ def next_climb_rate(rate: float, max_step: float) -> float:
 def search(measure: Callable[[float], Optional[Measurement]],
            *, start: float = 1000.0, max_rate: float = 200000.0,
            min_rate: float = 100.0, refine_steps: int = 3,
+           knee_tolerance: float = KNEE_TOLERANCE,
            max_step: float = MAX_CLIMB_STEP,
            on_decision: Optional[Callable[[str, float, str], None]] = None,
            saturated_fn: Callable[..., tuple[bool, str]] = None) -> None:
@@ -193,12 +217,24 @@ def search(measure: Callable[[float], Optional[Measurement]],
     each decision is made, with action one of start|climb|halve|refine|abandon.
     `saturated_fn` overrides the default rule set (same signature as
     `saturated`).
+
+    A rate is measured at most once. Refinement re-brackets off its own
+    results, so it lands on rates it has already run; each point here is a
+    benchmark run, and the second one would overwrite the first's output
+    directory with a duplicate of the same measurement.
     """
     sat_fn = saturated_fn or saturated
+    measured: dict[float, Optional[Measurement]] = {}
 
     def decide(action, rate, note=""):
         if on_decision is not None:
             on_decision(action, rate, note)
+
+    def visit(rate):
+        """Measure `rate`, or return what it measured last time."""
+        if rate not in measured:
+            measured[rate] = measure(rate)
+        return measured[rate]
 
     rate = float(start)
     prev_delivered: Optional[float] = None
@@ -207,7 +243,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
     below_good: Optional[float] = None   # highest rate measured under last_good
 
     decide("start", rate)
-    point = measure(rate)
+    point = visit(rate)
     sat, note = sat_fn(point, None)
     if dead(point):
         decide("abandon", rate,
@@ -219,7 +255,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
         prev_ratio = point.ratio if point is not None else 0.0
         rate = max(min_rate, rate / 2)
         decide("halve", rate, note)
-        point = measure(rate)
+        point = visit(rate)
         # Halving encodes the assumption that the saturation was load-caused.
         # Check it. Two observed failures in one night from a repair-churn
         # protocol: its healthy ceiling sits below DELIVERED_RATIO, so the rule
@@ -246,7 +282,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
             rate = next_climb_rate(rate, max_step)
             while rate <= max_rate:
                 decide("climb", rate)
-                point = measure(rate)
+                point = visit(rate)
                 sat, note = sat_fn(point, prev_delivered)
                 if sat:
                     first_bad = rate
@@ -263,30 +299,62 @@ def search(measure: Callable[[float], Optional[Measurement]],
         decide("abandon", rate, f"{where}; no knee bracketed")
         return
 
-    step = (first_bad - last_good) / (refine_steps + 1)
-    # The same step continues below the bracket down to the previous good
-    # point (a doubling under last_good; the same distance when the bracket
-    # came from halving), so the approach to the knee is sampled at the
-    # bracket's resolution rather than jumping a whole doubling.
+    # Narrow the bracket until it is within knee_tolerance of the knee. Each
+    # pass samples the whole of the bracket it starts from, past the knee as
+    # well as short of it -- the collapse beyond the knee is part of the curve
+    # these sweeps draw -- and then re-brackets on the transition its own
+    # points found.
+    while first_bad - last_good > knee_tolerance * last_good:
+        step = (first_bad - last_good) / (refine_steps + 1)
+        pass_rates = [round(last_good + step * i)
+                      for i in range(1, refine_steps + 1)]
+        pass_rates = [r for r in pass_rates
+                      if last_good < r < first_bad and r not in measured]
+        if not pass_rates:
+            # Rounding has collapsed the bracket onto rates already run; there
+            # is no finer question left to ask at integer rates.
+            break
+        for i, r in enumerate(pass_rates):
+            decide("refine", r,
+                   f"knee between {last_good:g} and {first_bad:g}"
+                   if i == 0 else "")
+            point = visit(r)
+            # Refining upward from the last good rate, so once a point commits
+            # nothing every higher one will too.
+            if dead(point):
+                decide("abandon", r,
+                       "committed nothing; stopping the refinement here")
+                return
+            if point is None:
+                continue    # no result: no evidence either way about the knee
+            # prev_delivered is deliberately not passed: the plateau rule
+            # compares a doubling's gain, and these steps are a fraction of one.
+            sat, _ = sat_fn(point, None)
+            if sat:
+                first_bad = min(first_bad, r)
+            else:
+                last_good = max(last_good, r)
+
+    # Below the knee at the knee's own scale, down to the last rate measured
+    # under the bracket (a doubling under it; the same distance when the
+    # bracket came from halving). Sampling the run-up at the bracket's width
+    # instead would leave it as coarse as whatever the climb happened to be.
+    # That gap is at most half the knee rate, so this adds at most 1/(2*tol)
+    # runs -- five at the default, and the tolerance is the only knob that
+    # buys more.
+    spacing = knee_tolerance * last_good
     floor = below_good if below_good is not None else last_good / 2
     lower = []
     i = 1
-    while last_good - step * i > max(floor, min_rate):
-        lower.append(round(last_good - step * i))
+    while last_good - spacing * i > max(floor, min_rate):
+        r = round(last_good - spacing * i)
+        if r not in measured:
+            lower.append(r)
         i += 1
     for j, r in enumerate(reversed(lower)):
-        decide("refine", r, f"below the knee bracket {last_good:g}..{first_bad:g}"
-                            if j == 0 else "")
-        measure(r)
-    for i in range(1, refine_steps + 1):
-        refined = round(last_good + step * i)
-        decide("refine", refined,
-               f"knee between {last_good:g} and {first_bad:g}" if i == 1 else "")
-        point = measure(refined)
-        # Refining upward from the last good rate, so once a point commits
-        # nothing every higher one will too.
-        if dead(point):
-            decide("abandon", refined,
+        decide("refine", r, f"below the knee at {last_good:g}" if j == 0 else "")
+        if dead(visit(r)):
+            decide("abandon", r,
                    "committed nothing; stopping the refinement here")
             return
 
@@ -299,12 +367,15 @@ def search(measure: Callable[[float], Optional[Measurement]],
 # whichever bracket that run landed in, and every analyzer groups trials on the
 # exact rate -- so re-searched trials silently fail to combine.
 SEARCHED_RATES_FILE = "searched_rates.json"
-SEARCHED_RATES_FORMAT = "searched-rates/v2"
+SEARCHED_RATES_FORMAT = "searched-rates/v3"
 SEARCHED_RATES_NOTE = (
     "Offered rates (msgs/sec) the knee search visited at each sweep point, in visit "
-    "order: the geometric climb that brackets the knee, then the arithmetic refinement "
-    "inside that bracket. Complete points are replayed by later invocations; incomplete "
-    "points resume the search through their already-measured prefix."
+    "order: the geometric climb that brackets the knee, then the refinement passes that "
+    "narrow it. Complete points are replayed by later invocations; incomplete points "
+    "resume the search through their already-measured prefix. `params` is the search "
+    "that produced the list -- a later invocation asking a different question (a tighter "
+    "knee_tolerance, more refine_steps) continues the search instead of replaying it, "
+    "which under --resume costs only the rates the old settings never visited."
 )
 
 
@@ -361,28 +432,43 @@ class SearchedRates:
     def __len__(self) -> int:
         return len(self._records)
 
-    def get(self, fields: dict) -> Optional[list]:
+    def get(self, fields: dict, params: Optional[dict] = None) -> Optional[list]:
         """The rates to replay at a completed point, or None if it needs search.
 
         An in-progress point deliberately returns None. The caller restarts the
         deterministic search, feeds its completed prefix back through the search
         algorithm, and continues beyond the interruption. ``start`` and
         ``record`` preserve and de-duplicate that prefix.
+
+        So does a point recorded under different search settings. Replaying it
+        would answer the old question with the new settings' name on it; the
+        search instead re-runs and extends the list, and under --resume every
+        rate the old settings already visited comes back off disk. A record
+        from before these settings were written down (no `params`) counts as
+        different, which costs one re-search per point and then matches.
         """
         record = self._records.get(_lookup_key(_clean(fields)))
-        if record is None:
+        if record is None or not record["complete"]:
             return None
-        return list(record["rates"]) if record["complete"] else None
+        if params is not None and record.get("params") != _clean(params):
+            return None
+        return list(record["rates"])
 
-    def start(self, fields: dict) -> None:
+    def start(self, fields: dict, params: Optional[dict] = None) -> None:
         """Claim a point before searching it, so an interrupted search leaves a
         partial record behind, and a point whose search yields nothing is
-        remembered as empty instead of re-searched by every later trial."""
+        remembered as empty instead of re-searched by every later trial.
+
+        Rates already recorded are kept: a continuation adds to them rather
+        than starting the list over."""
         fields = _clean(fields)
-        self._records.setdefault(
+        record = self._records.setdefault(
             _lookup_key(fields),
-            {"fields": fields, "rates": [], "complete": False},
+            {"fields": fields, "rates": [], "params": {}, "complete": False},
         )
+        record["complete"] = False
+        if params is not None:
+            record["params"] = _clean(params)
         self._write()
 
     def record(self, fields: dict, rate) -> None:
@@ -390,7 +476,7 @@ class SearchedRates:
         fields = _clean(fields)
         record = self._records.setdefault(
             _lookup_key(fields),
-            {"fields": fields, "rates": [], "complete": False},
+            {"fields": fields, "rates": [], "params": {}, "complete": False},
         )
         value = _norm_rate(rate)
         if value in record["rates"]:
@@ -418,6 +504,7 @@ class SearchedRates:
             self._records[_lookup_key(fields)] = {
                 "fields": fields,
                 "rates": [_norm_rate(r) for r in record.get("rates", [])],
+                "params": _clean(record.get("params") or {}),
                 "complete": record.get("complete", True),
             }
 
@@ -431,6 +518,7 @@ class SearchedRates:
             blocks.append(
                 '    {\n'
                 f'      "point": {json.dumps(record["fields"], sort_keys=True)},\n'
+                f'      "params": {json.dumps(record.get("params") or {}, sort_keys=True)},\n'
                 f'      "rates": {json.dumps(record["rates"])},\n'
                 f'      "complete": {json.dumps(record["complete"])}\n'
                 '    }')

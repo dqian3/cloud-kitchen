@@ -10,6 +10,8 @@ daemon can estimate from it, and the events it produces describe it.
 import itertools
 from dataclasses import dataclass, field
 
+from .rates import KNEE_TOLERANCE
+
 
 @dataclass(frozen=True)
 class RateSearchSpec:
@@ -18,6 +20,7 @@ class RateSearchSpec:
     min_rate: float = 100.0
     max_rate: float = 200000.0
     refine_steps: int = 3
+    knee_tolerance: float = KNEE_TOLERANCE
 
 
 @dataclass(frozen=True)
