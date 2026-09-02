@@ -228,7 +228,8 @@ def search(measure: Callable[[float], Optional[Measurement]],
     `measure(rate)` runs one point and returns a Measurement, or None if the
     run produced nothing usable. Results are the caller's to record; this only
     decides which rates to visit. `on_decision(action, rate, note)` fires as
-    each decision is made, with action one of start|climb|halve|refine|abandon.
+    each decision is made, with action one of
+    start|climb|halve|refine|fill|abandon.
     `saturated_fn` overrides the default rule set (same signature as
     `saturated`).
 
@@ -394,7 +395,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
             lower.append(r)
         i += 1
     for j, r in enumerate(reversed(lower)):
-        decide("refine", r, f"below the knee at {last_good:g}" if j == 0 else "")
+        decide("fill", r, f"below the knee at {last_good:g}" if j == 0 else "")
         point = visit(r)
         if dead(point):
             decide("abandon", r,
@@ -405,7 +406,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
         # saturated says the curve is not the step the bracket assumed, which
         # is worth having in the log next to the number it undercuts.
         if point is not None and sat_fn(point, None)[0]:
-            decide("refine", r,
+            decide("fill", r,
                    f"saturated below the knee at {last_good:g}: the run-up is "
                    f"not clean")
 
