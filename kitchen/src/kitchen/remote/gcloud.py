@@ -2,6 +2,7 @@
 
 import getpass
 import os
+import re
 import subprocess
 import sys
 import time
@@ -77,7 +78,13 @@ class GCloudRemote(Remote):
         # defaults so consumer shims that call set_default_settings() cover
         # direct constructions too.
         self.settings = settings or get_default_settings()
-        self._zone_cache = {}  # vm_name -> zone
+        # vm_name -> zone / internal IP. Both are properties of a *specific*
+        # instance, not of the name: a VM deleted and recreated after a zone
+        # stockout keeps its name and gets neither. So every gcloud listing
+        # refreshes them (see _note_zone), rather than these accumulating
+        # answers that were true once.
+        self._zone_cache = {}
+        self._ip_cache = {}
         # Reach sessions through one ssh jump host instead of one IAP tunnel
         # per VM. `gcloud compute ssh` is a bundled Python interpreter at
         # ~130 MB, and an n=51 run holds a session open on all 102 VMs at
@@ -126,9 +133,14 @@ class GCloudRemote(Remote):
             self._zone_cache[vm_name] = self.default_zone
             return self.default_zone
 
+        # No listing anywhere returned this name, so the usual cause is that
+        # the VM does not exist -- say that, rather than sending the reader to
+        # a config key that would not have helped.
         raise RuntimeError(
-            f"Could not determine zone for VM '{vm_name}'. "
-            "Set 'zone' in config as a fallback."
+            f"Could not determine zone for VM '{vm_name}': no instance by "
+            f"that name in project {self.project or '(unset)'}. "
+            "Set 'zone' in config as a fallback if it exists but is not "
+            "listable."
         )
 
     def _base_args(self, vm_name):
@@ -185,13 +197,44 @@ class GCloudRemote(Remote):
         an address that is routable inside the VPC."""
         return f"{self.ssh_user}@{self.get_ip(vm_name)}"
 
+    def _note_zone(self, vm_name, zone):
+        """Record where a VM is, and forget its IP if it has moved.
+
+        A VM that comes back in a different zone is a different instance
+        wearing the same name, so the address cached for the old one is
+        wrong too.
+        """
+        if self._zone_cache.get(vm_name) not in (None, zone):
+            self._ip_cache.pop(vm_name, None)
+        self._zone_cache[vm_name] = zone
+
+    def _forget(self, vm_name):
+        """Drop a VM that a listing did not return. It no longer exists, and
+        keeping its old zone means addressing whatever is created next at the
+        place the last one stood."""
+        self._zone_cache.pop(vm_name, None)
+        self._ip_cache.pop(vm_name, None)
+
     def _discover_all(self, vm_names):
-        """Pre-fetch zones for all VMs in a single gcloud call."""
-        unknown = [v for v in vm_names if v not in self._zone_cache]
-        if not unknown:
+        """Re-read the zone of every named VM in a single gcloud call.
+
+        Every zone-addressed command (`instances start`, `stop`, `describe`,
+        `ssh`) needs --zone, and asking per VM would spawn one gcloud -- a
+        ~130 MB bundled interpreter -- for each of a 102-VM fleet. So this
+        runs once per operation and the per-VM _base_args calls under it read
+        what it found.
+
+        It refreshes names it already knows rather than skipping them. Holding
+        them was a real outage: wan-replica00 and wan-client00 were recreated
+        in us-central1-f after us-central1-a ran out of n4-standard-16, the
+        daemon still had them at -a from before, and every start, stop and
+        arm against them returned 404 while vm_status -- which lists
+        project-wide with no zone -- kept reporting them as present.
+        """
+        if not vm_names:
             return
 
-        filter_expr = " OR ".join(f"name={v}" for v in unknown)
+        filter_expr = " OR ".join(f"name={v}" for v in vm_names)
         cmd = [
             "gcloud", "compute", "instances", "list",
             f"--filter={filter_expr}",
@@ -201,10 +244,40 @@ class GCloudRemote(Remote):
             cmd.append(f"--project={self.project}")
 
         result = subprocess.run(cmd, capture_output=True, text=True)
+        raise_for_auth(result)
+        if result.returncode != 0:
+            # Leaving the old zones in place would let the next command
+            # address VMs on the strength of a lookup that never happened.
+            for vm in vm_names:
+                self._forget(vm)
+            raise subprocess.CalledProcessError(
+                result.returncode, cmd, result.stdout, result.stderr)
+        seen = set()
         for line in result.stdout.strip().splitlines():
             parts = line.split()
             if len(parts) == 2:
-                self._zone_cache[parts[0]] = parts[1]
+                self._note_zone(parts[0], parts[1])
+                seen.add(parts[0])
+        for vm in vm_names:
+            if vm not in seen:
+                self._forget(vm)
+
+    def prepare_hosts(self, vm_names):
+        """One zone listing for the whole fan-out. Without it each ssh
+        resolves its own, which on a 102-VM fleet is 102 gcloud spawns -- and
+        arming the dead-man switch is exactly such a fan-out.
+
+        Best-effort, unlike the lifecycle paths. The keep-alive re-arms
+        through here every 30 minutes, and a raise would reach _tick_loop as
+        a failed heartbeat and stop a healthy cluster mid-run. A listing that
+        did not happen costs at worst a 404 on one ssh, which run_on_all
+        already reports per host. An auth failure still propagates: that is
+        the daemon-wide condition, not a hiccup.
+        """
+        try:
+            self._discover_all(vm_names)
+        except subprocess.CalledProcessError:
+            pass
 
     def get_instance_ids(self, vm_names):
         """{vm_name: GCE instance id}. Empty entries for VMs that don't exist.
@@ -236,7 +309,6 @@ class GCloudRemote(Remote):
 
     def check_vms_running(self, vm_names):
         """Check that all VMs are RUNNING. Exit with an error if any are not."""
-        self._discover_all(vm_names)
         statuses = self.vm_status(vm_names)
         not_running = []
         for vm in vm_names:
@@ -345,8 +417,11 @@ class GCloudRemote(Remote):
             raise RuntimeError(f"scp download {vm_name}:{remote_path} failed (exit {result.returncode}): {detail}")
 
     def get_ip(self, vm_name):
-        if hasattr(self, '_ip_cache') and vm_name in self._ip_cache:
+        if vm_name in self._ip_cache:
             return self._ip_cache[vm_name]
+        # Every other _base_args caller has a _discover_all above it; this one
+        # is reached singly, so it does its own.
+        self._discover_all([vm_name])
         cmd = [
             "gcloud", "compute", "instances", "describe", vm_name,
             *self._base_args(vm_name),
@@ -364,8 +439,6 @@ class GCloudRemote(Remote):
         Cached: if every requested VM is already in `_ip_cache`, skips the
         gcloud round-trip entirely. Across a sweep this saves ~1-2s per trial.
         """
-        if not hasattr(self, '_ip_cache'):
-            self._ip_cache = {}
         # No VMs, no call. The cache fast path below already happens to cover
         # this (all([]) is True), but only by accident of that idiom; stated
         # explicitly so reordering it cannot reintroduce the empty `--filter=`
@@ -376,12 +449,11 @@ class GCloudRemote(Remote):
         if all(v in self._ip_cache for v in vm_names):
             return {v: self._ip_cache[v] for v in vm_names}
 
-        self._discover_all(vm_names)
         filter_expr = " OR ".join(f"name={v}" for v in vm_names)
         cmd = [
             "gcloud", "compute", "instances", "list",
             f"--filter={filter_expr}",
-            "--format=value(name,networkInterfaces[0].networkIP)",
+            "--format=value(name,zone,networkInterfaces[0].networkIP)",
         ]
         if self.project:
             cmd.append(f"--project={self.project}")
@@ -392,13 +464,48 @@ class GCloudRemote(Remote):
         ips = {}
         for line in result.stdout.strip().splitlines():
             parts = line.split()
-            if len(parts) == 2:
-                ips[parts[0]] = parts[1]
+            if len(parts) == 3:
+                # Before the IP: a VM that moved zone has a stale address
+                # cached, and _note_zone is what drops it.
+                self._note_zone(parts[0], parts[1])
+                ips[parts[0]] = parts[2]
         self._ip_cache.update(ips)
         missing = [v for v in vm_names if v not in ips]
         if missing:
             raise RuntimeError(f"Could not resolve IPs for VMs: {missing}")
         return ips
+
+    @staticmethod
+    def _why_start_failed(detail: str) -> str:
+        """The actionable line out of gcloud's multi-line failure block.
+
+        `instances start` answers a stockout with about twenty lines of YAML
+        whose useful parts are the code and the sentence naming the machine
+        type and zone; the rest is documentation links. Reporting the VM name
+        alone sent a reader to the daemon's stdout to find out that
+        us-central1-f had run out of n4-standard-16.
+        """
+        lines = [ln.strip() for ln in (detail or "").splitlines() if ln.strip()]
+        if not lines:
+            return ""
+        code, messages = "", []
+        for i, line in enumerate(lines):
+            if line.startswith("code:"):
+                code = line.split(":", 1)[1].strip()
+            elif line.startswith("message:"):
+                # The sentence wraps across lines; take the continuations,
+                # which are the lines before the next YAML key.
+                rest = [line.split(":", 1)[1].strip()]
+                for nxt in lines[i + 1:]:
+                    if re.match(r"^[A-Za-z_]+:", nxt) or nxt.startswith("- "):
+                        break
+                    rest.append(nxt)
+                messages.append(" ".join(x for x in rest if x))
+        best = max(messages, key=len) if messages else ""
+        if code and best:
+            return f"{code}: {best}"
+        return code or best or next(
+            (ln for ln in lines if ln.startswith("ERROR:")), lines[0])[:200]
 
     def vm_start(self, vm_names):
         if not vm_names:
@@ -436,6 +543,12 @@ class GCloudRemote(Remote):
             err = RuntimeError(
                 f"vm_start failed for {len(failures)}/{len(vm_names)} VM(s): "
                 + ", ".join(vm for vm, _ in failures)
+                # Carry gcloud's own reason. Without it the event log said
+                # only which VM would not start, and a zone stockout -- the
+                # one cause the operator can actually act on, by moving the
+                # VM -- read the same as every other failure.
+                + (f" -- {why}" if (why := self._why_start_failed(
+                    str(failures[0][1]))) else "")
             )
             # Named, not just described: the caller's retry policy asks for
             # these before starting anything else.
@@ -451,12 +564,14 @@ class GCloudRemote(Remote):
         # start, VMs that have nothing to do with this run.
         if not vm_names:
             return {}
-        self._discover_all(vm_names)
+        # Zone comes back in the same listing rather than from a separate
+        # _discover_all: this runs every ten seconds per cluster, and the
+        # column is free here where a second call is not.
         filter_expr = " OR ".join(f"name={v}" for v in vm_names)
         cmd = [
             "gcloud", "compute", "instances", "list",
             f"--filter={filter_expr}",
-            "--format=value(name,status)",
+            "--format=value(name,zone,status)",
         ]
         if self.project:
             cmd.append(f"--project={self.project}")
@@ -468,8 +583,12 @@ class GCloudRemote(Remote):
         statuses = {}
         for line in result.stdout.strip().splitlines():
             parts = line.split()
-            if len(parts) == 2:
-                statuses[parts[0]] = parts[1]
+            if len(parts) == 3:
+                self._note_zone(parts[0], parts[1])
+                statuses[parts[0]] = parts[2]
+        for vm in vm_names:
+            if vm not in statuses:
+                self._forget(vm)
         return statuses
 
     def vm_stop(self, vm_names):

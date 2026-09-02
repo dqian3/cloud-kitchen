@@ -269,8 +269,14 @@ class Scheduler:
             except Exception as e:
                 error = f"cluster bring-up failed: {e!r}"
                 self.hub.emit("job.error", job_id=job_id, error=error)
-                delay = int(spec.get("retry_delay_secs",
-                                     jobs.DEFAULT_RETRY_DELAY_SECS))
+                # The daemon's setting, not the job's. A bring-up failure
+                # is a condition of the fleet -- a regional stockout hits
+                # every job that names the cluster -- and the cooldown exists
+                # to keep it from becoming enough create calls to reach an
+                # API limit. Held per job it also travelled: resubmit copies
+                # a spec verbatim, so a delay stored before the ten-minute
+                # change kept being inherited by descendants.
+                delay = self.config.cluster_retry_delay_secs
                 # No attempt is spent: nothing ran.
                 self._wait_until[job_id] = time.monotonic() + delay
                 self.hub.emit("job.waiting", job_id=job_id, delay_secs=delay,

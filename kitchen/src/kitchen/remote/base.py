@@ -51,6 +51,14 @@ class Remote(ABC):
     def get_ip(self, host):
         """Get the internal/reachable IP for a host."""
 
+    def prepare_hosts(self, hosts):
+        """Resolve whatever addressing a fan-out needs, in one call.
+
+        Backends whose per-host commands need a looked-up attribute (gcloud
+        needs each VM's zone) do it here rather than once per host inside the
+        thread pool.
+        """
+
     def run_on_all(self, hosts, command, quiet=False, timeout=None):
         """Run a command on all hosts in parallel.
 
@@ -64,6 +72,7 @@ class Remote(ABC):
         # the caller instead. Return the empty result it asked for.
         if not hosts:
             return {}
+        self.prepare_hosts(hosts)
         results = {}
         with ThreadPoolExecutor(
                 max_workers=min(self._MAX_CONCURRENT, len(hosts))) as pool:

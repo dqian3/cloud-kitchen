@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from dataclasses import replace
 
 from kitchend.config import Config, ProjectConfig
 from kitchend.core import jobs
@@ -315,3 +316,41 @@ def test_slot_is_not_yielded_to_a_retry_delayed_job(tmp_path):
 
     assert len(scheduler.runner.calls) == 1
     assert not any(k == "job.preempted" for k, _ in scheduler.hub.events)
+
+
+class RefusingClusters(FakeClusters):
+    """A cluster that will not come up -- a regional stockout."""
+
+    async def up(self, key, purpose="user", **kwargs):
+        self.calls.append(("up", key, purpose))
+        raise RuntimeError("no zone in us-central1 has n4-standard-16")
+
+
+def _bringup_delay(scheduler, db, project_id):
+    scheduler.clusters = RefusingClusters()
+    job_id = submit(db, project_id)
+    asyncio.run(scheduler._run(jobs.get(db, job_id)))
+    waits = [p for kind, p in scheduler.hub.events if kind == "job.waiting"]
+    assert waits, "a failed bring-up should schedule a retry"
+    return waits[-1]["delay_secs"]
+
+
+def test_bringup_retry_delay_comes_from_the_daemon_config(tmp_path):
+    """Not from the job. A stockout hits every job that names the cluster, and
+    the cooldown is what keeps it from becoming enough create calls to reach
+    an API limit -- so it is the operator's setting, fleet-wide."""
+    scheduler, db, _, project_id = setup_scheduler(tmp_path, exit_code=0)
+
+    # submit() stores retry_delay_secs=120; the config says otherwise.
+    assert scheduler.config.cluster_retry_delay_secs == 600
+    assert _bringup_delay(scheduler, db, project_id) == 600
+
+
+def test_bringup_retry_delay_follows_a_changed_config(tmp_path):
+    """Editing the daemon setting takes effect for jobs already queued --
+    the point of moving it off the spec, where a value stored before a change
+    kept being inherited through every resubmit."""
+    scheduler, db, _, project_id = setup_scheduler(tmp_path, exit_code=0)
+    scheduler.config = replace(scheduler.config, cluster_retry_delay_secs=1800)
+
+    assert _bringup_delay(scheduler, db, project_id) == 1800

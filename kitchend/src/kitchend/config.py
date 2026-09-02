@@ -4,6 +4,7 @@ Example:
 
     bind_host = "127.0.0.1"       # keep loopback; expose via `tailscale serve`
     bind_port = 8321
+    cluster_retry_delay_secs = 600   # cooldown after a failed bring-up
 
     [[projects]]
     name = "aspen-bft"
@@ -82,6 +83,14 @@ class Config:
     bind_port: int = 8321
     db_path: Path = STATE_DIR / "kitchend.sqlite3"
     jobs_dir: Path = STATE_DIR / "jobs"
+    # How long a job waits after its cluster would not come up. A daemon
+    # setting, not a per-job one: it exists to keep a regional stockout from
+    # turning into enough create calls to hit API limits, and that ceiling
+    # belongs to the fleet rather than to whoever submitted the job. It also
+    # used to travel: submitted jobs stored the value, resubmit copied the
+    # spec verbatim, and a delay from before the ten-minute change kept being
+    # inherited by descendants long after the default moved.
+    cluster_retry_delay_secs: int = 600
     projects: tuple[ProjectConfig, ...] = field(default=())
 
     def project(self, name: str) -> ProjectConfig:
@@ -129,5 +138,7 @@ def load_config(path: Path | None = None) -> Config:
         bind_port=int(raw.get("bind_port", 8321)),
         db_path=Path(raw.get("db_path", STATE_DIR / "kitchend.sqlite3")).expanduser(),
         jobs_dir=Path(raw.get("jobs_dir", STATE_DIR / "jobs")).expanduser(),
+        cluster_retry_delay_secs=int(
+            raw.get("cluster_retry_delay_secs", 600)),
         projects=projects,
     )

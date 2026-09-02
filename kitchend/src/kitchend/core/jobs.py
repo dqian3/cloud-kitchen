@@ -18,8 +18,13 @@ A job spec (stored verbatim as spec_json):
       "resume":      false,
       "priority":    0,
       "max_attempts": 20,
-      "retry_delay_secs": 600
+      "retry_delay_secs": 600     # after a failed RUN; see below
     }
+
+`retry_delay_secs` covers a run whose driver exited non-zero. The wait after
+a cluster would not come up is not this: it is the daemon's
+`cluster_retry_delay_secs`, because a stockout is a condition of the fleet
+rather than of the job that happened to ask first.
 
 Exit-code contract (from the drivers): 0 clean → ok; 2 degraded but data
 written → degraded, never retried; anything else → another attempt, resuming
@@ -29,10 +34,9 @@ into the same run dir, until max_attempts.
 import json
 from pathlib import Path
 
-# Attempts are cheap next to a lost measurement: a failed run resumes into
-# its directory, and a cluster that would not come up (a zone stockout) is
-# probed again after a cooldown rather than given up on. Ten minutes avoids
-# turning a regional stockout into enough create calls to trigger API limits.
+# Attempts are cheap next to a lost measurement: a failed run resumes into its
+# directory rather than being given up on. The matching cooldown for a cluster
+# that would not come up lives in the daemon config, not here.
 DEFAULT_MAX_ATTEMPTS = 20
 DEFAULT_RETRY_DELAY_SECS = 600
 

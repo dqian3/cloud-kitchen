@@ -952,15 +952,29 @@ function Dashboard() {
     let stopped = false
     const connect = () => {
       if (stopped) return
-      es = new EventSource('/api/stream')
-      es.onopen = () => { setConnected(true); reload() }
-      es.onmessage = () => reload() // any state change → refetch (cheap at this scale)
-      es.onerror = () => {
+      clearTimeout(retry)
+      if (es) es.close()   // never leave a replaced stream open behind us
+      const source = new EventSource('/api/stream')
+      es = source
+      // Every handler checks it is still the current stream. A replaced one
+      // goes on firing its error, and letting that through turned the dot
+      // dark while the stream that had just reconnected was fine.
+      source.onopen = () => {
+        if (source !== es) return
+        setConnected(true); reload()
+      }
+      source.onmessage = () => {
+        // any state change → refetch (cheap at this scale)
+        if (source === es) reload()
+      }
+      source.onerror = () => {
+        if (source !== es) return
         setConnected(false)
         // A non-200 (the proxy's 502 while the daemon restarts) closes an
         // EventSource PERMANENTLY — the built-in retry only covers drops of
         // an established stream — so recreate it ourselves.
-        if (es.readyState === EventSource.CLOSED) {
+        if (source.readyState === EventSource.CLOSED) {
+          clearTimeout(retry)
           retry = setTimeout(connect, 5000)
         }
       }
