@@ -123,3 +123,22 @@ def test_a_refused_placement_queues_nothing(tmp_path):
             "cluster": "main", "after": 999})
 
     assert jobs.waiting_order(db) == before
+
+
+def test_unfinished_jobs_are_never_paged_out_of_the_listing(tmp_path):
+    """A job the scheduler can still dispatch must always be visible.
+
+    The listing is ordered by id and the queue by priority, so the oldest
+    queued job is both first to run and first to fall past `limit`. One did:
+    it held the head of the queue, failed every bring-up, and showed up in no
+    listing because newer jobs had filled the window.
+    """
+    db, hub, project_id = setup(tmp_path)
+
+    old = add(db, hub, project_id, "main")          # stays waiting
+    for _ in range(10):                             # newer, and finished
+        jobs.finish(db, hub, add(db, hub, project_id, "main"), jobs.DONE)
+
+    listed = [j["id"] for j in jobs.list_jobs(db, limit=3)]
+    assert old in listed
+    assert len(listed) == 1 + 3      # the waiting one, plus `limit` finished

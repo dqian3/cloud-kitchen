@@ -91,6 +91,16 @@ def _with_queue(db, job):
 
 
 def list_jobs(db, state=None, limit=100):
+    """Every unfinished job, plus the most recent finished ones.
+
+    `limit` bounds only the finished. The queue dispatches by priority and
+    this list is ordered by id, so the two disagree about which job matters
+    most: the oldest queued job is first to run and first to fall off the
+    end. One did -- job 2 sat at the head of the queue, failed every
+    bring-up on a stale host list, took the whole queue's turn with it, and
+    appeared in no listing, because 100 newer jobs existed. A job the
+    scheduler can still dispatch must always be visible.
+    """
     if state:
         rows = db.query(
             "SELECT j.*, p.name AS project FROM jobs j "
@@ -98,9 +108,17 @@ def list_jobs(db, state=None, limit=100):
             "WHERE j.state = ? ORDER BY j.id DESC LIMIT ?", (state, limit))
     else:
         rows = db.query(
-            "SELECT j.*, p.name AS project FROM jobs j "
-            "JOIN projects p ON p.id = j.project_id "
-            "ORDER BY j.id DESC LIMIT ?", (limit,))
+            "SELECT * FROM ("
+            "  SELECT j.*, p.name AS project FROM jobs j "
+            "  JOIN projects p ON p.id = j.project_id "
+            "  WHERE j.state != ?"
+            "  UNION ALL"
+            "  SELECT * FROM ("
+            "    SELECT j.*, p.name AS project FROM jobs j "
+            "    JOIN projects p ON p.id = j.project_id "
+            "    WHERE j.state = ? ORDER BY j.id DESC LIMIT ?"
+            "  )"
+            ") ORDER BY id DESC", (DONE, DONE, limit))
     return [_with_queue(db, _to_dict(r)) for r in rows]
 
 

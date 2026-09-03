@@ -689,7 +689,11 @@ function RunEntry({ entry, onChanged, display }) {
     <>
       <tr className="job-row" onClick={() => setOpen(!open)}>
         <td className="muted">r{run.id}</td>
-        <td className="mono">{what}</td>
+        <td className="mono">{what}
+          {job?.spec?.name && job.spec.name !== what &&
+            <div className="muted run-job-name" title="the job that produced it">
+              {job.spec.name}</div>}
+        </td>
         <td><Chip text={state || '?'} color={chipColor} />
           {detail?.mixed_build &&
             <span className="chip chip-orange" title={
@@ -833,7 +837,7 @@ function RunsSection({ projects, entries, onChanged, display }) {
         ? <p className="muted">No recorded results yet — use scan to index old result directories.</p>
         : <div className="table-scroll"><table>
             <thead><tr>
-              <th>id</th><th>experiment</th><th>status</th>
+              <th>id</th><th>experiment / job</th><th>status</th>
               <th>when</th><th>tags</th><th></th>
             </tr></thead>
             <tbody>
@@ -1014,8 +1018,9 @@ function Dashboard() {
   const projRuns = runs.filter(r => r.project === selected)
   const projInfo = projects.find(p => p.name === selected)
 
-  // Results are results, not job-history rows. A job reference is retained
-  // only as provenance for the details panel.
+  // Results are results, not job-history rows. The job is provenance: its
+  // name distinguishes runs that share an experiment (a resume, a rerun at a
+  // different start rate) in the list, and the details panel shows its argv.
   const jobById = Object.fromEntries(projJobs.map(j => [j.id, j]))
   const entries = projRuns
     .map(r => ({ job: jobById[r.job_id] || null, run: r }))
