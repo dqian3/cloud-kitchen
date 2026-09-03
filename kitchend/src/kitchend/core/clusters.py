@@ -833,10 +833,14 @@ class ClusterManager:
                                   cluster=mc.key, vm=mc.jump_vm)
                     await self._ensure_jump(mc)
                 if time.monotonic() - mc.last_rearm >= self.REARM_INTERVAL_S:
-                    await asyncio.to_thread(mc.keepalive.rearm)
+                    # Count what was actually armed, not what was leased: a
+                    # sweep that releases VMs it no longer needs leaves fewer
+                    # running, and that shrinking is worth seeing in the log.
+                    armed = await asyncio.to_thread(mc.keepalive.rearm)
                     mc.last_rearm = time.monotonic()
                     self.hub.emit("cluster.keepalive", cluster_id=mc.db_id,
-                                  cluster=mc.key, vms=len(vms))
+                                  cluster=mc.key, vms=len(armed),
+                                  leased=len(vms))
         except asyncio.CancelledError:
             raise
         except Exception as e:
