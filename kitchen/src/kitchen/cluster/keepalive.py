@@ -94,9 +94,26 @@ class KeepAlive:
 
     # --- the loop ---
 
-    def rearm(self):
-        arm_shutdown(self.remote, self.vms, minutes=self.deadman_minutes,
-                     cancel_first=True)
+    def rearm(self, statuses=None):
+        """Re-arm the VMs that are up; returns the ones armed.
+
+        Only a running VM has anything to arm. A driver may stop VMs that
+        later points no longer need -- aspen's sweep does under
+        --release-unused-vms -- and a stopped VM is already in the state the
+        dead-man switch exists to reach. Arming the whole leased set instead
+        failed on every released VM, and one failed heartbeat is reason
+        enough to stop a cluster, so a sweep that released VMs killed itself
+        at the next beat.
+
+        `statuses` reuses a status read the caller has already done.
+        """
+        if statuses is None:
+            statuses = self.remote.vm_status(self.vms)
+        live = [v for v in self.vms if statuses.get(v) == "RUNNING"]
+        if live:
+            arm_shutdown(self.remote, live, minutes=self.deadman_minutes,
+                         cancel_first=True)
+        return live
 
     def run(self):
         """Re-arm forever; on SIGINT/SIGTERM stop (and stop VMs if configured).
@@ -122,13 +139,15 @@ class KeepAlive:
                 time.sleep(self.interval_s)
                 print(f"[{time.strftime('%H:%M:%S')}] Resetting shutdown timer "
                       f"on {len(self.vms)} VMs...")
+                statuses = None
                 if self.restart_fallen:
                     statuses = self.remote.vm_status(self.vms)
                     fallen = [v for v in self.vms if statuses.get(v) != "RUNNING"]
                     if fallen:
                         print(f"  Restarting {len(fallen)} stopped VM(s): {fallen}")
                         self.remote.vm_start(fallen)
-                self.rearm()
+                        statuses = None      # stale now that they are back
+                self.rearm(statuses)
                 print(f"[{time.strftime('%H:%M:%S')}] Done. Next heartbeat in {desc}.")
         except KeyboardInterrupt:
             if self.stop_on_exit:
