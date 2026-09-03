@@ -1,8 +1,7 @@
-"""Which rates each search visits.
+"""Which rates the knee search visits, and what the pass cap bounds.
 
-The fixed-pass search is the default; the relative-knee search is opt-in
-because it buys precision with extra measured points, and on a large
-committee every point is billed.
+Every refinement pass is a set of full benchmark runs, so the cap is a cost
+bound: one pass samples the bracket once and stops, more passes narrow it.
 """
 
 from kitchen.run.rates import Measurement, search
@@ -21,42 +20,46 @@ def _measure_to(knee):
     return measure, visited
 
 
-def test_default_search_is_the_fixed_pass_one():
+def test_one_pass_is_the_default():
     measure, visited = _measure_to(50000)
-    search(measure, start=32000, max_rate=200000)
-    fixed = list(visited)
+    search(measure, start=16000, max_rate=200000)
+    one = list(visited)
 
     measure, visited = _measure_to(50000)
-    search(measure, start=32000, max_rate=200000, relative_knee=False)
-    assert visited == fixed
+    search(measure, start=16000, max_rate=200000, max_refine_passes=1)
+    assert visited == one
 
 
-def test_relative_knee_costs_more_points_than_fixed_passes():
-    measure, fixed = _measure_to(50000)
-    search(measure, start=32000, max_rate=200000)
-
-    measure, relative = _measure_to(50000)
-    search(measure, start=32000, max_rate=200000, relative_knee=True,
-           knee_tolerance=0.05)
-
-    assert len(relative) > len(fixed)
-
-
-def test_relative_knee_leaves_a_tighter_bracket():
-    """The point of the extra passes: a narrower gap around the knee."""
-    def bracket(**kw):
+def test_more_passes_measure_more_and_bracket_tighter():
+    def run(passes):
         measure, visited = _measure_to(50000)
-        search(measure, start=32000, max_rate=200000, **kw)
+        search(measure, start=16000, max_rate=200000,
+               max_refine_passes=passes, min_resolution=1.0)
         below = [r for r in visited if r <= 50000]
         above = [r for r in visited if r > 50000]
-        return min(above) - max(below)
+        return len(visited), min(above) - max(below)
 
-    assert bracket(relative_knee=True, knee_tolerance=0.05,
-                   min_resolution=1.0) < bracket()
+    one_n, one_gap = run(1)
+    four_n, four_gap = run(4)
+    assert four_n > one_n
+    assert four_gap < one_gap
 
 
-def test_a_rate_is_measured_at_most_once_either_way():
-    for relative in (False, True):
+def test_uncapped_terminates_and_refines_past_the_capped_runs():
+    """No cap means refine until the tolerance; it must still finish."""
+    def points(passes):
         measure, visited = _measure_to(50000)
-        search(measure, start=32000, max_rate=200000, relative_knee=relative)
-        assert len(visited) == len(set(visited)), relative
+        search(measure, start=16000, max_rate=200000,
+               max_refine_passes=passes, knee_tolerance=0.05,
+               min_resolution=1.0)
+        return len(visited)
+
+    assert points(None) > points(1)
+
+
+def test_a_rate_is_measured_at_most_once():
+    for passes in (1, 3, None):
+        measure, visited = _measure_to(50000)
+        search(measure, start=16000, max_rate=200000, max_refine_passes=passes,
+               min_resolution=1.0)
+        assert len(visited) == len(set(visited)), passes

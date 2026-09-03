@@ -214,9 +214,10 @@ def next_climb_rate(rate: float, max_step: float) -> float:
     return rate + min(rate, max_step)
 
 
-def _search_relative_knee(measure: Callable[[float], Optional[Measurement]],
+def search(measure: Callable[[float], Optional[Measurement]],
            *, start: float = 1000.0, max_rate: float = 200000.0,
            min_rate: float = 100.0, refine_steps: int = 3,
+           max_refine_passes: Optional[int] = 1,
            knee_tolerance: float = KNEE_TOLERANCE,
            min_resolution: float = MIN_KNEE_RESOLUTION,
            max_step: float = MAX_CLIMB_STEP,
@@ -320,8 +321,20 @@ def _search_relative_knee(measure: Callable[[float], Optional[Measurement]],
     # these sweeps draw -- and then re-brackets on the transition its own
     # points found.
     reported_stray = False
+    passes = 0
     while first_bad - last_good > max(knee_tolerance * last_good,
                                      min_resolution):
+        # Refining to the tolerance costs however many passes the bracket
+        # happens to need, and each point is a full benchmark run -- on a
+        # 51-VM committee that is billed by the hour. The cap bounds it:
+        # one pass samples the bracket once and stops, however wide it is
+        # still left. None refines until the tolerance is met.
+        if max_refine_passes is not None and passes >= max_refine_passes:
+            decide("abandon", last_good,
+                   f"bracket {last_good:g}..{first_bad:g} left at "
+                   f"{max_refine_passes} refinement pass(es)")
+            return
+        passes += 1
         step = (first_bad - last_good) / (refine_steps + 1)
         pass_rates = [round(last_good + step * i)
                       for i in range(1, refine_steps + 1)]
@@ -397,144 +410,6 @@ def _search_relative_knee(measure: Callable[[float], Optional[Measurement]],
 
 
 # --- persistence: the rates a search visited, so later trials replay them ---
-
-def _search_fixed_passes(measure: Callable[[float], Optional[Measurement]],
-           *, start: float = 1000.0, max_rate: float = 200000.0,
-           min_rate: float = 100.0, refine_steps: int = 3,
-           max_step: float = MAX_CLIMB_STEP,
-           on_decision: Optional[Callable[[str, float, str], None]] = None,
-           saturated_fn: Callable[..., tuple[bool, str]] = None) -> None:
-    """The pre-2026-09 search: a fixed number of refinement passes.
-
-    Refinement runs `refine_steps` points inside the bracket and stops,
-    however wide the bracket still is. It does not ask how close it got.
-
-    `measure(rate)` runs one point and returns a Measurement, or None if the
-    run produced nothing usable. Results are the caller's to record; this only
-    decides which rates to visit. `on_decision(action, rate, note)` fires as
-    each decision is made, with action one of start|climb|halve|refine|abandon.
-    `saturated_fn` overrides the default rule set (same signature as
-    `saturated`).
-    """
-    sat_fn = saturated_fn or saturated
-
-    def decide(action, rate, note=""):
-        if on_decision is not None:
-            on_decision(action, rate, note)
-
-    rate = float(start)
-    prev_delivered: Optional[float] = None
-    last_good: Optional[float] = None
-    first_bad: Optional[float] = None
-    below_good: Optional[float] = None   # highest rate measured under last_good
-
-    decide("start", rate)
-    point = measure(rate)
-    sat, note = sat_fn(point, None)
-    if dead(point):
-        decide("abandon", rate,
-               "committed nothing at the start rate; a protocol silent here "
-               "will be silent lower down")
-        return
-    while sat and rate > min_rate:
-        first_bad = rate
-        prev_ratio = point.ratio if point is not None else 0.0
-        rate = max(min_rate, rate / 2)
-        decide("halve", rate, note)
-        point = measure(rate)
-        # Halving encodes the assumption that the saturation was load-caused.
-        # Check it. Two observed failures in one night from a repair-churn
-        # protocol: its healthy ceiling sits below DELIVERED_RATIO, so the rule
-        # fires at *every* rate and each halving lands in a strictly worse
-        # regime; and at very low rates the points stop being measurements at
-        # all, which `dead()` catches -- but a loop that reads `dead` as
-        # "still saturated" keeps halving into the floor.
-        if dead(point):
-            decide("abandon", rate,
-                   "committed nothing; halving lower cannot commit more")
-            return
-        sat, note = sat_fn(point, None)
-        if sat and point is not None and point.ratio <= prev_ratio:
-            decide("abandon", rate,
-                   f"halving made delivered/offered worse "
-                   f"({prev_ratio:.3f} -> {point.ratio:.3f}); this is not "
-                   f"load saturation")
-            return
-
-    if not sat and point is not None:
-        last_good = rate
-        prev_delivered = point.delivered
-        if first_bad is None:
-            rate = next_climb_rate(rate, max_step)
-            while rate <= max_rate:
-                decide("climb", rate)
-                point = measure(rate)
-                sat, note = sat_fn(point, prev_delivered)
-                if sat:
-                    first_bad = rate
-                    break
-                if point is not None:
-                    below_good = last_good
-                    last_good = rate
-                    prev_delivered = point.delivered
-                rate = next_climb_rate(rate, max_step)
-
-    if last_good is None or first_bad is None:
-        where = ("never saturated" if first_bad is None
-                 else "saturated at the first rate")
-        decide("abandon", rate, f"{where}; no knee bracketed")
-        return
-
-    step = (first_bad - last_good) / (refine_steps + 1)
-    # The same step continues below the bracket down to the previous good
-    # point (a doubling under last_good; the same distance when the bracket
-    # came from halving), so the approach to the knee is sampled at the
-    # bracket's resolution rather than jumping a whole doubling.
-    floor = below_good if below_good is not None else last_good / 2
-    lower = []
-    i = 1
-    while last_good - step * i > max(floor, min_rate):
-        lower.append(round(last_good - step * i))
-        i += 1
-    for j, r in enumerate(reversed(lower)):
-        decide("refine", r, f"below the knee bracket {last_good:g}..{first_bad:g}"
-                            if j == 0 else "")
-        measure(r)
-    for i in range(1, refine_steps + 1):
-        refined = round(last_good + step * i)
-        decide("refine", refined,
-               f"knee between {last_good:g} and {first_bad:g}" if i == 1 else "")
-        point = measure(refined)
-        # Refining upward from the last good rate, so once a point commits
-        # nothing every higher one will too.
-        if dead(point):
-            decide("abandon", refined,
-                   "committed nothing; stopping the refinement here")
-            return
-
-
-def search(measure: Callable[[float], Optional[Measurement]],
-           *, relative_knee: bool = False,
-           knee_tolerance: float = KNEE_TOLERANCE,
-           min_resolution: float = MIN_KNEE_RESOLUTION,
-           **kw) -> None:
-    """Drive `measure` over a searched rate sequence.
-
-    Two searches live here. The default walks a fixed number of refinement
-    passes and stops. `relative_knee` instead refines until the bracket is
-    within `knee_tolerance` of the knee rate (floored at `min_resolution`),
-    which locates the knee more precisely and costs more points to do it --
-    on a 51-VM committee that difference is billed by the hour, so it is
-    opt-in rather than the default.
-
-    Both take the same `measure`, `start`, `max_rate`, `min_rate`,
-    `refine_steps`, `max_step`, `on_decision` and `saturated_fn`.
-    """
-    if relative_knee:
-        return _search_relative_knee(measure, knee_tolerance=knee_tolerance,
-                                     min_resolution=min_resolution, **kw)
-    return _search_fixed_passes(measure, **kw)
-
 
 # Where a sweep dir records the rates its search visited, so a later invocation
 # adding trials to that dir replays them instead of searching again. A second

@@ -8,6 +8,7 @@ daemon can estimate from it, and the events it produces describe it.
 """
 
 import itertools
+from typing import Optional
 from dataclasses import dataclass, field
 
 from .rates import KNEE_TOLERANCE, MIN_KNEE_RESOLUTION
@@ -20,10 +21,10 @@ class RateSearchSpec:
     min_rate: float = 100.0
     max_rate: float = 200000.0
     refine_steps: int = 3
-    # Off means the fixed-pass search: refine_steps points inside the bracket,
-    # then stop. On refines until the bracket is within knee_tolerance of the
-    # knee, which costs more points for a tighter answer.
-    relative_knee: bool = False
+    # How many refinement passes the knee search may spend. One samples the
+    # bracket once and stops; None refines until knee_tolerance is met, for
+    # however many points that takes.
+    max_refine_passes: Optional[int] = 1
     knee_tolerance: float = KNEE_TOLERANCE
     min_resolution: float = MIN_KNEE_RESOLUTION
 
