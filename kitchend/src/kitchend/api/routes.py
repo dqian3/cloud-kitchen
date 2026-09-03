@@ -63,7 +63,8 @@ def submit_job(body: JobSubmit, request: Request):
 
 
 @router.get("/jobs")
-def list_jobs(request: Request, state: str | None = None, limit: int = 100):
+def list_jobs(request: Request, state: str | None = None,
+              limit: int | None = None):
     out = jobs.list_jobs(request.app.state.db, state=state, limit=limit)
     sched = request.app.state.scheduler
     for job in out:

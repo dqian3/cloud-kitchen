@@ -140,5 +140,19 @@ def test_unfinished_jobs_are_never_paged_out_of_the_listing(tmp_path):
         jobs.finish(db, hub, add(db, hub, project_id, "main"), jobs.DONE)
 
     listed = [j["id"] for j in jobs.list_jobs(db, limit=3)]
-    assert old in listed
+    assert listed[0] == old          # the head of the queue leads the list
     assert len(listed) == 1 + 3      # the waiting one, plus `limit` finished
+
+    # No limit: everything, unfinished first.
+    assert len(jobs.list_jobs(db)) == 11
+
+
+def test_listing_is_in_dispatch_order(tmp_path):
+    """Ordered by priority, like the scheduler -- not by id."""
+    db, hub, project_id = setup(tmp_path)
+    first = add(db, hub, project_id, "main")
+    second = add(db, hub, project_id, "main")
+    jobs.reorder(db, hub, [second, first])
+
+    listed = [j["id"] for j in jobs.list_jobs(db) if j["state"] != jobs.DONE]
+    assert listed == [second, first]

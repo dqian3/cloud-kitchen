@@ -90,36 +90,41 @@ def _with_queue(db, job):
     return job
 
 
-def list_jobs(db, state=None, limit=100):
-    """Every unfinished job, plus the most recent finished ones.
+def list_jobs(db, state=None, limit=None):
+    """Every job, unfinished ones first, in the order the queue dispatches.
 
-    `limit` bounds only the finished. The queue dispatches by priority and
-    this list is ordered by id, so the two disagree about which job matters
-    most: the oldest queued job is first to run and first to fall off the
-    end. One did -- job 2 sat at the head of the queue, failed every
-    bring-up on a stale host list, took the whole queue's turn with it, and
-    appeared in no listing, because 100 newer jobs existed. A job the
-    scheduler can still dispatch must always be visible.
+    Ordered by priority rather than id because that is what the scheduler
+    does, and the two disagree about which job matters most: by id the
+    oldest queued job sorts last, and it is the one at the head of the queue.
+    One fell off a `LIMIT 100` while holding that head -- failing every
+    bring-up on a stale host list, taking a cluster cooldown each time, and
+    stopping dispatch for everything behind it -- and appeared nowhere,
+    because a hundred newer jobs existed.
+
+    `limit`, if given, bounds only the finished: a job the scheduler can
+    still dispatch is always listed.
     """
     if state:
         rows = db.query(
             "SELECT j.*, p.name AS project FROM jobs j "
             "JOIN projects p ON p.id = j.project_id "
-            "WHERE j.state = ? ORDER BY j.id DESC LIMIT ?", (state, limit))
-    else:
-        rows = db.query(
-            "SELECT * FROM ("
-            "  SELECT j.*, p.name AS project FROM jobs j "
-            "  JOIN projects p ON p.id = j.project_id "
-            "  WHERE j.state != ?"
-            "  UNION ALL"
-            "  SELECT * FROM ("
-            "    SELECT j.*, p.name AS project FROM jobs j "
-            "    JOIN projects p ON p.id = j.project_id "
-            "    WHERE j.state = ? ORDER BY j.id DESC LIMIT ?"
-            "  )"
-            ") ORDER BY id DESC", (DONE, DONE, limit))
-    return [_with_queue(db, _to_dict(r)) for r in rows]
+            "WHERE j.state = ? ORDER BY j.priority DESC, j.id ASC",
+            (state,))
+        out = [_with_queue(db, _to_dict(r)) for r in rows]
+        return out[:limit] if limit else out
+
+    rows = db.query(
+        "SELECT j.*, p.name AS project FROM jobs j "
+        "JOIN projects p ON p.id = j.project_id "
+        "WHERE j.state != ? ORDER BY j.priority DESC, j.id ASC", (DONE,))
+    out = [_with_queue(db, _to_dict(r)) for r in rows]
+
+    done = db.query(
+        "SELECT j.*, p.name AS project FROM jobs j "
+        "JOIN projects p ON p.id = j.project_id "
+        "WHERE j.state = ? ORDER BY j.id DESC" + (" LIMIT ?" if limit else ""),
+        (DONE, limit) if limit else (DONE,))
+    return out + [_with_queue(db, _to_dict(r)) for r in done]
 
 
 def attempts(db, job_id):

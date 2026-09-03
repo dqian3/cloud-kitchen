@@ -532,9 +532,15 @@ function JobRow({ job, isHead, onChanged, onMove, canMoveUp, canMoveDown }) {
             {isHead && job.attempts > 1 && !done &&
               <span className="muted" title="driver invocations so far">
                 attempt {job.attempts}/{job.max_attempts}</span>}
-            {isHead && retryIn != null &&
+            {isHead && retryIn != null && <>
               <span className="muted" title={job.last_error || 'waiting'}>
-                {retryIn > 0 ? `retrying in ${retryIn}s` : 'retrying…'}</span>}
+                {retryIn > 0 ? `retrying in ${retryIn}s` : 'retrying…'}</span>
+              {retryIn > 0 &&
+                <button className="link" onClick={e => {
+                  e.stopPropagation(); act(() => api.retryJob(job.id))
+                }} title="drop the wait and the cluster cooldown, and try now">
+                  retry now</button>}
+            </>}
             {isHead && waiting && job.last_error && (
               <span className="error" title={job.last_error}>
                 {shortError(job.last_error)}</span>
