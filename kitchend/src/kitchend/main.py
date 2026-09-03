@@ -285,7 +285,13 @@ def main(argv=None):
     parser.add_argument("--config", default=None,
                         help=f"config path (default {CONFIG_PATH})")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("serve", help="run the daemon")
+    p = sub.add_parser("serve", help="run the daemon")
+    # A restart normally resumes whatever the queue was doing, because
+    # the pause state is restored from the events table. This starts
+    # paused regardless, for coming up on changed config or a fleet in
+    # an unknown state without a job claiming it first.
+    p.add_argument("--paused", action="store_true",
+                   help="start with the queue paused, whatever it was")
     sub.add_parser("status", help="ping a running daemon")
 
     p = sub.add_parser("catalog", help="list a project's experiments")
@@ -366,8 +372,9 @@ def main(argv=None):
         # a `systemctl restart` then hangs 90s until systemd SIGKILLs the
         # daemon (and every proxied browser stream sees a non-200 meanwhile).
         # Five seconds is grace enough for real in-flight requests.
-        uvicorn.run(create_app(config), host=config.bind_host,
-                    port=config.bind_port, timeout_graceful_shutdown=5)
+        uvicorn.run(create_app(config, start_paused=args.paused),
+                    host=config.bind_host, port=config.bind_port,
+                    timeout_graceful_shutdown=5)
         return 0
     if args.cmd == "status":
         print(json.dumps(_api(config, "/api/health"), indent=2))

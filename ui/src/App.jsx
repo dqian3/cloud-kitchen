@@ -213,10 +213,7 @@ function SubmitForm({ project, clusters, catalog, onSubmitted }) {
     setArgvMode(false); setArgvText('[]'); setJobName('')
   }, [project])
 
-  // Maintenance actions such as figure generation are intentionally not
-  // queue experiments. Keep them out of the normal selector.
-  const selectableExperiments = (catalog?.experiments || [])
-    .filter(e => e.name !== 'figures')
+  const selectableExperiments = catalog?.experiments || []
   const hasCatalog = catalog && !catalog.error && selectableExperiments.length > 0
   // One cluster per job: selecting an experiment greys out other clusters.
   const selectedQueues = new Set(

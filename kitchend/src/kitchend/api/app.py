@@ -25,7 +25,7 @@ UI_DIST = Path(__file__).resolve().parents[4] / "ui" / "dist"
 UI_PLACEHOLDER = Path(__file__).resolve().parents[4] / "ui" / "index.html"
 
 
-def create_app(config: Config) -> FastAPI:
+def create_app(config: Config, start_paused: bool = False) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         app.state.hub.bind_loop(asyncio.get_running_loop())
@@ -33,6 +33,8 @@ def create_app(config: Config) -> FastAPI:
         # gone become 'interrupted' (resumable); live ones keep running and
         # will be re-noticed only as log files — M1 does not re-adopt them.
         jobs.recover_orphans(app.state.db, app.state.hub)
+        if start_paused:
+            app.state.scheduler.set_paused(True)
         scheduler_task = asyncio.get_running_loop().create_task(
             app.state.scheduler.loop())
         ingest_task = asyncio.get_running_loop().create_task(
