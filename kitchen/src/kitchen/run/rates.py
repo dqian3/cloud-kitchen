@@ -199,14 +199,16 @@ def saturated(point: Optional[Measurement],
 # The widest the climb will step. Doubling below this, additive above it.
 MAX_CLIMB_STEP = 32000.0
 
-# How close the bracket must get to the knee before refinement stops, as a
-# fraction of the knee rate.
-KNEE_TOLERANCE = 0.05
-# ...but never finer than this many msgs/sec. Below a knee of about 20k the
-# fraction asks for a resolution the measurement cannot support: trial spread
-# and the client generator's own jitter are both wider than the step, so the
-# extra passes resolve noise rather than the knee.
+# Refinement stops once the bracket is narrower than this many msgs/sec.
+# An absolute floor rather than a fraction of the knee: trial spread and the
+# client generator's own jitter do not shrink with the rate, so a step below
+# this resolves noise rather than the knee at any scale.
 MIN_KNEE_RESOLUTION = 1000.0
+# A relative stop as well, as a fraction of the knee rate, applied whichever
+# is wider. Off by default -- above a 20k knee it stops sooner than the
+# resolution floor, and that is a coarser answer, not a cheaper one, since
+# max_refine_passes is what bounds the cost.
+KNEE_TOLERANCE = 0.0
 
 
 def next_climb_rate(rate: float, max_step: float) -> float:
