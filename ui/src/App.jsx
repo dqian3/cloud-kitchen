@@ -5,7 +5,7 @@ import { api } from './api.js'
 // shows whichever applies.
 const STATE_COLORS = {
   queued: 'gray', retrying: 'purple',
-  running: 'blue', recorded: 'gray',
+  starting: 'blue', running: 'blue', recorded: 'gray',
   ok: 'green', degraded: 'orange', failed: 'red', canceled: 'gray',
 }
 
@@ -508,11 +508,12 @@ function JobRow({ job, isHead, onChanged, onMove, canMoveUp, canMoveDown }) {
   const waiting = job.state === 'waiting'
   const done = job.state === 'done'
   const retryIn = useCountdown(waiting ? job.retry_in_s : null)
-  // Cluster transitions belong to the cluster cards. Queue rows describe
-  // only the head job. Everything behind it is simply queued.
+  // The daemon derives this from scheduler truth, including the acquiring
+  // state a job is in before its driver spawns -- recomputing it here left
+  // the head reading `queued` while it was actively bringing a fleet up.
+  // Rows behind the head stay plain: everything there is simply queued.
   const label = done ? job.outcome
-    : isHead && job.state === 'running' ? 'running'
-      : isHead && retryIn != null ? 'retrying' : 'queued'
+    : isHead ? (job.display_state || 'queued') : 'queued'
   const spec = job.spec
   const command = spec.command || spec.experiments || []
   const willResume = job.will_resume
