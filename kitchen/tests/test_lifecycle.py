@@ -10,7 +10,7 @@ def test_arm_shutdown_reports_unprotected_vm():
     remote.script("shutdown -h", host="vm-a", raises=RuntimeError("denied"))
 
     with pytest.raises(RuntimeError, match="vm-a"):
-        arm_shutdown(remote, ["vm-a"])
+        arm_shutdown(remote, ["vm-a"], attempts=1)
 
 
 def test_start_stops_vm_when_deadman_cannot_be_armed():
@@ -32,7 +32,7 @@ def test_arm_error_says_why_not_just_which_vms():
                   raises=RuntimeError("Permission denied (publickey)"))
 
     with pytest.raises(RuntimeError, match="publickey"):
-        arm_shutdown(remote, ["vm-a"])
+        arm_shutdown(remote, ["vm-a"], attempts=1)
 
 
 def test_stop_vms_returns_survivors():

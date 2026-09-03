@@ -18,17 +18,26 @@ def arm_shutdown_cmd(minutes=60, cancel_first=True):
 def _why_unarmed(results, vms) -> str:
     """Why the arm did not land. run_on_all keeps the exception it caught per
     host; reporting only the host names left the reason unread, so a VM that
-    was still booting and one with a broken key read identically."""
+    was still booting and one with a broken key read identically.
+
+    ssh's own stderr is the answer, and it is not in str(exception):
+    CalledProcessError renders as the command it ran, so a jumped fleet
+    reported a hundred characters of ProxyCommand and nothing about the
+    failure. Read .stderr first and fall back to the rendering.
+    """
     for vm in vms:
         out = results.get(vm)
-        if isinstance(out, Exception):
-            lines = [ln.strip() for ln in str(out).splitlines() if ln.strip()]
-            if lines:
-                return f"{vm}: {lines[-1][:200]}"
+        if not isinstance(out, Exception):
+            continue
+        text = (getattr(out, "stderr", "") or "").strip() or str(out)
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        if lines:
+            return f"{vm}: {lines[-1][:200]}"
     return "no output from any of them"
 
 
-def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120):
+def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120,
+                 attempts=4, retry_delay_s=15):
     """Arm (or re-arm) the auto-shutdown timer on all VMs. A no-op for
     backends whose hosts can't shut themselves down (containers).
 
@@ -39,9 +48,23 @@ def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120):
     """
     if not getattr(remote, "supports_deadman", True):
         return {}
-    results = remote.run_on_all(
-        vms, arm_shutdown_cmd(minutes, cancel_first), quiet=True, timeout=timeout,
-    )
+    command = arm_shutdown_cmd(minutes, cancel_first)
+    results = remote.run_on_all(vms, command, quiet=True, timeout=timeout)
+
+    # Re-ask the ones that did not answer. remote.ssh retries a connection
+    # it recognises as transient, but only those: a jumped fleet fails
+    # through a ProxyCommand whose wording it does not match, and a VM the
+    # API calls started is not a VM whose sshd is accepting. Failing the
+    # whole fleet on that stopped a hundred healthy machines because a
+    # first batch was early.
+    for _ in range(attempts - 1):
+        failed = unarmed(results)
+        if not failed:
+            break
+        time.sleep(retry_delay_s)
+        results.update(
+            remote.run_on_all(failed, command, quiet=True, timeout=timeout))
+
     failed = unarmed(results)
     if failed:
         error = RuntimeError(
