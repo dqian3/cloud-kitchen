@@ -20,6 +20,10 @@ class RateSearchSpec:
     min_rate: float = 100.0
     max_rate: float = 200000.0
     refine_steps: int = 3
+    # Off means the fixed-pass search: refine_steps points inside the bracket,
+    # then stop. On refines until the bracket is within knee_tolerance of the
+    # knee, which costs more points for a tighter answer.
+    relative_knee: bool = False
     knee_tolerance: float = KNEE_TOLERANCE
     min_resolution: float = MIN_KNEE_RESOLUTION
 
