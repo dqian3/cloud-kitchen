@@ -850,11 +850,22 @@ class ClusterManager:
                     return
                 # Nothing else notices a dead tunnel, and every session on a
                 # jumped cluster goes through it -- including the re-arm below.
-                if mc.jump_vm and (mc.jump_proc is None
-                                   or mc.jump_proc.poll() is not None):
-                    self.hub.emit("cluster.jump.lost", cluster_id=mc.db_id,
-                                  cluster=mc.key, vm=mc.jump_vm)
-                    await self._ensure_jump(mc)
+                # The tunnel process outlives the host it points at, so a
+                # live process is not evidence the jump is up: when the jump
+                # powered off, the forward stayed and every session through
+                # it failed at key exchange instead.
+                if mc.jump_vm:
+                    gone = (mc.jump_proc is None
+                            or mc.jump_proc.poll() is not None)
+                    if not gone and mc.jump_remote is not None:
+                        status = await asyncio.to_thread(
+                            mc.jump_remote.vm_status, [mc.jump_vm])
+                        gone = status.get(mc.jump_vm) not in (
+                            "RUNNING", "STAGING", "PROVISIONING")
+                    if gone:
+                        self.hub.emit("cluster.jump.lost", cluster_id=mc.db_id,
+                                      cluster=mc.key, vm=mc.jump_vm)
+                        await self._ensure_jump(mc)
                 if time.monotonic() - mc.last_rearm >= self.REARM_INTERVAL_S:
                     # A beat that never returns is a beat that never fires
                     # again, and the dead-man keeps counting while the loop
@@ -884,10 +895,20 @@ class ClusterManager:
                         if stale >= self.REARM_DEADLINE_S:
                             raise
                         continue
+                    # The jump host is not one of the leased VMs, so the
+                    # fleet's re-arm never covered it: armed once at bring-up
+                    # with shutdown -h +60, it powered itself off an hour in
+                    # and took every ssh and scp to the fleet with it. The
+                    # tunnel process outlives the host, so nothing noticed --
+                    # the failures surfaced as key-exchange resets and
+                    # timed-out heartbeats an hour into every long run.
+                    if mc.jump_vm and mc.jump_remote is not None:
+                        await asyncio.to_thread(
+                            arm_shutdown, mc.jump_remote, [mc.jump_vm])
                     mc.last_rearm = time.monotonic()
                     self.hub.emit("cluster.keepalive", cluster_id=mc.db_id,
                                   cluster=mc.key, vms=len(armed),
-                                  leased=len(vms))
+                                  leased=len(vms), jump=mc.jump_vm)
         except asyncio.CancelledError:
             raise
         except Exception as e:
