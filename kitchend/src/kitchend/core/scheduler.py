@@ -430,20 +430,43 @@ class Scheduler:
 
     # --- user actions ---
 
-    async def cancel(self, job_id) -> str:
+    async def cancel(self, job_id, grace_s=20) -> str:
+        """Stop a job, and stop the queue with it.
+
+        Cancelling pauses the scheduler. A cancel is a decision to stop what
+        the daemon is doing, and an unpaused queue hands the fleet to the
+        next job seconds later -- usually while whoever cancelled is still
+        deciding what to do. Resume explicitly.
+
+        A running job's driver is stopped *before* the job is marked done.
+        The lease, and the keep-alive re-arming the fleet's dead-man switch,
+        belong to the job: a driver that outlives them keeps running against
+        a fleet that has quietly stopped being kept alive, and an hour later
+        the VMs switch themselves off underneath it. If the driver will not
+        stop, say so and leave the job as it is rather than reporting a
+        cancel that did not happen.
+        """
         job = jobs.get(self.db, job_id)
         if job is None:
             raise KeyError(job_id)
         if job["state"] == jobs.DONE:
             return job["outcome"]
+
+        self.set_paused(True)
+
         if job["state"] == jobs.WAITING:
             # If a lease is coming up for it, _execute sees this and releases
             # it instead of spawning.
             jobs.finish(self.db, self.hub, job_id, jobs.CANCELED)
             return jobs.CANCELED
+
+        if not await self.runner.cancel(job_id, grace_s=grace_s):
+            self.hub.emit("job.cancel_failed", job_id=job_id)
+            raise RuntimeError(
+                f"job {job_id}'s driver did not stop; it is still running "
+                f"and still holds its cluster. The job was left alone.")
         jobs.end_attempt(self.db, job_id, error="canceled")
         jobs.finish(self.db, self.hub, job_id, jobs.CANCELED)
-        await self.runner.cancel(job_id)
         return jobs.CANCELED
 
     def retry_now(self, job_id) -> dict:

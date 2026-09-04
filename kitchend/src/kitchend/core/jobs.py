@@ -67,28 +67,12 @@ def ensure_project_row(db, project_cfg):
 
 
 def submit(db, project_id, spec: dict) -> int:
-    """Queue a job. Its id is never one a previous job has held.
-
-    `id INTEGER PRIMARY KEY` is the rowid, and SQLite hands the largest
-    deleted one straight back: delete the newest job and the next submission
-    inherits its number. The daemon keys a running driver on the job id and
-    names run dirs `kitchen-job{id}-{stamp}`, so a reused id silently aliased
-    a new job onto a deleted one's process and output -- the new row showed
-    no results while an orphaned driver wrote into a directory nothing
-    tracked. Take the id past every one the record still remembers, jobs and
-    their attempts and the runs they produced alike.
-    """
-    used = db.query_one(
-        "SELECT MAX(n) AS n FROM ("
-        "  SELECT MAX(id) AS n FROM jobs"
-        "  UNION ALL SELECT MAX(job_id) FROM job_attempts"
-        "  UNION ALL SELECT MAX(job_id) FROM runs"
-        "  UNION ALL SELECT MAX(job_id) FROM events)")
-    next_id = int((used["n"] if used and used["n"] is not None else 0)) + 1
+    """Queue a job. Its id is never one a previous job has held --
+    jobs.id is AUTOINCREMENT, so SQLite will not hand a deleted id back."""
     return db.insert(
-        "INSERT INTO jobs (id, project_id, spec_json, run_dir, state, "
-        "priority, max_attempts) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (next_id, project_id, json.dumps(spec), spec.get("run_dir"), WAITING,
+        "INSERT INTO jobs (project_id, spec_json, run_dir, state, priority, "
+        "max_attempts) VALUES (?, ?, ?, ?, ?, ?)",
+        (project_id, json.dumps(spec), spec.get("run_dir"), WAITING,
          int(spec.get("priority", 0)),
          int(spec.get("max_attempts", DEFAULT_MAX_ATTEMPTS))),
     )

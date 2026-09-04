@@ -143,7 +143,9 @@ async def cancel_job(job_id: int, request: Request):
         state = await request.app.state.scheduler.cancel(job_id)
     except KeyError:
         raise HTTPException(404, f"no job {job_id}")
-    return {"id": job_id, "state": state}
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return {"id": job_id, "state": state, "paused": True}
 
 
 @router.delete("/jobs/{job_id}")

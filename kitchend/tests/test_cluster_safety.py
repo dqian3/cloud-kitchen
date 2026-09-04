@@ -9,6 +9,7 @@ import pytest
 
 from kitchen.remote.mock import MockRemote
 from kitchend.core.clusters import ClusterManager, ManagedCluster, vms_from_yaml
+from kitchend.core import db
 from kitchend.core.db import Db, open_db
 
 
@@ -114,7 +115,8 @@ def test_v3_schema_cleanup_preserves_operational_rows(tmp_path):
 
     migrated = open_db(path)
     try:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 4
+        assert (migrated.execute("PRAGMA user_version").fetchone()[0]
+                == db.SCHEMA_VERSION)
         assert migrated.execute(
             "SELECT state FROM clusters WHERE id = 1").fetchone()[0] == "running"
         assert migrated.execute(
