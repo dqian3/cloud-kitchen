@@ -141,6 +141,11 @@ def _probe_set(vms, short=()) -> list:
 
 class ClusterManager:
     REARM_INTERVAL_S = 30 * 60
+    # One beat may take this long before it is abandoned and retried next
+    # tick; several may fail before the fleet is stopped deliberately. Both
+    # sit inside the 60-minute dead-man window a beat is refreshing.
+    BEAT_TIMEOUT_S = 5 * 60
+    REARM_DEADLINE_S = 50 * 60
     TICK_S = 60
     # Keep every cluster observation fresh enough for the dashboard and for
     # detecting VMs changed outside the daemon.
@@ -833,14 +838,34 @@ class ClusterManager:
                                   cluster=mc.key, vm=mc.jump_vm)
                     await self._ensure_jump(mc)
                 if time.monotonic() - mc.last_rearm >= self.REARM_INTERVAL_S:
-                    # Count what was actually armed, not what was leased: a
-                    # sweep that releases VMs it no longer needs leaves fewer
-                    # running, and that shrinking is worth seeing in the log.
                     # A beat that never returns is a beat that never fires
-                    # again: the dead-man keeps counting while the loop waits.
-                    armed = await asyncio.wait_for(
-                        asyncio.to_thread(mc.keepalive.rearm),
-                        timeout=self.REARM_INTERVAL_S)
+                    # again, and the dead-man keeps counting while the loop
+                    # waits -- so bound it. A beat that fails is not fatal,
+                    # though: beats are twice as often as the dead-man window
+                    # is long, so there is room to miss one and try again on
+                    # the next tick. Killing a healthy fleet over one slow
+                    # gcloud call trades a silent death for a prompt one.
+                    #
+                    # What is fatal is running out of that room. Past
+                    # REARM_DEADLINE_S with nothing armed, the VMs are about
+                    # to switch themselves off mid-run; stopping them in the
+                    # open beats letting the dead-man do it by surprise.
+                    try:
+                        # Count what was actually armed, not what was leased:
+                        # a sweep that releases VMs it no longer needs leaves
+                        # fewer running, and that shrinking is worth seeing.
+                        armed = await asyncio.wait_for(
+                            asyncio.to_thread(mc.keepalive.rearm),
+                            timeout=self.BEAT_TIMEOUT_S)
+                    except Exception as e:          # incl. TimeoutError
+                        stale = time.monotonic() - mc.last_rearm
+                        self.hub.emit("cluster.keepalive.missed",
+                                      cluster_id=mc.db_id, cluster=mc.key,
+                                      error=repr(e), stale_s=int(stale),
+                                      deadline_s=self.REARM_DEADLINE_S)
+                        if stale >= self.REARM_DEADLINE_S:
+                            raise
+                        continue
                     mc.last_rearm = time.monotonic()
                     self.hub.emit("cluster.keepalive", cluster_id=mc.db_id,
                                   cluster=mc.key, vms=len(armed),
