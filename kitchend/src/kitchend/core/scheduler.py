@@ -431,12 +431,7 @@ class Scheduler:
     # --- user actions ---
 
     async def cancel(self, job_id, grace_s=20) -> str:
-        """Stop a job, and stop the queue with it.
-
-        Cancelling pauses the scheduler. A cancel is a decision to stop what
-        the daemon is doing, and an unpaused queue hands the fleet to the
-        next job seconds later -- usually while whoever cancelled is still
-        deciding what to do. Resume explicitly.
+        """Stop a job, driver first.
 
         A running job's driver is stopped *before* the job is marked done.
         The lease, and the keep-alive re-arming the fleet's dead-man switch,
@@ -451,8 +446,6 @@ class Scheduler:
             raise KeyError(job_id)
         if job["state"] == jobs.DONE:
             return job["outcome"]
-
-        self.set_paused(True)
 
         if job["state"] == jobs.WAITING:
             # If a lease is coming up for it, _execute sees this and releases

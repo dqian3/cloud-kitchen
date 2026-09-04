@@ -145,7 +145,7 @@ async def cancel_job(job_id: int, request: Request):
         raise HTTPException(404, f"no job {job_id}")
     except RuntimeError as e:
         raise HTTPException(409, str(e))
-    return {"id": job_id, "state": state, "paused": True}
+    return {"id": job_id, "state": state}
 
 
 @router.delete("/jobs/{job_id}")
