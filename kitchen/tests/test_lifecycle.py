@@ -10,7 +10,7 @@ def test_arm_shutdown_reports_unprotected_vm():
     remote.script("shutdown -h", host="vm-a", raises=RuntimeError("denied"))
 
     with pytest.raises(RuntimeError, match="vm-a"):
-        arm_shutdown(remote, ["vm-a"], attempts=1)
+        arm_shutdown(remote, ["vm-a"])
 
 
 def test_start_stops_vm_when_deadman_cannot_be_armed():
@@ -32,7 +32,7 @@ def test_arm_error_says_why_not_just_which_vms():
                   raises=RuntimeError("Permission denied (publickey)"))
 
     with pytest.raises(RuntimeError, match="publickey"):
-        arm_shutdown(remote, ["vm-a"], attempts=1)
+        arm_shutdown(remote, ["vm-a"])
 
 
 def test_stop_vms_returns_survivors():
@@ -68,3 +68,15 @@ def test_rearm_still_raises_when_a_running_vm_cannot_be_armed():
 
     with pytest.raises(RuntimeError, match="vm-a"):
         KeepAlive(remote, ["vm-a"], state=None).rearm()
+
+
+def test_a_proxycommand_hop_failure_is_retried():
+    """`stdio forwarding failed` is the jump hop giving up, not the VM.
+
+    A jumped fleet reaches every VM through one forward, so this is what it
+    fails with under contention. It was the only connection-layer error not
+    in the retry list, and one occurrence on one VM failed a 102-VM bring-up.
+    """
+    from kitchen.remote.settings import DEFAULT_SSH_TRANSIENT_MARKERS
+    assert any(m in "n51client30: stdio forwarding failed"
+               for m in DEFAULT_SSH_TRANSIENT_MARKERS)

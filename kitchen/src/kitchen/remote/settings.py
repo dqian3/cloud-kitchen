@@ -37,6 +37,11 @@ DEFAULT_SSH_TRANSIENT_MARKERS = (
     "Error while connecting [4003",
     "Could not establish connection",
     "ssh_exchange_identification",
+    # The ProxyCommand hop's own failure. A jumped fleet reaches every VM
+    # through one forward, so this is the connection-layer error it fails
+    # with under contention -- and the only one that was not retried. One
+    # occurrence, on one VM, failed a 102-VM bring-up.
+    "stdio forwarding failed",
 )
 
 _FALSY = ("0", "false", "False", "no", "")

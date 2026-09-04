@@ -3,6 +3,8 @@
 import getpass
 import os
 import re
+import tempfile
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -181,16 +183,36 @@ class GCloudRemote(Remote):
         """
         user, _, hostport = self.proxy_jump.rpartition("@")
         host, _, port = hostport.partition(":")
-        hop = ["ssh", "-i", self.ssh_key_file, *self._JUMP_QUIET]
+        hop = ["ssh", "-i", self.ssh_key_file, *self._JUMP_QUIET,
+               *self._mux_opts("jump")]
         if port:
             # `ssh host:port` is not a thing; the port is a separate flag.
             hop += ["-p", port]
         hop += ["-W", "%h:%p", f"{user}@{host}" if user else host]
         return [
             *self._JUMP_QUIET,
+            *self._mux_opts("fleet"),
             "-o", "ProxyCommand=" + " ".join(hop),
             "-i", self.ssh_key_file,
         ]
+
+    def _mux_opts(self, kind):
+        """Reuse connections instead of building one per command.
+
+        Without this, arming 102 VMs is 204 fresh ssh handshakes -- one to
+        the target and one for the ProxyCommand's own hop to the jump host --
+        all through a single IAP tunnel, sixteen at a time. That is what made
+        a heartbeat take minutes and time out under its own contention; the
+        hop is the same connection every time and never needed rebuilding.
+
+        The socket lives under the run dir, keyed by %C (a hash of host,
+        port, user), and persists briefly so the next fan-out finds it warm.
+        """
+        base = Path(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir())
+        sock = base / f"kitchen-ssh-{kind}-%C"
+        return ["-o", "ControlMaster=auto",
+                "-o", f"ControlPath={sock}",
+                "-o", "ControlPersist=120"]
 
     def _jump_target(self, vm_name):
         """user@<internal ip>. The jump host resolves nothing: it is handed

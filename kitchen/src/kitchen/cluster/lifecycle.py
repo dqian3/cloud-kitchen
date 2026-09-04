@@ -36,8 +36,7 @@ def _why_unarmed(results, vms) -> str:
     return "no output from any of them"
 
 
-def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120,
-                 attempts=4, retry_delay_s=15):
+def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120):
     """Arm (or re-arm) the auto-shutdown timer on all VMs. A no-op for
     backends whose hosts can't shut themselves down (containers).
 
@@ -48,23 +47,10 @@ def arm_shutdown(remote, vms, minutes=60, cancel_first=True, timeout=120,
     """
     if not getattr(remote, "supports_deadman", True):
         return {}
-    command = arm_shutdown_cmd(minutes, cancel_first)
-    results = remote.run_on_all(vms, command, quiet=True, timeout=timeout)
-
-    # Re-ask the ones that did not answer. remote.ssh retries a connection
-    # it recognises as transient, but only those: a jumped fleet fails
-    # through a ProxyCommand whose wording it does not match, and a VM the
-    # API calls started is not a VM whose sshd is accepting. Failing the
-    # whole fleet on that stopped a hundred healthy machines because a
-    # first batch was early.
-    for _ in range(attempts - 1):
-        failed = unarmed(results)
-        if not failed:
-            break
-        time.sleep(retry_delay_s)
-        results.update(
-            remote.run_on_all(failed, command, quiet=True, timeout=timeout))
-
+    results = remote.run_on_all(
+        vms, arm_shutdown_cmd(minutes, cancel_first), quiet=True,
+        timeout=timeout,
+    )
     failed = unarmed(results)
     if failed:
         error = RuntimeError(
