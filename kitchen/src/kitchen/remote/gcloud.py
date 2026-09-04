@@ -575,7 +575,12 @@ class GCloudRemote(Remote):
         ]
         if self.project:
             cmd.append(f"--project={self.project}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Bounded: this runs inside the keep-alive heartbeat, and an
+        # unbounded gcloud call there stops a cluster being re-armed with no
+        # error and no event -- the fleet then powers itself off an hour
+        # later, under whatever is using it.
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                timeout=120)
         raise_for_auth(result)
         if result.returncode != 0:
             raise subprocess.CalledProcessError(

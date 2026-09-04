@@ -836,7 +836,11 @@ class ClusterManager:
                     # Count what was actually armed, not what was leased: a
                     # sweep that releases VMs it no longer needs leaves fewer
                     # running, and that shrinking is worth seeing in the log.
-                    armed = await asyncio.to_thread(mc.keepalive.rearm)
+                    # A beat that never returns is a beat that never fires
+                    # again: the dead-man keeps counting while the loop waits.
+                    armed = await asyncio.wait_for(
+                        asyncio.to_thread(mc.keepalive.rearm),
+                        timeout=self.REARM_INTERVAL_S)
                     mc.last_rearm = time.monotonic()
                     self.hub.emit("cluster.keepalive", cluster_id=mc.db_id,
                                   cluster=mc.key, vms=len(armed),
