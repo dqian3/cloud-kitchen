@@ -148,33 +148,6 @@ SCHEMA = """
 
 """
 
-_JOBS_TABLE = """
-    CREATE TABLE jobs (
-        -- AUTOINCREMENT, not a bare rowid: SQLite hands the largest deleted
-        -- rowid straight back, so deleting the newest job gave its number to
-        -- the next submission. The daemon keys a running driver on the job
-        -- id and names run dirs kitchen-job{id}-{stamp}, so a reused id
-        -- aliased a new job onto a deleted one's process and output.
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        project_id INTEGER NOT NULL REFERENCES projects(id),
-        spec_json TEXT NOT NULL,
-        cluster_id INTEGER REFERENCES clusters(id),
-        run_dir TEXT,
-        state TEXT NOT NULL DEFAULT 'waiting',   -- waiting | running | done
-        outcome TEXT,                            -- done only: ok|degraded|failed|canceled
-        priority INTEGER NOT NULL DEFAULT 0,
-        attempts INTEGER NOT NULL DEFAULT 0,
-        max_attempts INTEGER NOT NULL DEFAULT 20,
-        last_error TEXT,
-        pid INTEGER,
-        events_offset INTEGER NOT NULL DEFAULT 0,
-        progress_json TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        started_at TEXT,
-        finished_at TEXT
-    );
-"""
-
 SCHEMA_VERSION = 5
 
 
@@ -236,46 +209,6 @@ def migrate(conn: sqlite3.Connection) -> None:
     version = conn.execute("PRAGMA user_version").fetchone()[0]
     if version == SCHEMA_VERSION:
         return
-    if version == 4:
-        # jobs.id becomes AUTOINCREMENT, which SQLite cannot add in place, so
-        # the table is rebuilt. Two rules make that safe to interrupt:
-        #
-        # executescript() COMMITs before it runs, so it must not be used here
-        # -- it would end this transaction mid-rebuild, leaving the rename
-        # applied and nothing copied.
-        #
-        # And if a previous attempt did leave jobs_v4 behind, that table is
-        # the data, not debris: recover from it rather than dropping it.
-        with conn:
-            leftover = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' "
-                "AND name='jobs_v4'").fetchone()
-            if not leftover:
-                conn.execute("ALTER TABLE jobs RENAME TO jobs_v4")
-                conn.execute(_JOBS_TABLE)
-            elif not conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' "
-                    "AND name='jobs'").fetchone():
-                conn.execute(_JOBS_TABLE)
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(jobs_v4)")]
-            names = ", ".join(cols)
-            conn.execute(
-                f"INSERT INTO jobs ({names}) SELECT {names} FROM jobs_v4 "
-                "WHERE id NOT IN (SELECT id FROM jobs)")
-            high = conn.execute(
-                "SELECT MAX(n) FROM ("
-                "  SELECT MAX(id) AS n FROM jobs"
-                "  UNION ALL SELECT MAX(job_id) FROM job_attempts"
-                "  UNION ALL SELECT MAX(job_id) FROM runs"
-                "  UNION ALL SELECT MAX(job_id) FROM events)").fetchone()[0] or 0
-            conn.execute("DELETE FROM sqlite_sequence WHERE name = 'jobs'")
-            conn.execute(
-                "INSERT INTO sqlite_sequence (name, seq) VALUES ('jobs', ?)",
-                (high,))
-            conn.execute("DROP TABLE jobs_v4")
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
-        return
-
     if version == 3:
         with conn:
             conn.execute("DROP TABLE cluster_leases")
