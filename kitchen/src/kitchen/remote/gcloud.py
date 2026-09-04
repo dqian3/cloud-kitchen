@@ -364,6 +364,37 @@ class GCloudRemote(Remote):
             output=result.stdout, stderr=result.stderr,
         )
 
+    def _scp_with_retry(self, cmd, what):
+        """Run an scp, retrying the connection failures ssh already retries.
+
+        scp and ssh reach a jumped fleet through the same ProxyCommand and
+        fail the same transient ways -- `kex_exchange_identification: read:
+        Connection reset by peer`, `Connection closed` -- but only ssh was
+        retrying them. A sweep stepping through small committees opens these
+        in quick succession, and one refused handshake ended the point: ten
+        of a diagonal's twenty-two never ran, each dying on the config upload
+        before the benchmark started.
+        """
+        attempts = self.settings.ssh_attempts
+        result = None
+        for attempt in range(1, attempts + 1):
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                return
+            detail = (result.stderr or "").strip() or (result.stdout or "").strip()
+            if attempt < attempts and any(
+                    m in detail for m in self.settings.ssh_transient_markers):
+                print(f"  [{what}] scp failed (attempt {attempt}/{attempts}), "
+                      f"retrying in {self.settings.ssh_retry_delay_s}s: "
+                      f"{detail[:120]}", flush=True)
+                time.sleep(self.settings.ssh_retry_delay_s)
+                continue
+            break
+        detail = ((result.stderr or "").strip() or (result.stdout or "").strip()
+                  or "(no output)")
+        raise RuntimeError(
+            f"scp upload to {what} failed (exit {result.returncode}): {detail}")
+
     def scp_upload(self, local_path, vm_name, remote_path):
         if self.proxy_jump:
             cmd = ["scp", *self._jump_opts(), local_path,
@@ -374,10 +405,7 @@ class GCloudRemote(Remote):
                 local_path, f"{vm_name}:{remote_path}",
                 *self._ssh_args(vm_name),
             ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-            raise RuntimeError(f"scp upload to {vm_name}:{remote_path} failed (exit {result.returncode}): {detail}")
+        self._scp_with_retry(cmd, f"{vm_name}:{remote_path}")
 
     def scp_upload_many(self, local_paths, vm_name, remote_dir):
         """Upload multiple local files to `vm_name:remote_dir` in a single
@@ -396,13 +424,7 @@ class GCloudRemote(Remote):
                 f"{vm_name}:{remote_dir}",
                 *self._ssh_args(vm_name),
             ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
-            raise RuntimeError(
-                f"scp upload of {len(local_paths)} files to {vm_name}:{remote_dir} "
-                f"failed (exit {result.returncode}): {detail}"
-            )
+        self._scp_with_retry(cmd, f"{vm_name}:{remote_dir}")
 
     def scp_download(self, vm_name, remote_path, local_path):
         if self.proxy_jump:
