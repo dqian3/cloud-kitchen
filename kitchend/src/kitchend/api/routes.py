@@ -133,7 +133,7 @@ def reorder_jobs(body: Reorder, request: Request):
 
 
 @router.get("/jobs/{job_id}/log")
-def job_log(job_id: int, request: Request, tail: int = 200):
+def job_log(job_id: int, request: Request, tail: int = 2000):
     return {"log": request.app.state.runner.tail_log(job_id, lines=tail)}
 
 

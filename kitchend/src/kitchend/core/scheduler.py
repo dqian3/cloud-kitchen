@@ -368,10 +368,24 @@ class Scheduler:
         jobs.end_attempt(self.db, job_id, exit_code=rc, points=points)
         if current["state"] == jobs.DONE:      # canceled while it ran
             return
+        # 0/1/2 are the engine's contract for a run that finished: ok, some
+        # point failed, some point degraded. Only the first was read as an
+        # answer. Exit 1 was retried, so a sweep that completed with one dead
+        # point re-leased the fleet, replayed every point that had already
+        # succeeded, reached the same dead point, and exited 1 again -- for
+        # all twenty attempts, since nothing about a failed point changes by
+        # running the rest of the sweep a second time.
+        #
+        # A driver that never reached the contract -- killed, crashed, exited
+        # on a code it does not define -- is the retryable case, and still is.
         if rc == 0:
             jobs.finish(self.db, self.hub, job_id, jobs.OK)
         elif rc == 2:
             jobs.finish(self.db, self.hub, job_id, jobs.DEGRADED)
+        elif rc == 1:
+            jobs.finish(self.db, self.hub, job_id, jobs.FAILED,
+                        last_error="exit code 1; the sweep finished with "
+                                   "failed points")
         else:
             self._retry_or_fail(job_id, rc)
 

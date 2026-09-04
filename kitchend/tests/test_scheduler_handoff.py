@@ -80,7 +80,7 @@ def test_cluster_is_kept_for_next_job_on_same_cluster(tmp_path):
 
 
 def test_cluster_is_kept_between_retry_attempts(tmp_path):
-    scheduler, db, clusters, project_id = setup_scheduler(tmp_path, exit_code=1)
+    scheduler, db, clusters, project_id = setup_scheduler(tmp_path, exit_code=137)
     job_id = submit(db, project_id)
 
     asyncio.run(scheduler._run(jobs.get(db, job_id)))
@@ -107,7 +107,7 @@ def test_canceled_acquisition_hands_cluster_to_next_job(tmp_path):
 
 
 def test_retry_uses_same_directory_and_resume_flag(tmp_path):
-    scheduler, db, _, project_id = setup_scheduler(tmp_path, exit_code=1)
+    scheduler, db, _, project_id = setup_scheduler(tmp_path, exit_code=137)
     job_id = submit(db, project_id)
 
     asyncio.run(scheduler._run(jobs.get(db, job_id)))
@@ -354,3 +354,20 @@ def test_bringup_retry_delay_follows_a_changed_config(tmp_path):
     scheduler.config = replace(scheduler.config, cluster_retry_delay_secs=1800)
 
     assert _bringup_delay(scheduler, db, project_id) == 1800
+
+
+def test_a_sweep_that_finished_with_failed_points_is_not_retried(tmp_path):
+    """Exit 1 is the engine saying a point failed, not that the run crashed.
+
+    Retrying re-leases the fleet and replays every point that already
+    succeeded, to reach the same failed point and exit 1 again.
+    """
+    scheduler, db, _, project_id = setup_scheduler(tmp_path, exit_code=1)
+    job_id = submit(db, project_id)
+
+    asyncio.run(scheduler._run(jobs.get(db, job_id)))
+
+    job = jobs.get(db, job_id)
+    assert job["state"] == jobs.DONE
+    assert job["outcome"] == jobs.FAILED
+    assert job["attempts"] == 1

@@ -33,8 +33,12 @@ class JobRunner:
         log.write(f"\n=== attempt started {time.strftime('%Y-%m-%d %H:%M:%S')} "
                   f": {' '.join(argv)}\n".encode())
         try:
+            # The log is a file, not a tty, so python block-buffers into it:
+            # a 60s measurement point writes nothing and then arrives in an
+            # 8KB burst, which reads as a log that has stopped moving.
+            env = dict(os.environ, PYTHONUNBUFFERED="1")
             proc = await asyncio.create_subprocess_exec(
-                *argv, cwd=str(cwd),
+                *argv, cwd=str(cwd), env=env,
                 stdout=log, stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
             )
