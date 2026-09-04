@@ -199,7 +199,8 @@ def saturated(point: Optional[Measurement],
 # The widest the climb will step. Doubling below this, additive above it.
 MAX_CLIMB_STEP = 32000.0
 
-# Refinement stops once the bracket is narrower than this many msgs/sec.
+# The narrowest spacing refinement will measure, in msgs/sec: it stops once
+# the bracket is narrower than this, and never places a pass's points closer.
 # An absolute floor rather than a fraction of the knee: trial spread and the
 # client generator's own jitter do not shrink with the rate, so a step below
 # this resolves noise rather than the knee at any scale.
@@ -317,6 +318,10 @@ def search(measure: Callable[[float], Optional[Measurement]],
         decide("abandon", rate, f"{where}; no knee bracketed")
         return
 
+    def resolution_at(good: float) -> float:
+        """The narrowest spacing worth measuring, at this knee."""
+        return max(knee_tolerance * good, min_resolution)
+
     # Narrow the bracket until it is within knee_tolerance of the knee. Each
     # pass samples the whole of the bracket it starts from, past the knee as
     # well as short of it -- the collapse beyond the knee is part of the curve
@@ -324,8 +329,7 @@ def search(measure: Callable[[float], Optional[Measurement]],
     # points found.
     reported_stray = False
     passes = 0
-    while first_bad - last_good > max(knee_tolerance * last_good,
-                                     min_resolution):
+    while first_bad - last_good > resolution_at(last_good):
         # Refining to the tolerance costs however many passes the bracket
         # happens to need, and each point is a full benchmark run -- on a
         # 51-VM committee that is billed by the hour. The cap bounds it:
@@ -337,9 +341,18 @@ def search(measure: Callable[[float], Optional[Measurement]],
                    f"{max_refine_passes} refinement pass(es)")
             return
         passes += 1
-        step = (first_bad - last_good) / (refine_steps + 1)
+        # Space the pass's points by at least the resolution. Always splitting
+        # into refine_steps + 1 intervals puts them a quarter of the bracket
+        # apart, which just above the floor asks a finer question than the
+        # measurement answers.
+        span = first_bad - last_good
+        steps = min(refine_steps,
+                    int(span / resolution_at(last_good) + 1e-9) - 1)
+        if steps < 1:
+            break
+        step = span / (steps + 1)
         pass_rates = [round(last_good + step * i)
-                      for i in range(1, refine_steps + 1)]
+                      for i in range(1, steps + 1)]
         pass_rates = [r for r in pass_rates
                       if last_good < r < first_bad and r not in measured]
         if not pass_rates:

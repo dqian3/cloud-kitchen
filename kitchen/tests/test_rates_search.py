@@ -63,3 +63,14 @@ def test_a_rate_is_measured_at_most_once():
         search(measure, start=16000, max_rate=200000, max_refine_passes=passes,
                min_resolution=1.0)
         assert len(visited) == len(set(visited)), passes
+
+
+def test_no_pass_measures_closer_than_the_resolution():
+    """The floor is on the spacing measured, not only on where refining stops."""
+    measure, visited = _measure_to(69000)
+    search(measure, start=8000, max_rate=200000,
+           max_refine_passes=8, min_resolution=1000.0)
+
+    rates = sorted(set(visited))
+    gaps = [b - a for a, b in zip(rates, rates[1:])]
+    assert min(gaps) >= 1000.0
