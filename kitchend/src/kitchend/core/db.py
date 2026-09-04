@@ -237,16 +237,31 @@ def migrate(conn: sqlite3.Connection) -> None:
     if version == SCHEMA_VERSION:
         return
     if version == 4:
-        # jobs.id becomes AUTOINCREMENT. SQLite cannot add that in place, so
-        # the table is rebuilt; sqlite_sequence is then seeded past every id
-        # the record remembers, including jobs already deleted.
+        # jobs.id becomes AUTOINCREMENT, which SQLite cannot add in place, so
+        # the table is rebuilt. Two rules make that safe to interrupt:
+        #
+        # executescript() COMMITs before it runs, so it must not be used here
+        # -- it would end this transaction mid-rebuild, leaving the rename
+        # applied and nothing copied.
+        #
+        # And if a previous attempt did leave jobs_v4 behind, that table is
+        # the data, not debris: recover from it rather than dropping it.
         with conn:
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(jobs)")]
+            leftover = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='jobs_v4'").fetchone()
+            if not leftover:
+                conn.execute("ALTER TABLE jobs RENAME TO jobs_v4")
+                conn.execute(_JOBS_TABLE)
+            elif not conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='jobs'").fetchone():
+                conn.execute(_JOBS_TABLE)
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(jobs_v4)")]
             names = ", ".join(cols)
-            conn.execute("ALTER TABLE jobs RENAME TO jobs_v4")
-            conn.executescript(_JOBS_TABLE)
-            conn.execute(f"INSERT INTO jobs ({names}) SELECT {names} FROM jobs_v4")
-            conn.execute("DROP TABLE jobs_v4")
+            conn.execute(
+                f"INSERT INTO jobs ({names}) SELECT {names} FROM jobs_v4 "
+                "WHERE id NOT IN (SELECT id FROM jobs)")
             high = conn.execute(
                 "SELECT MAX(n) FROM ("
                 "  SELECT MAX(id) AS n FROM jobs"
@@ -254,8 +269,10 @@ def migrate(conn: sqlite3.Connection) -> None:
                 "  UNION ALL SELECT MAX(job_id) FROM runs"
                 "  UNION ALL SELECT MAX(job_id) FROM events)").fetchone()[0] or 0
             conn.execute("DELETE FROM sqlite_sequence WHERE name = 'jobs'")
-            conn.execute("INSERT INTO sqlite_sequence (name, seq) VALUES ('jobs', ?)",
-                         (high,))
+            conn.execute(
+                "INSERT INTO sqlite_sequence (name, seq) VALUES ('jobs', ?)",
+                (high,))
+            conn.execute("DROP TABLE jobs_v4")
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         return
 
