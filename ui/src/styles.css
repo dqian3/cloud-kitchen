@@ -214,3 +214,7 @@ button.danger { background: var(--red); }
 .banner-error code { font-family: ui-monospace, monospace;
   background: color-mix(in srgb, var(--red) 14%, transparent);
   padding: 0 0.25rem; border-radius: 3px; }
+
+/* cluster activity: what the daemon is doing, for phases with no events */
+.activity-block { margin-bottom: 12px; }
+.activity-head { font-size: 12px; margin-bottom: 4px; }

@@ -858,6 +858,28 @@ function RunsSection({ projects, entries, onChanged, display }) {
   )
 }
 
+// ---------- cluster activity ----------
+
+// The daemon log records state changes; this records work. A bring-up spends
+// most of its time inside start_vms and arm_shutdown, which say nothing to
+// the event stream -- so a cluster read `starting` for ten minutes with no
+// way to tell a slow fleet from a stuck one.
+function ClusterActivity({ clusters }) {
+  const withActivity = (clusters || []).filter(c => (c.activity || []).length)
+  if (!withActivity.length) return null
+  return (
+    <section>
+      <h2>Cluster activity</h2>
+      {withActivity.map(c => (
+        <div key={c.key} className="activity-block">
+          <div className="muted mono activity-head">{c.key}</div>
+          <pre className="log">{(c.activity || []).join('\n')}</pre>
+        </div>
+      ))}
+    </section>
+  )
+}
+
 // ---------- daemon log ----------
 
 // The events table is the daemon's audit trail (every job/cluster/lease
@@ -1147,6 +1169,8 @@ function Dashboard() {
 
       <RunsSection projects={projects.filter(p => p.name === selected)}
                    entries={entries} onChanged={reload} display={catalog?.display} />
+
+      <ClusterActivity clusters={projClusters} />
 
       <DaemonLog />
     </div>

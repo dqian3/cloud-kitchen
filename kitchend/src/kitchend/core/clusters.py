@@ -103,6 +103,12 @@ class ManagedCluster:
     # first; a successful start clears them.
     short_vms: list[str] = field(default_factory=list)
     create_log: list = field(default_factory=list)   # captured output lines
+    # What the daemon is doing right now, for the phases that emit no events.
+    # A bring-up spends most of its ten minutes inside start_vms and
+    # arm_shutdown, which report per host to the daemon's stdout and nowhere
+    # a UI can reach -- so a cluster showed `starting` and nothing else while
+    # it worked through 102 machines.
+    activity: list = field(default_factory=list)
     # The ssh jump host, for fleets too large to give every VM its own IAP
     # tunnel. It is a VM like any other: it costs money while it runs, so it
     # comes up with the lease and goes down with it. `jump_remote` reaches it
@@ -360,6 +366,7 @@ class ClusterManager:
         # Ask before paying: the VMs that failed last time cost a couple of
         # VM-minutes to retry, where starting the fleet to rediscover the
         # same shortage costs hundreds.
+        self._note(mc, f"starting {len(vms)} VM(s)")
         probe = _probe_set(vms, mc.short_vms) if fresh else []
         try:
             if probe and len(probe) < len(vms):
@@ -371,7 +378,9 @@ class ClusterManager:
             started = await asyncio.to_thread(start_vms, mc.remote, vms,
                                               drain_first=fresh,
                                               stop_on_partial=True)
+            self._note(mc, f"started and armed {len(vms)} VM(s)")
         except Exception as e:
+            self._note(mc, f"failed: {e}")
             mc.short_vms = list(getattr(e, "failed_vms", None) or mc.short_vms)
             self.hub.emit("cluster.error", cluster_id=mc.db_id,
                           cluster=mc.key, error=repr(e))
@@ -429,6 +438,13 @@ class ClusterManager:
             mc.stop_at = time.time() + self.HOLD_FOR_QUEUE_S
             self.hub.emit("cluster.released", cluster_id=mc.db_id,
                           cluster=mc.key)
+
+    def _note(self, mc, line):
+        """One line of what the cluster is doing, timestamped, for the UI."""
+        mc.activity.append(f"{time.strftime('%H:%M:%S')}  {line}")
+        del mc.activity[:-200]
+        self.hub.emit("cluster.activity", cluster_id=mc.db_id,
+                      cluster=mc.key, line=line)
 
     def _mark_bringup_failed(self, mc: ManagedCluster, fresh):
         """A bring-up that did not get off the ground leaves nobody using the
@@ -504,6 +520,7 @@ class ClusterManager:
             return                                   # already up
         self.hub.emit("cluster.jump.starting", cluster_id=mc.db_id,
                       cluster=mc.key, vm=mc.jump_vm, port=mc.jump_port)
+        self._note(mc, f"opening the tunnel through {mc.jump_vm}")
         # start_vms arms its dead-man too: the jump is a VM the daemon
         # started, so it is protected like the rest of the fleet.
         await asyncio.to_thread(start_vms, mc.jump_remote, [mc.jump_vm])
@@ -771,6 +788,7 @@ class ClusterManager:
                 "est_usd_per_hr": est_hourly,   # whole-cluster rate if up
                 "session_cost_usd": self._session_cost(mc),
                 "last_attempt": self._last_bringup(mc),
+                "activity": list(mc.activity)[-40:],
             })
         return out
 
