@@ -191,3 +191,56 @@ def test_docker_cluster_needs_no_project(tmp_path):
 def test_cluster_project_is_not_inherited_from_anywhere(tmp_path):
     mgr = _registry(tmp_path, cluster_project="proj-x")
     assert mgr.clusters["p/c"].remote.project == "proj-x"
+
+
+def _jump_registry(tmp_path, cluster, yaml_text):
+    """_build_registry over one cluster whose YAML may declare a jump host."""
+    from kitchend.config import Config, ProjectConfig
+    (tmp_path / cluster.config).write_text(yaml_text)
+    project = ProjectConfig(name="p", repo_path=tmp_path, clusters=(cluster,))
+    config = Config(db_path=tmp_path / "db.sqlite3",
+                    jobs_dir=tmp_path / "jobs", projects=(project,))
+    mgr = ClusterManager.__new__(ClusterManager)
+    mgr.config = config
+    mgr.db = Db(config.db_path)
+    mgr.hub = FakeHub()
+    mgr.clusters = {}
+    mgr._build_registry()
+    return mgr.clusters["p/n51"]
+
+
+JUMPED_YAML = ("platform: gcloud\nproject: proj-a\n"
+               "proxy_jump: dan@localhost:2222\nproxy_jump_vm: aspen-jump\n"
+               "ssh_user: dan\nreplica:\n  vms: [r0]\nclient:\n  vms: [c0]\n")
+
+
+def test_jump_create_cmd_reaches_the_managed_cluster(tmp_path):
+    """A jump host the daemon may create is declared in the project config."""
+    from kitchend.config import ClusterConfig
+
+    mc = _jump_registry(tmp_path, ClusterConfig(
+        name="n51", config="n51.yaml", jump_vm="aspen-jump",
+        jump_create_cmd=("bash", "cluster/setup_jump_host.sh")), JUMPED_YAML)
+    assert mc.jump_vm == "aspen-jump"
+    assert mc.jump_create_cmd == ("bash", "cluster/setup_jump_host.sh")
+
+
+def test_jump_host_named_differently_in_the_two_places_is_refused(tmp_path):
+    """Otherwise the tunnel opens to one VM and the create makes another."""
+    from kitchend.config import ClusterConfig
+
+    with pytest.raises(ValueError, match="different VMs"):
+        _jump_registry(tmp_path, ClusterConfig(
+            name="n51", config="n51.yaml", jump_vm="other-jump"), JUMPED_YAML)
+
+
+def test_jump_create_cmd_without_a_jump_host_is_refused(tmp_path):
+    """A create command with nothing to create is a config that does nothing."""
+    from kitchend.config import ClusterConfig
+
+    plain = ("platform: gcloud\nproject: proj-a\n"
+             "replica:\n  vms: [r0]\nclient:\n  vms: [c0]\n")
+    with pytest.raises(ValueError, match="no jump host to create"):
+        _jump_registry(tmp_path, ClusterConfig(
+            name="n51", config="n51.yaml",
+            jump_create_cmd=("bash", "x.sh")), plain)

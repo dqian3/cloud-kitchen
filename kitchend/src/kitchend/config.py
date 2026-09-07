@@ -54,6 +54,18 @@ class ClusterConfig:
     # fleet rebuilt elsewhere moves without dragging its siblings along and
     # without any cluster silently inheriting a project it does not use.
     gcp_project: str | None = None
+    # Does this cluster need an ssh jump host, and what creates it?
+    #
+    # The daemon used to learn this only from the cluster YAML's
+    # `proxy_jump_vm`, which says the jump *exists* -- so a lease opened the
+    # tunnel, `start` failed on a VM that was never created, and the fleet
+    # behind it was unreachable for a reason nothing named. Declaring it here
+    # is what lets the daemon create one, the same way create_cmd does for
+    # the fleet. Set jump_vm and the YAML's proxy_jump_vm must agree; the
+    # daemon refuses a cluster where they disagree, as it does for the
+    # project. jump_create_cmd unset = start/stop only, as before.
+    jump_vm: str | None = None
+    jump_create_cmd: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,6 +139,8 @@ def load_config(path: Path | None = None) -> Config:
                     hourly_usd=c.get("hourly_usd"),
                     create_cmd=tuple(c.get("create_cmd", ())),
                     gcp_project=c.get("gcp_project"),
+                    jump_vm=c.get("jump_vm"),
+                    jump_create_cmd=tuple(c.get("jump_create_cmd", ())),
                 )
                 for c in p.get("clusters", [])
             ),

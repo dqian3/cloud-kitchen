@@ -114,6 +114,7 @@ class ManagedCluster:
     # comes up with the lease and goes down with it. `jump_remote` reaches it
     # directly — a remote that proxies through the jump cannot start the jump.
     jump_vm: str | None = None
+    jump_create_cmd: tuple = ()   # provisioning argv, as create_cmd is
     jump_port: int = 0
     jump_remote: GCloudRemote | None = None
     jump_proc: object | None = None      # the `start-iap-tunnel` subprocess
@@ -236,7 +237,22 @@ class ClusterManager:
                                       proxy_jump=raw.get("proxy_jump"),
                                       ssh_user=raw.get("ssh_user"),
                                       ssh_key_file=raw.get("ssh_key_file"))
-                jump_vm = raw.get("proxy_jump_vm")
+                # The YAML names the jump because the driver reads it; the
+                # project config names it because the daemon may have to
+                # create it. Either may declare it, neither may contradict
+                # the other -- the same rule the project id follows.
+                yaml_jump = raw.get("proxy_jump_vm")
+                if yaml_jump and c.jump_vm and yaml_jump != c.jump_vm:
+                    raise ValueError(
+                        f"cluster {key} names jump host {yaml_jump} in "
+                        f"{config_path.name} but {c.jump_vm} in config.toml; "
+                        f"they address different VMs")
+                jump_vm = yaml_jump or c.jump_vm
+                if c.jump_create_cmd and not jump_vm:
+                    raise ValueError(
+                        f"cluster {key} has jump_create_cmd but no jump host "
+                        f"to create; set jump_vm in config.toml or "
+                        f"proxy_jump_vm in {config_path.name}")
                 jump_port = 0
                 jump_remote = None
                 if jump_vm:
@@ -257,6 +273,7 @@ class ClusterManager:
                 self.clusters[key] = ManagedCluster(
                     jump_vm=jump_vm, jump_port=jump_port,
                     jump_remote=jump_remote,
+                    jump_create_cmd=tuple(c.jump_create_cmd),
                     key=key, project=p.name, name=c.name,
                     config_path=config_path, hourly_usd=c.hourly_usd,
                     remote=remote,
@@ -507,6 +524,34 @@ class ClusterManager:
             raise
         return made
 
+    async def _create_jump_if_missing(self, mc: ManagedCluster) -> None:
+        """Provision the jump host, if it is absent and we know how.
+
+        `_ensure_jump` runs before anything touches the fleet, so a jump host
+        that does not exist fails the bring-up on `start_vms` -- and the
+        fleet behind it, being --no-address, is unreachable for a reason that
+        error does not name. Creating it here makes a lease one operation on
+        a jumped cluster too.
+        """
+        if not mc.jump_create_cmd:
+            return
+        status = await asyncio.to_thread(mc.jump_remote.vm_status, [mc.jump_vm])
+        if status.get(mc.jump_vm, "NOT_FOUND") != "NOT_FOUND":
+            return
+        mc.create_log = list(mc.create_log)[-200:]
+        self.hub.emit("cluster.creating", cluster_id=mc.db_id, cluster=mc.key,
+                      vms=[mc.jump_vm], reason="jump host missing for a lease")
+        self._note(mc, f"creating jump host {mc.jump_vm}")
+        await self._run_create_once(mc, mc.jump_create_cmd)
+        after = await asyncio.to_thread(mc.jump_remote.vm_status, [mc.jump_vm])
+        if after.get(mc.jump_vm, "NOT_FOUND") == "NOT_FOUND":
+            why = _why_create_failed(mc.create_log)
+            raise RuntimeError(
+                f"cluster {mc.key} could not create its jump host "
+                f"{mc.jump_vm}" + (f" — {why}" if why else ""))
+        self.hub.emit("cluster.created_missing", cluster_id=mc.db_id,
+                      cluster=mc.key, vms=[mc.jump_vm])
+
     async def _ensure_jump(self, mc: ManagedCluster) -> None:
         """Bring the jump host up and open the tunnel through it.
 
@@ -518,6 +563,7 @@ class ClusterManager:
             return
         if mc.jump_proc is not None and mc.jump_proc.poll() is None:
             return                                   # already up
+        await self._create_jump_if_missing(mc)
         self.hub.emit("cluster.jump.starting", cluster_id=mc.db_id,
                       cluster=mc.key, vm=mc.jump_vm, port=mc.jump_port)
         self._note(mc, f"opening the tunnel through {mc.jump_vm}")
@@ -613,10 +659,10 @@ class ClusterManager:
             self.hub.emit("cluster.error", cluster_id=mc.db_id, cluster=mc.key,
                           error=f"cleanup after a failed bring-up: {e!r}")
 
-    async def _run_create_once(self, mc: ManagedCluster):
+    async def _run_create_once(self, mc: ManagedCluster, cmd=None):
         try:
             proc = await asyncio.create_subprocess_exec(
-                *mc.create_cmd, cwd=str(mc.create_cwd),
+                *(cmd or mc.create_cmd), cwd=str(mc.create_cwd),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT)
             async for raw in proc.stdout:
