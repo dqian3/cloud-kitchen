@@ -789,6 +789,10 @@ class ClusterManager:
                 "session_cost_usd": self._session_cost(mc),
                 "last_attempt": self._last_bringup(mc),
                 "activity": list(mc.activity)[-40:],
+                # The provisioner's own output. A bring-up that fails says why
+                # in here and nowhere else: the exception carries a summary,
+                # and the subprocess stream is not written to the daemon log.
+                "create_log": list(mc.create_log)[-60:],
             })
         return out
 

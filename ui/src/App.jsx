@@ -865,17 +865,37 @@ function RunsSection({ projects, entries, onChanged, display }) {
 // the event stream -- so a cluster read `starting` for ten minutes with no
 // way to tell a slow fleet from a stuck one.
 function ClusterActivity({ clusters }) {
-  const withActivity = (clusters || []).filter(c => (c.activity || []).length)
+  const [openLog, setOpenLog] = useState({})
+  const withActivity = (clusters || []).filter(
+    c => (c.activity || []).length || (c.create_log || []).length)
   if (!withActivity.length) return null
   return (
     <section>
       <h2>Cluster activity</h2>
-      {withActivity.map(c => (
-        <div key={c.key} className="activity-block">
-          <div className="muted mono activity-head">{c.key}</div>
-          <pre className="log">{(c.activity || []).join('\n')}</pre>
-        </div>
-      ))}
+      {withActivity.map(c => {
+        const log = c.create_log || []
+        const open = openLog[c.key]
+        return (
+          <div key={c.key} className="activity-block">
+            <div className="muted mono activity-head">
+              {c.key}
+              {/* The provisioner's output. A bring-up that fails explains
+                  itself only in here, so it is reachable whenever it exists,
+                  not just while the cluster is starting. */}
+              {log.length > 0 && (
+                <button className="link" style={{ marginLeft: '.6em' }}
+                        onClick={() => setOpenLog(o => ({ ...o, [c.key]: !o[c.key] }))}>
+                  {open ? 'hide' : `provisioning log (${log.length})`}
+                </button>
+              )}
+            </div>
+            {(c.activity || []).length > 0 && (
+              <pre className="log">{(c.activity || []).join('\n')}</pre>
+            )}
+            {open && <pre className="log">{log.join('\n')}</pre>}
+          </div>
+        )
+      })}
     </section>
   )
 }
