@@ -24,6 +24,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from kitchend.config import CONFIG_PATH, load_config
@@ -98,6 +99,8 @@ def cmd_catalog(config, args):
 def cmd_submit(config, args):
     spec = {"project": args.project, "experiments": args.experiments,
             "priority": args.priority, "max_attempts": args.retries}
+    if args.tag:
+        spec["tags"] = args.tag
     if args.cluster:
         spec["cluster"] = args.cluster
     if args.after is not None:
@@ -132,6 +135,8 @@ def cmd_submit_argv(config, args):
         raise SystemExit("argv must be a non-empty JSON array of strings")
     spec = {"project": args.project, "command": command,
             "priority": args.priority, "max_attempts": args.retries}
+    if args.tag:
+        spec["tags"] = args.tag
     if args.name:
         spec["name"] = args.name
     if args.cluster:
@@ -140,6 +145,23 @@ def cmd_submit_argv(config, args):
         spec["after"] = args.after
     out = _api(config, "/api/jobs", body=spec)
     print(f"#{out['id']} queued; follow with: kitchend watch {out['id']}")
+
+
+def cmd_runs(config, args):
+    q = [f"limit={args.n}"]
+    for name in ("project", "experiment", "tag"):
+        if getattr(args, name):
+            q.append(f"{name}={urllib.parse.quote(getattr(args, name))}")
+    rows = _api(config, "/api/runs?" + "&".join(q))
+    if not rows:
+        print("no runs")
+        return
+    for r in rows:
+        tags = ",".join(r.get("tags") or []) or "-"
+        gone = "" if r.get("dir_exists") else "  (dir gone)"
+        print(f"#{r['id']:<5} {r.get('status') or '?':<9} "
+              f"{r.get('n_points') or 0:>4}pts  {tags:<24} "
+              f"{r.get('run_dir')}{gone}")
 
 
 def cmd_jobs(config, args):
@@ -301,6 +323,8 @@ def main(argv=None):
     p.add_argument("project")
     p.add_argument("experiments", nargs="+")
     p.add_argument("--cluster", help="daemon-managed lease on this cluster")
+    p.add_argument("--tag", action="append", default=[], metavar="NAME",
+                   help="tag every run this job produces (repeatable); group them later with `kitchend runs --tag`")
     p.add_argument("--priority", type=int, default=0)
     p.add_argument("--attempts", type=int, default=20, dest="retries",
                    help="driver invocations before giving up")
@@ -313,9 +337,17 @@ def main(argv=None):
     p.add_argument("argv", help='JSON array, e.g. ["python3","run.py"]')
     p.add_argument("--name")
     p.add_argument("--cluster", help="daemon-managed lease on this cluster")
+    p.add_argument("--tag", action="append", default=[], metavar="NAME",
+                   help="tag every run this job produces (repeatable); group them later with `kitchend runs --tag`")
     p.add_argument("--priority", type=int, default=0)
     p.add_argument("--attempts", type=int, default=20, dest="retries")
     p.add_argument("--after", type=int, default=None)
+
+    p = sub.add_parser("runs", help="indexed runs, newest first")
+    p.add_argument("--project")
+    p.add_argument("--experiment")
+    p.add_argument("--tag", help="only runs carrying this tag")
+    p.add_argument("-n", type=int, default=20)
 
     p = sub.add_parser("jobs", help="recent jobs")
     p.add_argument("--state")
@@ -382,6 +414,7 @@ def main(argv=None):
     handler = {
         "catalog": cmd_catalog, "submit": cmd_submit,
         "submit-argv": cmd_submit_argv, "jobs": cmd_jobs,
+        "runs": cmd_runs,
         "watch": cmd_watch, "log": cmd_log, "cancel": cmd_cancel,
         "resubmit": cmd_resubmit, "retry": cmd_retry,
         "restart": cmd_restart,

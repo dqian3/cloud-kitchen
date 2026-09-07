@@ -37,6 +37,9 @@ class JobSubmit(BaseModel):
     after: int | None = None       # wait for this job to finish with data
     run_dir: str | None = None
     resume: bool = False
+    # Names every run this job produces is tagged with, for grouping a
+    # campaign after the fact (GET /runs?tag=...).
+    tags: list[str] = Field(default_factory=list)
     priority: int = 0
     max_attempts: int = jobs.DEFAULT_MAX_ATTEMPTS
     retry_delay_secs: int = jobs.DEFAULT_RETRY_DELAY_SECS

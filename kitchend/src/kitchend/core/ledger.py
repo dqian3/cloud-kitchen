@@ -74,6 +74,29 @@ def _sweep_dir(out_root, experiment) -> str:
     return str(Path(out_root) / experiment)
 
 
+def apply_job_tags(db, run_id, job_id) -> None:
+    """Tag a run with whatever its job was submitted under.
+
+    Grouping a campaign -- a rerun, a revision of the ladder, one night's
+    trials -- is a property of the submission, not of any one sweep dir, and
+    tagging the dirs afterwards means knowing which ones a job produced. So
+    the tags ride on the job spec and land here. Idempotent, so a re-scan or
+    a resume re-applies rather than duplicating.
+    """
+    if job_id is None:
+        return
+    row = db.query_one("SELECT spec_json FROM jobs WHERE id = ?", (job_id,))
+    if row is None:
+        return
+    try:
+        names = (json.loads(row["spec_json"]) or {}).get("tags") or []
+    except ValueError:
+        return
+    for name in names:
+        if isinstance(name, str) and name.strip():
+            add_tag(db, run_id, name.strip())
+
+
 def _ensure_run(db, project_id, job_id, run_dir, experiment, ts) -> int:
     """The row for a sweep dir, created on its first point. status is a
     fact about the data (set when the experiment finishes, or by a scan),
@@ -85,12 +108,15 @@ def _ensure_run(db, project_id, job_id, run_dir, experiment, ts) -> int:
         db.execute("UPDATE runs SET job_id = ?, dir_exists = 1, "
                    "indexed_at = datetime('now') WHERE id = ?",
                    (job_id, row["id"]))
+        apply_job_tags(db, row["id"], job_id)
         return row["id"]
-    return db.insert(
+    run_id = db.insert(
         "INSERT INTO runs (project_id, run_dir, experiment, started_at, "
         "job_id, dir_exists, indexed_at) "
         "VALUES (?, ?, ?, ?, ?, 1, datetime('now'))",
         (project_id, run_dir, experiment, ts, job_id))
+    apply_job_tags(db, run_id, job_id)
+    return run_id
 
 
 def _measured(entries) -> int:
@@ -198,6 +224,7 @@ def _index_sweep_dir(db, project_id, sweep_dir: Path) -> bool | None:
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))",
             (project_id, run_dir, sweep_dir.name, started_at, git_commit,
              argv, _measured(entries), status, job_id))
+    apply_job_tags(db, run_id, job_id)
     # The results file is the complete snapshot for this sweep. Rebuild its
     # point index instead of layering a scan over live-ingested rows: the two
     # paths may have seen different portions of an interrupted run, and stale
