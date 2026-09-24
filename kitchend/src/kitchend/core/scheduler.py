@@ -314,6 +314,8 @@ class Scheduler:
                 job_id, argv, cwd,
                 on_start=lambda pid: self.db.execute(
                     "UPDATE jobs SET pid = ? WHERE id = ?", (pid, job_id)),
+                env=(self.clusters.project_env(cluster_key)
+                     if cluster_key else None),
             )
         except asyncio.CancelledError:
             raise

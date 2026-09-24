@@ -66,7 +66,8 @@ class GCloudRemote(Remote):
                  settings: RemoteSettings | None = None,
                  proxy_jump=None, ssh_user=None, ssh_key_file=None):
         self.default_zone = zone
-        self.project = project
+        # Never left to gcloud's active project; see settings.py.
+        self.project = project or (settings or get_default_settings()).gcp_project
         # Route ssh/scp through IAP instead of a public address. Needed in any
         # project whose org policy sets constraints/compute.vmExternalIpAccess,
         # where VMs have no external IP at all and a direct connection has

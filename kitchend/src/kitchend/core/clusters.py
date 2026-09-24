@@ -13,6 +13,7 @@ switch on the VMs bounds the damage to the dead-man window.
 
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import time
@@ -29,7 +30,8 @@ from kitchen.remote.gcloud import GCloudAuthError
 
 def _group_vms(group: dict) -> list[str]:
     """VMs of one role group: a runnable roster, a placement pool, a single
-    VM, or generative `vm_prefix` + `count` naming.
+    VM, generative `vm_prefix` + `count` naming, or a fleet group: `prefix`
+    plus `count` or one VM per entry of `regions`, named `<prefix>00`...
 
     A placement pool is the fleet the daemon leases even though the executor
     later selects a smaller committee from it.  `vms` and `pool` are mutually
@@ -46,6 +48,9 @@ def _group_vms(group: dict) -> list[str]:
         return [group["vm"]]
     if "vm_prefix" in group and "count" in group:
         return [f"{group['vm_prefix']}{i}" for i in range(int(group["count"]))]
+    if "prefix" in group:
+        count = int(group.get("count") or len(group.get("regions") or []))
+        return [f"{group['prefix']}{i:02d}" for i in range(count)]
     return []
 
 
@@ -89,6 +94,7 @@ class ManagedCluster:
     db_id: int
     create_cmd: tuple = ()      # provisioning argv (repo's setup script)
     create_cwd: Path | None = None
+    gcp_project: str | None = None   # exported to create_cmd and jobs
     vms: list[str] = field(default_factory=list)
     task: asyncio.Task | None = None
     keepalive: KeepAlive | None = None
@@ -210,13 +216,10 @@ class ClusterManager:
                     platform, raw = platform_from_yaml(config_path)
                 except OSError:
                     platform, raw = "gcloud", {}
-                # The GCP project comes from the cluster YAML, beside the VM
-                # names it applies to and from the same key the driver reads,
-                # so the daemon and the driver cannot disagree about which
-                # fleet these names refer to. config.toml may name one for a
-                # YAML that does not; there is no wider default, because an
-                # unset project falls through to whatever gcloud is pointed
-                # at and that answers as though the VMs had been deleted.
+                # The GCP project: a YAML that pins one, else the cluster's
+                # entry in config.toml, else the project-wide one. Never
+                # gcloud's active project, which answers as though the VMs
+                # had been deleted when it points elsewhere.
                 yaml_project = raw.get("project")
                 if (yaml_project and c.gcp_project
                         and yaml_project != c.gcp_project):
@@ -224,11 +227,11 @@ class ClusterManager:
                         f"cluster {key} names project {yaml_project} in "
                         f"{config_path.name} but {c.gcp_project} in "
                         f"config.toml; they address different fleets")
-                project = yaml_project or c.gcp_project
+                project = yaml_project or c.gcp_project or p.gcp_project
                 if platform != "docker" and not project:
                     raise ValueError(
-                        f"cluster {key} has no project; name it as `project:` "
-                        f"in {config_path.name}")
+                        f"cluster {key} has no project; set gcp_project for "
+                        f"project {p.name} in config.toml")
                 settings = RemoteSettings(
                     gcp_project=project,
                     tunnel_through_iap=p.tunnel_through_iap,
@@ -288,12 +291,22 @@ class ClusterManager:
                     db_id=db_id,
                     create_cmd=tuple(c.create_cmd),
                     create_cwd=p.repo_path / p.driver_cwd,
+                    gcp_project=project,
                 )
 
     def _get(self, key) -> ManagedCluster:
         if key not in self.clusters:
             raise KeyError(f"unknown cluster: {key}")
         return self.clusters[key]
+
+    def project_env(self, key) -> dict:
+        """Environment for a process that works on cluster `key`: the
+        daemon's own, plus the GCP project it resolved for that cluster."""
+        env = dict(os.environ)
+        mc = self.clusters.get(key)
+        if mc and mc.gcp_project:
+            env["KITCHEN_GCP_PROJECT"] = mc.gcp_project
+        return env
 
     def _vms(self, mc: ManagedCluster):
         if not mc.vms:
@@ -675,6 +688,7 @@ class ClusterManager:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *(cmd or mc.create_cmd), cwd=str(mc.create_cwd),
+                env=self.project_env(mc.key),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT)
             async for raw in proc.stdout:

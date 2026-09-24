@@ -21,10 +21,11 @@ class JobRunner:
     def log_path(self, job_id):
         return self.jobs_dir / f"{job_id}.log"
 
-    async def run(self, job_id, argv, cwd, on_start=None) -> int:
+    async def run(self, job_id, argv, cwd, on_start=None, env=None) -> int:
         """Start the driver; returns its exit code. `on_start(pid)` fires as
         soon as the process exists, so the pid is on record for crash
-        recovery even if the daemon dies while the job runs."""
+        recovery even if the daemon dies while the job runs. `env` replaces
+        the daemon's environment."""
         log = open(self.log_path(job_id), "ab", buffering=0)
         # Every attempt appends to one file, so without a marker the tail
         # shows the previous attempt's output until this one prints something
@@ -36,7 +37,8 @@ class JobRunner:
             # The log is a file, not a tty, so python block-buffers into it:
             # a 60s measurement point writes nothing and then arrives in an
             # 8KB burst, which reads as a log that has stopped moving.
-            env = dict(os.environ, PYTHONUNBUFFERED="1")
+            env = dict(env if env is not None else os.environ,
+                       PYTHONUNBUFFERED="1")
             proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=str(cwd), env=env,
                 stdout=log, stderr=asyncio.subprocess.STDOUT,

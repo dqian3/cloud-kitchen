@@ -15,6 +15,7 @@ Example:
     output_dir_flag = "--output-dir"
     resume_flag = "--resume"
     name_flag = "--name"                 # what the driver calls the run
+    gcp_project = "my-gcp-project"       # default for every cluster below
     tunnel_through_iap = true
     publish_root = "data/figures"        # served read-only at /pub/aspen-bft/
 
@@ -22,12 +23,12 @@ Example:
       name = "main"
       config = "scripts/benchmarks/configs/gcloud-aspen-16.yaml"  # rel. to repo
       hourly_usd = 0.7256      # per VM; cost meter multiplies by VM count
-      gcp_project = "my-gcp-project"   # required unless platform: docker
+      # gcp_project = "..."    # only to override the project-wide one
 
 The daemon reads each cluster's YAML just to learn the VM list; it understands
-the aspen shape (replica.vms or replica.pool + client.vms), the vsac
-role-keyed shape, and a
-plain `vms: [...]` list.
+the aspen shape (replica.vms or replica.pool + client.vms), a fleet shape
+(replica/client groups of `prefix` plus `count` or `regions`), the vsac
+role-keyed shape, and a plain `vms: [...]` list.
 """
 
 import os
@@ -49,10 +50,8 @@ class ClusterConfig:
     # tested setup script. Unset = the daemon can only start/stop existing
     # VMs for this cluster.
     create_cmd: tuple[str, ...] = ()
-    # GCP project this cluster's VMs live in. Required for every cluster
-    # that is not `platform: docker`; there is no project-wide default, so a
-    # fleet rebuilt elsewhere moves without dragging its siblings along and
-    # without any cluster silently inheriting a project it does not use.
+    # GCP project this cluster's VMs live in, when it differs from the
+    # project-wide `gcp_project`.
     gcp_project: str | None = None
     # Does this cluster need an ssh jump host, and what creates it?
     #
@@ -81,6 +80,9 @@ class ProjectConfig:
     # The flag a driver takes its run's name in. A job submitted as a raw
     # command gets its label from it, so the queue shows a name and not argv.
     name_flag: str = "--name"
+    # GCP project for this project's clusters. Direct runs read the same key
+    # (kitchen.site), so this is the one place to change it.
+    gcp_project: str | None = None
     tunnel_through_iap: bool = False
     # A directory (relative to repo_path) the daemon serves as static files
     # at /pub/<project>/. What goes there is the project's business — the
@@ -130,6 +132,7 @@ def load_config(path: Path | None = None) -> Config:
             output_dir_flag=p.get("output_dir_flag", "--output-dir"),
             resume_flag=p.get("resume_flag", "--resume"),
             name_flag=p.get("name_flag", "--name"),
+            gcp_project=p.get("gcp_project"),
             tunnel_through_iap=bool(p.get("tunnel_through_iap", False)),
             publish_root=p.get("publish_root"),
             clusters=tuple(

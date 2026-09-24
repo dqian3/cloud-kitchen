@@ -41,8 +41,8 @@ def load_remote(config, settings: RemoteSettings | None = None):
     settings = settings or get_default_settings()
     platform = _cfg_get(config, "platform")
     if platform == "gcloud":
-        # The cluster config names its project, beside the VM names it names.
-        # `settings` is only the fallback for a caller with no config file.
+        # A cluster config may pin its project; otherwise it comes from the
+        # site settings (config.toml or the environment).
         project = _cfg_get(config, "project") or settings.gcp_project
         if not project:
             # Never fall through to gcloud's ambient project: the VMs named in
@@ -50,8 +50,9 @@ def load_remote(config, settings: RemoteSettings | None = None):
             # CLI happens to be pointed at finds either nothing or, worse,
             # someone else's fleet with the same names.
             raise ValueError(
-                "no GCP project for this cluster: set `project:` in the "
-                "cluster config, or KITCHEN_GCP_PROJECT in the environment")
+                "no GCP project for this cluster: set `gcp_project` for the "
+                "project in ~/.cloud-kitchen/config.toml, or "
+                "KITCHEN_GCP_PROJECT in the environment")
         iap = _cfg_get(config, "tunnel_through_iap")
         if iap is None:
             iap = settings.tunnel_through_iap

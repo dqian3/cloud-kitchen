@@ -54,6 +54,16 @@ def test_cluster_yaml_leases_placement_pool_and_clients(tmp_path):
     assert vms_from_yaml(config) == ["r0", "r1", "r2", "c0"]
 
 
+def test_fleet_yaml_names_vms_from_prefix_and_regions_or_count(tmp_path):
+    config = tmp_path / "fleet.yaml"
+    config.write_text(
+        "platform: gcloud\n"
+        "replica:\n  prefix: r\n  regions: [us-east1, us-west1]\n"
+        "client:\n  prefix: c\n  count: 3\n  regions: [us-east1]\n")
+
+    assert vms_from_yaml(config) == ["r00", "r01", "c00", "c01", "c02"]
+
+
 def test_failed_stop_stays_unmanaged_and_keeps_session_open():
     class FailedStop(MockRemote):
         supports_deadman = False

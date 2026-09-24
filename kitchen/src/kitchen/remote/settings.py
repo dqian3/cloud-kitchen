@@ -19,6 +19,9 @@ and either pass them explicitly or install them process-wide:
 Recognized environment variables, tried per prefix in order (first prefix that
 has the variable set wins): {P}GCP_PROJECT, {P}GCP_IAP, {P}SSH_ATTEMPTS,
 {P}SSH_RETRY_DELAY_S.
+
+`RemoteSettings.for_project(name)` starts from that project's entry in the
+site config (see kitchen.site), so the daemon and a direct run agree.
 """
 
 import os
@@ -101,6 +104,18 @@ class RemoteSettings:
             kwargs["ssh_retry_delay_s"] = int(ssh_delay)
 
         return cls(**kwargs)
+
+    @classmethod
+    def for_project(cls, name, prefixes=("KITCHEN_",), **fallbacks):
+        """Settings for site project `name`: its `gcp_project` and
+        `tunnel_through_iap` from config.toml, then the environment on top."""
+        from kitchen.site import project_entry
+
+        entry = project_entry(name)
+        for key in ("gcp_project", "tunnel_through_iap"):
+            if key in entry:
+                fallbacks[key] = entry[key]
+        return cls.from_env(prefixes=prefixes, **fallbacks)
 
 
 _default_settings: RemoteSettings | None = None

@@ -22,7 +22,7 @@ class FakeRunner:
         self.exit_code = exit_code
         self.calls = []
 
-    async def run(self, job_id, argv, cwd, on_start=None):
+    async def run(self, job_id, argv, cwd, on_start=None, env=None):
         self.calls.append(list(argv))
         if on_start:
             on_start(1234)
@@ -32,6 +32,9 @@ class FakeRunner:
 class FakeClusters:
     def __init__(self):
         self.calls = []
+
+    def project_env(self, key):
+        return None
 
     async def up(self, key, purpose="user", **kwargs):
         self.calls.append(("up", key, purpose))
