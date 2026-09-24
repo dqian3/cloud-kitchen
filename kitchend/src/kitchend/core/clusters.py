@@ -128,11 +128,18 @@ def _why_create_failed(log) -> str:
     has n4-standard-16"); the exit code alone says only that something went
     wrong.
     """
-    for line in reversed(list(log or [])[-60:]):
-        line = line.strip()
+    tail = [ln.strip() for ln in list(log or [])[-60:] if ln.strip()]
+    for line in reversed(tail):
         if ": Failed to create" in line or "no zone in" in line:
             return line.split(": ", 1)[-1] if ": " in line else line
-    return ""
+    # Any other provisioner: its last complaint, or failing that its last
+    # line. A jump host that could not be created said nothing here, so the
+    # bring-up error named only the VM.
+    for line in reversed(tail):
+        if any(word in line.lower()
+               for word in ("error", "failed", "denied", "quota", "exhausted")):
+            return line
+    return tail[-1] if tail else ""
 
 
 def _probe_set(vms, short=()) -> list:
@@ -659,6 +666,11 @@ class ClusterManager:
             self.hub.emit("cluster.error", cluster_id=mc.db_id, cluster=mc.key,
                           error=f"cleanup after a failed bring-up: {e!r}")
 
+    # How much of a failed provisioner's output reaches the event log. The
+    # whole log is hundreds of lines for a 102-VM fleet and the reason is at
+    # the end; a successful create says nothing beyond its activity line.
+    CREATE_FAIL_TAIL = 15
+
     async def _run_create_once(self, mc: ManagedCluster, cmd=None):
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -670,11 +682,21 @@ class ClusterManager:
                 mc.create_log.append(line)
                 if len(mc.create_log) > 500:
                     del mc.create_log[:100]
-            await proc.wait()
+            rc = await proc.wait()
+            if rc != 0:
+                self._note(mc, f"create exited {rc}")
+                for line in self._create_tail(mc):
+                    self._note(mc, f"  {line}")
         except asyncio.CancelledError:
             raise
         except Exception as e:
             mc.create_log.append(f"[daemon] create failed to run: {e!r}")
+            self._note(mc, f"create failed to run: {e!r}")
+
+    def _create_tail(self, mc: ManagedCluster) -> list:
+        """The end of the provisioner's output, blank lines dropped."""
+        lines = [ln for ln in mc.create_log if ln.strip()]
+        return lines[-self.CREATE_FAIL_TAIL:]
 
     async def refresh_status(self, key):
         mc = self._get(key)

@@ -7,6 +7,7 @@
                                         their cluster; fan-out prints one
                                         line per job)
     kitchend submit-argv PROJECT JSON   queue one exact argv JSON array
+    kitchend hold PROJECT CLUSTER DUR   keep a cluster up after its queue
     kitchend jobs [--state S] [-n N]    recent jobs
     kitchend watch JOB_ID               follow a job to completion
     kitchend log JOB_ID [-n N]          tail a job's driver output
@@ -141,10 +142,44 @@ def cmd_submit_argv(config, args):
         spec["name"] = args.name
     if args.cluster:
         spec["cluster"] = args.cluster
+    if args.hosts:
+        spec["hosts"] = [h for h in args.hosts.split(",") if h]
     if args.after is not None:
         spec["after"] = args.after
     out = _api(config, "/api/jobs", body=spec)
     print(f"#{out['id']} queued; follow with: kitchend watch {out['id']}")
+
+
+_HOLD_UNITS = {"s": 1, "m": 60, "h": 3600}
+
+
+def _parse_duration(text):
+    """Seconds from '7200', '90m' or '2h'."""
+    unit = _HOLD_UNITS.get(text[-1:].lower())
+    number = text[:-1] if unit else text
+    try:
+        secs = float(number) * (unit or 1)
+    except ValueError:
+        raise SystemExit(f"duration must look like 7200, 90m or 2h: {text!r}")
+    if secs <= 0:
+        raise SystemExit("duration must be positive")
+    return int(secs)
+
+
+def cmd_hold(config, args):
+    secs = _parse_duration(args.duration)
+    # The daemon appends its output-dir flag to every command; under `sh -c`
+    # those extra words land in $1.. and are ignored.
+    command = ["sh", "-c", 'exec sleep "$0"', str(secs)]
+    spec = {"project": args.project, "command": command,
+            "cluster": args.cluster, "max_attempts": 1,
+            "name": args.name or f"HOLD {args.cluster} for {args.duration}"}
+    if args.after is not None:
+        spec["after"] = args.after
+    out = _api(config, "/api/jobs", body=spec)
+    print(f"#{out['id']} holds {args.project}/{args.cluster} for {secs}s once "
+          f"it reaches the head of the queue; end it early with "
+          f"`kitchend cancel {out['id']}`")
 
 
 def cmd_runs(config, args):
@@ -337,11 +372,23 @@ def main(argv=None):
     p.add_argument("argv", help='JSON array, e.g. ["python3","run.py"]')
     p.add_argument("--name")
     p.add_argument("--cluster", help="daemon-managed lease on this cluster")
+    p.add_argument("--hosts", metavar="VM,VM,...",
+                   help="comma-separated VMs the lease starts; default all of the cluster")
     p.add_argument("--tag", action="append", default=[], metavar="NAME",
                    help="tag every run this job produces (repeatable); group them later with `kitchend runs --tag`")
     p.add_argument("--priority", type=int, default=0)
     p.add_argument("--attempts", type=int, default=20, dest="retries")
     p.add_argument("--after", type=int, default=None)
+
+    p = sub.add_parser("hold", help="keep a cluster up for a while after the "
+                                    "jobs queued on it; cancel to release")
+    p.add_argument("project")
+    p.add_argument("cluster", help="cluster name within the project, e.g. main")
+    p.add_argument("duration", help="7200, 90m or 2h")
+    p.add_argument("--name")
+    p.add_argument("--after", type=int, default=None,
+                   help="queue directly behind this job "
+                        "(default: behind the last job on the same cluster)")
 
     p = sub.add_parser("runs", help="indexed runs, newest first")
     p.add_argument("--project")
@@ -413,7 +460,7 @@ def main(argv=None):
         return 0
     handler = {
         "catalog": cmd_catalog, "submit": cmd_submit,
-        "submit-argv": cmd_submit_argv, "jobs": cmd_jobs,
+        "submit-argv": cmd_submit_argv, "hold": cmd_hold, "jobs": cmd_jobs,
         "runs": cmd_runs,
         "watch": cmd_watch, "log": cmd_log, "cancel": cmd_cancel,
         "resubmit": cmd_resubmit, "retry": cmd_retry,

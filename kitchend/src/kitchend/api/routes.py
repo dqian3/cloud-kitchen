@@ -34,6 +34,7 @@ class JobSubmit(BaseModel):
     command: list[str] | None = None
     queue: str | None = None
     cluster: str | None = None     # daemon-managed lease: up before, down after
+    hosts: list[str] | None = None  # lease only these VMs of the cluster
     after: int | None = None       # wait for this job to finish with data
     run_dir: str | None = None
     resume: bool = False
