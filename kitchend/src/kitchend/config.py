@@ -9,9 +9,11 @@ Example:
     [[projects]]
     name = "aspen-bft"
     repo_path = "~/Projects/bft/aspen-bft"
-    runs_roots = ["runs", "paper_data"]
-    driver = ["python3", "run_experiment.py"]
-    driver_cwd = "scripts/benchmarks"          # relative to repo_path
+    runs_roots = ["data/runs", "data/paper_data"]
+    adapter_path = "~/Projects/bft/aspen-bft/benchmarks/kitchen_adapter.py"
+    driver_cwd = "benchmarks"            # where jobs run, relative to repo_path
+    # driver = ["python3", "run.py"]     # only for catalog experiments that
+    #                                    # carry no command of their own
     output_dir_flag = "--output-dir"
     resume_flag = "--resume"
     name_flag = "--name"                 # what the driver calls the run
@@ -21,7 +23,7 @@ Example:
 
       [[projects.clusters]]
       name = "main"
-      config = "scripts/benchmarks/configs/gcloud-aspen-16.yaml"  # rel. to repo
+      config = "benchmarks/fleets/main.yaml"   # relative to repo_path
       hourly_usd = 0.7256      # per VM; cost meter multiplies by VM count
       # gcp_project = "..."    # only to override the project-wide one
 
