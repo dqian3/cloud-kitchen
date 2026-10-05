@@ -37,18 +37,36 @@ def test_explicit_argv_is_the_only_stored_executable_config(tmp_path):
     }]
 
 
-def test_catalog_driver_args_are_canonicalized_before_queueing(tmp_path):
-    project = ProjectConfig(name="p", repo_path=tmp_path,
-                            driver=("python3", "driver.py"))
-    (tmp_path / "driver.py").write_text("")
+def test_catalog_names_resolve_to_one_job_per_experiment(tmp_path):
+    adapter = tmp_path / "kitchen_adapter.py"
+    adapter.write_text(
+        "from kitchen.adapter import ExperimentInfo\n"
+        "class A:\n"
+        "    name = 'p'\n"
+        "    def experiments(self):\n"
+        "        return [ExperimentInfo(name=n, queue='main',\n"
+        "                               command=('runner', n))\n"
+        "                for n in ('a', 'b')]\n"
+        "    def aggregates(self):\n"
+        "        return {'both': ['a', 'b']}\n"
+        "def get_adapter():\n"
+        "    return A()\n")
+    project = ProjectConfig(name="p", repo_path=tmp_path, adapter_path=adapter)
 
     specs = submission.prepare_specs(project, {
-        "project": "p", "experiments": ["baseline"],
+        "project": "p", "experiments": ["both"],
     })
 
-    assert specs[0]["command"] == ["python3", "driver.py", "baseline"]
-    assert "driver_args" not in specs[0]
-    assert "extra_flags" not in specs[0]
+    assert [s["command"] for s in specs] == [["runner", "a"], ["runner", "b"]]
+    assert [s["queue"] for s in specs] == ["p/main", "p/main"]
+
+
+def test_catalog_names_need_an_adapter(tmp_path):
+    project = ProjectConfig(name="p", repo_path=tmp_path)
+    with pytest.raises(ValueError, match="no experiment catalog"):
+        submission.prepare_specs(project, {
+            "project": "p", "experiments": ["baseline"],
+        })
 
 
 def test_command_and_catalog_names_are_mutually_exclusive(tmp_path):

@@ -1,17 +1,16 @@
 """Project adapter for the toy protocol.
 
-Point a daemon project at this file (adapter_path) to get a native,
-event-emitting executor with no cloud behind it — for demos, for exercising
-ingest and the ledger end-to-end, and as a small reference project adapter.
+Point a daemon project at this file (adapter_path) to get an event-emitting
+executor with no cloud behind it — for demos, for exercising ingest and the
+ledger end-to-end, and as a small reference project adapter.
 """
+
+import sys
 
 from kitchen.adapter import (DimDisplay, DisplayInfo, ExperimentInfo,
                              MetricDisplay)
 
-_BASE_FLAGS = {
-    "toy-static": ("--rates", "1000", "2000", "4000", "8000"),
-    "toy-search": ("--rate-search",),
-}
+_TOY = (sys.executable, "-m", "kitchen.run.toy")
 
 
 class ToyProjectAdapter:
@@ -21,10 +20,12 @@ class ToyProjectAdapter:
         return [
             ExperimentInfo(name="toy-static", queue="local",
                            description="fixed rate list against the toy protocol",
-                           args=_BASE_FLAGS["toy-static"]),
+                           command=_TOY + ("--name", "toy-static", "--rates",
+                                           "1000", "2000", "4000", "8000")),
             ExperimentInfo(name="toy-search", queue="local",
                            description="knee search against the toy protocol",
-                           args=_BASE_FLAGS["toy-search"]),
+                           command=_TOY + ("--name", "toy-search",
+                                           "--rate-search")),
         ]
 
     def aggregates(self):

@@ -78,9 +78,8 @@ function UIProvider({ children }) {
 }
 
 // The daemon stores SQLite `datetime('now')`: UTC, carrying no zone marker.
-// A browser reads that as local time, so every timestamp in the UI used to be
-// off by the local offset. Stamp the zone on before parsing, then render in
-// the reader's own.
+// A browser would read that as local time. Stamp the zone on before parsing,
+// then render in the reader's own.
 function toDate(ts) {
   if (!ts) return null
   const s = String(ts).trim().replace(' ', 'T')

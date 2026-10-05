@@ -235,9 +235,7 @@ def _index_sweep_dir(db, project_id, sweep_dir: Path) -> bool | None:
             continue
         # Key on the same dims the live ingest uses, so re-scanning a dir the
         # daemon already indexed updates those points instead of inserting a
-        # parallel set. Scanning after a live run used to double every point:
-        # the live path keys on {"f":10,"p":10,...}, this one keyed on file
-        # position, and the two never matched.
+        # parallel set.
         #
         # Position stays the identity only when an entry carries no dims at
         # all -- an old-driver flat summary -- where two entries differing in

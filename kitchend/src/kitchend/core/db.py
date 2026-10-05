@@ -134,18 +134,6 @@ SCHEMA = """
         ts TEXT NOT NULL DEFAULT (datetime('now')),
         text TEXT NOT NULL
     );
-
-    -- Retained for schema compatibility with existing installations. The
-    -- structured one-off feature that used it has no API surface anymore.
-    CREATE TABLE saved_sweeps (
-        id INTEGER PRIMARY KEY,
-        project_id INTEGER NOT NULL REFERENCES projects(id),
-        name TEXT NOT NULL,
-        params_json TEXT NOT NULL,
-        created_at TEXT NOT NULL DEFAULT (datetime('now')),
-        UNIQUE (project_id, name)
-    );
-
 """
 
 SCHEMA_VERSION = 5

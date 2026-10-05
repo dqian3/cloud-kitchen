@@ -3,8 +3,6 @@
 import getpass
 import os
 import re
-import tempfile
-from pathlib import Path
 import subprocess
 import sys
 import time
@@ -636,11 +634,9 @@ class GCloudRemote(Remote):
             if result.returncode != 0:
                 detail = result.stderr.strip() or result.stdout.strip() or "(no output)"
                 raise RuntimeError(f"Failed to stop VM '{vm}' (exit {result.returncode}): {detail}")
-        # Report what could not be stopped. This used to print and discard:
-        # vm_stop could not fail, so a caller cleaning up a partial start
-        # believed it had succeeded. Twelve VMs whose stop errored stayed up
-        # for four hours with no dead-man timer while the daemon reported
-        # them as failed to start.
+        # Report what could not be stopped, so a caller cleaning up a partial
+        # start does not take a failed stop for success and leave VMs running
+        # with no dead-man timer.
         unstopped: list[str] = []
         with ThreadPoolExecutor(max_workers=len(vm_names)) as pool:
             futures = {pool.submit(_stop_one, vm): vm for vm in vm_names}

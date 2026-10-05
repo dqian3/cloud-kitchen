@@ -12,8 +12,6 @@ Example:
     runs_roots = ["data/runs", "data/paper_data"]
     adapter_path = "~/Projects/bft/aspen-bft/benchmarks/kitchen_adapter.py"
     driver_cwd = "benchmarks"            # where jobs run, relative to repo_path
-    # driver = ["python3", "run.py"]     # only for catalog experiments that
-    #                                    # carry no command of their own
     output_dir_flag = "--output-dir"
     resume_flag = "--resume"
     name_flag = "--name"                 # what the driver calls the run
@@ -28,9 +26,8 @@ Example:
       # gcp_project = "..."    # only to override the project-wide one
 
 The daemon reads each cluster's YAML just to learn the VM list; it understands
-the aspen shape (replica.vms or replica.pool + client.vms), a fleet shape
-(replica/client groups of `prefix` plus `count` or `regions`), the vsac
-role-keyed shape, and a plain `vms: [...]` list.
+`replica` and `client` groups (each `vms`, `pool`, or `prefix` plus `count`
+or `regions`) and a plain `vms: [...]` list.
 """
 
 import os
@@ -55,16 +52,12 @@ class ClusterConfig:
     # GCP project this cluster's VMs live in, when it differs from the
     # project-wide `gcp_project`.
     gcp_project: str | None = None
-    # Does this cluster need an ssh jump host, and what creates it?
-    #
-    # The daemon used to learn this only from the cluster YAML's
-    # `proxy_jump_vm`, which says the jump *exists* -- so a lease opened the
-    # tunnel, `start` failed on a VM that was never created, and the fleet
-    # behind it was unreachable for a reason nothing named. Declaring it here
-    # is what lets the daemon create one, the same way create_cmd does for
-    # the fleet. Set jump_vm and the YAML's proxy_jump_vm must agree; the
-    # daemon refuses a cluster where they disagree, as it does for the
-    # project. jump_create_cmd unset = start/stop only, as before.
+    # The ssh jump host this cluster is reached through, and what creates
+    # it. The cluster YAML's `proxy_jump_vm` only says a jump exists;
+    # declaring it here lets the daemon create one, the same way create_cmd
+    # does for the fleet. jump_vm and the YAML's proxy_jump_vm must agree;
+    # the daemon refuses a cluster where they disagree. jump_create_cmd
+    # unset = start/stop only.
     jump_vm: str | None = None
     jump_create_cmd: tuple[str, ...] = ()
 
@@ -75,7 +68,6 @@ class ProjectConfig:
     repo_path: Path
     runs_roots: tuple[str, ...] = ()
     adapter_path: Path | None = None
-    driver: tuple[str, ...] = ()
     driver_cwd: str = "."
     output_dir_flag: str = "--output-dir"
     resume_flag: str = "--resume"
@@ -102,10 +94,8 @@ class Config:
     # How long a job waits after its cluster would not come up. A daemon
     # setting, not a per-job one: it exists to keep a regional stockout from
     # turning into enough create calls to hit API limits, and that ceiling
-    # belongs to the fleet rather than to whoever submitted the job. It also
-    # used to travel: submitted jobs stored the value, resubmit copied the
-    # spec verbatim, and a delay from before the ten-minute change kept being
-    # inherited by descendants long after the default moved.
+    # belongs to the fleet rather than to whoever submitted the job. Stored
+    # on a job, a resubmit would also copy an outdated value forward.
     cluster_retry_delay_secs: int = 600
     projects: tuple[ProjectConfig, ...] = field(default=())
 
@@ -129,7 +119,6 @@ def load_config(path: Path | None = None) -> Config:
             runs_roots=tuple(p.get("runs_roots", ())),
             adapter_path=(Path(p["adapter_path"]).expanduser()
                           if p.get("adapter_path") else None),
-            driver=tuple(p.get("driver", ())),
             driver_cwd=p.get("driver_cwd", "."),
             output_dir_flag=p.get("output_dir_flag", "--output-dir"),
             resume_flag=p.get("resume_flag", "--resume"),

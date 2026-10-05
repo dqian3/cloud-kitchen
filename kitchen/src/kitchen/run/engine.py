@@ -1,8 +1,7 @@
-"""The native sweep engine: trials x dims x rates with resume, retry, events.
+"""The sweep engine: trials x dims x rates with resume, retry, events.
 
-Replaces the old drivers' run_experiment.py/sweep.py pair. An adapter supplies
-the three project-specific phases; the engine owns everything the sweepers
-used to share by copy-paste: the loop order (trial outermost, so trial 1 only
+An adapter supplies the three project-specific phases; the engine owns
+everything a sweep has in common with every other: the loop order (trial outermost, so trial 1 only
 starts after trial 0 has visited every point), directory naming, resume,
 per-point retry, the rate search, the events.jsonl stream, and the exit-code
 contract (0 all points produced data, 2 some committed nothing, 1 anything

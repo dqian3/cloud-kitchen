@@ -20,7 +20,7 @@ def test_scan_keeps_batch_size_points_distinct_and_reconciles(tmp_path):
     project = ProjectConfig(name="p", repo_path=tmp_path,
                             runs_roots=("runs",))
     db = Db(tmp_path / "db.sqlite3")
-    project_id = jobs.ensure_project_row(db, project)
+    jobs.ensure_project_row(db, project)
     ledger.scan_project(db, project)
     run_id = db.query_one("SELECT id FROM runs")["id"]
 

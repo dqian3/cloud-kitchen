@@ -22,7 +22,6 @@ from .mcp import build_mcp, mcp_http_app
 from .routes import router
 
 UI_DIST = Path(__file__).resolve().parents[4] / "ui" / "dist"
-UI_PLACEHOLDER = Path(__file__).resolve().parents[4] / "ui" / "index.html"
 
 
 def create_app(config: Config, start_paused: bool = False) -> FastAPI:
@@ -85,7 +84,6 @@ def create_app(config: Config, start_paused: bool = False) -> FastAPI:
                 "repo_path": str(p.repo_path),
                 "runs_roots": list(p.runs_roots),
                 "clusters": [c.name for c in p.clusters],
-                "has_driver": bool(p.driver),
                 "publish_url": f"/pub/{p.name}/" if p.publish_root else None,
             }
             for p in config.projects
@@ -119,9 +117,9 @@ def create_app(config: Config, start_paused: bool = False) -> FastAPI:
         app.mount("/", StaticFiles(directory=UI_DIST, html=True), name="ui")
     else:
         @app.get("/", response_class=HTMLResponse)
-        def placeholder():
-            if UI_PLACEHOLDER.exists():
-                return UI_PLACEHOLDER.read_text()
-            return "<h1>cloud-kitchen</h1><p>UI not built yet.</p>"
+        def ui_not_built():
+            return ("<h1>cloud-kitchen</h1><p>The dashboard is not built: "
+                    "run <code>npm install &amp;&amp; npm run build</code> "
+                    "in <code>ui/</code> and restart the daemon.</p>")
 
     return app

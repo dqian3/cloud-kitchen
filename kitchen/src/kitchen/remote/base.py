@@ -24,14 +24,12 @@ class Remote(ABC):
             command: Shell command string to execute.
             bg: If True, return Popen handle without waiting. Otherwise block.
             timeout: Wall-clock cap in seconds on a blocking call (None = wait
-                forever). Every backend must accept it, because `run_on_all`
-                passes it unconditionally: a stuck SSH connection has
-                previously hung a cluster-wide step for hours, and a backend
-                that merely *ignores* the argument still reverts to that
-                behaviour quietly, whereas one that does not accept it at all
-                raises TypeError inside the thread pool and gets swallowed as
-                a per-host "error" — which is how `platform: ssh` silently
-                skipped every pkill, log wipe and clock sync it ever ran.
+                forever). Every backend must accept and honour it, because
+                `run_on_all` passes it unconditionally: a backend that
+                ignores it lets one stuck SSH connection hang a cluster-wide
+                step, and one that does not accept it raises TypeError
+                inside the thread pool, which is swallowed as a per-host
+                "error" and silently skips the command on every host.
                 Ignored when bg=True: a Popen this call does not wait on has
                 nothing to time out.
 
@@ -67,9 +65,8 @@ class Remote(ABC):
         whole sweep.
         """
         # An empty host list is a legitimate no-op (a config with no client
-        # VMs, a teardown after nothing came up), but ThreadPoolExecutor
-        # rejects max_workers=0 with ValueError, so the no-op used to crash
-        # the caller instead. Return the empty result it asked for.
+        # VMs, a teardown after nothing came up), and ThreadPoolExecutor
+        # rejects max_workers=0.
         if not hosts:
             return {}
         self.prepare_hosts(hosts)
@@ -98,9 +95,9 @@ class Remote(ABC):
         """Kill a process by name on all hosts (SIGKILL).
 
         `timeout`: per-host wall-clock cap on the underlying ssh call. A
-        `pkill -9` finishes in well under a second normally; a stuck SSH
-        connection has previously hung this for hours. 60s gives plenty of
-        slack for handshake jitter while bounding the worst case.
+        `pkill -9` finishes in well under a second normally, but a stuck SSH
+        connection can hang indefinitely. 60s gives plenty of slack for
+        handshake jitter while bounding the worst case.
         """
         self.run_on_all(
             hosts, f"pkill -9 -f {process_name} || true",

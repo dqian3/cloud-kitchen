@@ -383,31 +383,9 @@ def build_command(project_cfg, spec: dict):
 def canonical_argv(spec: dict) -> list:
     """A stored job's argv. A spec that keeps part of its command outside
     `command` is refused rather than run without that part."""
-    if not spec.get("command") or spec.get("extra_flags") \
-            or spec.get("driver_args"):
+    if not spec.get("command") or spec.get("extra_flags"):
         raise ValueError("job has no canonical command; submit it again")
     return list(spec["command"])
-
-
-def canonicalize_command(project_cfg, spec: dict) -> None:
-    """Collapse every command input into the sole executable argv in-place.
-
-    Catalog commands and classic driver arguments are submission-time
-    inputs; the queue stores only the argv they resolve to, so the command
-    a job displays is the one dispatch runs. Runtime-owned output-dir and
-    resume flags deliberately remain separate.
-    """
-    if spec.get("command"):
-        argv = list(spec["command"])
-    else:
-        if not project_cfg.driver:
-            raise ValueError(
-                f"project '{project_cfg.name}' has no driver configured and "
-                "the job spec has no explicit command")
-        args = spec.get("driver_args") or spec.get("experiments", [])
-        argv = list(project_cfg.driver) + list(args)
-    spec["command"] = [str(a) for a in argv]
-    spec.pop("driver_args", None)
 
 
 def added_trials_spec(source: dict, run_dir: str, trials: int,

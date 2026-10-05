@@ -84,7 +84,6 @@ def build_mcp(state) -> MCPServer:
             "name": p.name,
             "repo_path": str(p.repo_path),
             "clusters": [c.name for c in p.clusters],
-            "has_driver": bool(p.driver),
         } for p in state.config.projects]}
 
     @mcp.tool()

@@ -106,7 +106,7 @@ def test_placement_survives_a_reorder(tmp_path):
 def test_a_refused_placement_queues_nothing(tmp_path):
     """A placement that cannot be honoured must not leave the job queued at
     the bottom -- which is the position `after` was given to avoid."""
-    from kitchend.config import Config, ProjectConfig
+    from kitchend.config import ProjectConfig
     from kitchend.core import submission
 
     class FakeScheduler:

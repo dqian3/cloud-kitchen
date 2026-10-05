@@ -1,12 +1,12 @@
 """Tail each running job's <run_dir>/events.jsonl into a progress summary.
 
-A native run (SweepEngine, or anything speaking the kitchen event contract)
+A run on the SweepEngine (or anything speaking the kitchen event contract)
 appends structured events to its run dir. The daemon polls those files from
 the per-job byte offset stored on the jobs row, folds new events into a
 compact progress dict (points done, current point, ETA, last search
 decision), persists both, and re-emits `job.progress` on the hub so the UI
-updates live. Drivers that emit nothing (the interim aspen driver) never
-produce a progress row and keep the log tail as their only signal.
+updates live. A job that emits nothing never produces a progress row and
+keeps the log tail as its only signal.
 
 Polling rather than inotify, matching kitchen.events.reader: it costs nothing
 at this scale and inotify is unreliable on some filesystems (WSL2 included).

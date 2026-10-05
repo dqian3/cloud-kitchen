@@ -141,9 +141,9 @@ class KeepAlive:
         """
         self.acquire_lock()
 
-        # SIGTERM behaves like Ctrl-C rather than killing without cleanup:
-        # a supervisor's default kill used to leave the VMs to the dead-man
-        # switch (up to an hour of paid idle) instead of stopping them.
+        # SIGTERM behaves like Ctrl-C rather than killing without cleanup,
+        # so a supervisor's default kill stops the VMs instead of leaving
+        # them to the dead-man switch (up to an hour of paid idle).
         def _on_term(signum, frame):
             raise KeyboardInterrupt
 

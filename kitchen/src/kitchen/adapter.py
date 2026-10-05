@@ -5,10 +5,10 @@ in ~/.cloud-kitchen/config.toml via `adapter_path`. The module must export
 `get_adapter() -> ProjectAdapter`. The daemon imports it with the module's
 own directory on sys.path, so it can import the repo's script modules.
 
-v1 surface (catalog only): the daemon uses it to list real experiments, to
-resolve a submitted experiment name to driver arguments, and to route the job
-onto the right queue (one queue per cluster bucket, so experiments that share
-a cluster serialize). Later versions add run-native execution.
+The adapter is a catalog: the daemon uses it to list the project's
+experiments, to resolve a submitted experiment name to the command that runs
+it, and to route the job onto the right queue (one queue per cluster, so
+experiments that share a cluster serialize).
 """
 
 from dataclasses import dataclass
@@ -20,16 +20,13 @@ class ExperimentInfo:
     name: str
     description: str = ""
     queue: str = ""                      # serialization key, e.g. cluster bucket
-    args: tuple[str, ...] = ()           # driver args that run this experiment
     replicas: int | None = None          # VM-count hint, if static
-    default_flags: tuple[str, ...] = ()  # extra flags always passed
-    # A native experiment: a full argv (no driver prefix) that runs this
-    # experiment on the SweepEngine. It assumes its cluster is already up —
-    # the daemon leases the queue's cluster around the job when the queue
-    # names one it manages. Command experiments are one job each; submitting
-    # several (or an aggregate containing them) fans out into sibling jobs
-    # that the per-queue FIFO serializes and same-cluster leases hand over
-    # between. Empty () = a classic driver-run experiment.
+    # The full argv that runs this experiment, in the project's driver_cwd.
+    # It assumes its cluster is already up — the daemon leases the queue's
+    # cluster around the job when the queue names one it manages. Each
+    # experiment is one job; submitting several (or an aggregate) fans out
+    # into sibling jobs that the per-queue FIFO serializes and same-cluster
+    # leases hand over between.
     command: tuple[str, ...] = ()
     # Display grouping: a variant (pbft_n4, aspen_no_crypto, ...) names its
     # base experiment here so catalogs can fold it behind that base instead

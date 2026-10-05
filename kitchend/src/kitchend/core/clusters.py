@@ -1,14 +1,16 @@
 """Cluster manager: daemon-owned keep-alive and cost sessions.
 
-The mechanics (dead-man switch, drain-before-start, flock, lease files) live
-in kitchen.cluster; this layer adds what a daemon can: no terminal is
-load-bearing, bring-ups carry a TTL, cost accrues in cluster_sessions rows,
-and gcloud is re-polled so the DB reflects reality rather than intent.
+The mechanics (dead-man switch, drain-before-start, keep-alive lock) live in
+kitchen.cluster; this layer adds what a daemon can: no terminal is
+load-bearing, a manual bring-up carries a TTL, cost accrues in
+cluster_sessions rows, and gcloud is re-polled so the DB reflects reality
+rather than intent.
 
-While a cluster is up, one asyncio task ticks every minute: it re-arms the
-dead-man switch each 30 minutes *only while a live lease exists*; when the
-last lease expires or is released, it stops the VMs. If the daemon dies, the
-switch on the VMs bounds the damage to the dead-man window.
+A cluster is leased by one user at a time: a job, or a manual bring-up.
+While it is up, one asyncio task ticks every minute: it re-arms the dead-man
+switch each 30 minutes *only while the lease is held*; when the lease is
+released or its TTL passes, it stops the VMs. If the daemon dies, the switch
+on the VMs bounds the damage to the dead-man window.
 """
 
 import asyncio
@@ -29,14 +31,13 @@ from kitchen.remote.gcloud import GCloudAuthError
 
 
 def _group_vms(group: dict) -> list[str]:
-    """VMs of one role group: a runnable roster, a placement pool, a single
-    VM, generative `vm_prefix` + `count` naming, or a fleet group: `prefix`
-    plus `count` or one VM per entry of `regions`, named `<prefix>00`...
+    """VMs of one role group: a runnable roster, a placement pool, or a
+    fleet group: `prefix` plus `count` or one VM per entry of `regions`,
+    named `<prefix>00`...
 
     A placement pool is the fleet the daemon leases even though the executor
-    later selects a smaller committee from it.  `vms` and `pool` are mutually
-    exclusive in the Aspen config model; prefer `vms` if malformed input has
-    both so this reader remains deterministic.
+    later selects a smaller committee from it. `vms` wins if a group has
+    both, so this reader stays deterministic.
     """
     if not isinstance(group, dict):
         return []
@@ -44,10 +45,6 @@ def _group_vms(group: dict) -> list[str]:
         return list(group["vms"])
     if "pool" in group:
         return list(group["pool"])
-    if "vm" in group and group["vm"]:
-        return [group["vm"]]
-    if "vm_prefix" in group and "count" in group:
-        return [f"{group['vm_prefix']}{i}" for i in range(int(group["count"]))]
     if "prefix" in group:
         count = int(group.get("count") or len(group.get("regions") or []))
         return [f"{group['prefix']}{i:02d}" for i in range(count)]
@@ -69,16 +66,8 @@ def vms_from_yaml(path: Path) -> list[str]:
         d = yaml.safe_load(f) or {}
     if "vms" in d:
         return list(d["vms"])
-    vms = []
-    if "replica" in d or "durlog" in d:
-        for role in ("replica", "sequencer", "durlog", "conslog"):
-            vms += _group_vms(d.get(role, {}))
-        for shard in d.get("shards", []):
-            for k in ("primary_vm", "backup_vm"):
-                if shard.get(k):
-                    vms.append(shard[k])
-        vms += _group_vms(d.get("client", {}))
-        return vms
+    if "replica" in d:
+        return _group_vms(d["replica"]) + _group_vms(d.get("client", {}))
     raise ValueError(f"unrecognized cluster config shape: {path}")
 
 
@@ -98,9 +87,8 @@ class ManagedCluster:
     vms: list[str] = field(default_factory=list)
     task: asyncio.Task | None = None
     keepalive: KeepAlive | None = None
-    # Who is using this cluster: a job id, or 'user' for a manual
-    # bring-up. The daemon is the only thing that starts these VMs, so
-    # one field says what a directory of TTL'd lease files used to.
+    # Who holds the lease on this cluster: a job id, or 'user' for a
+    # manual bring-up.
     used_by: str | None = None
     session_id: int | None = None
     last_status: dict | None = None     # None until the first gcloud poll
