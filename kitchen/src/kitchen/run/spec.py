@@ -1,10 +1,8 @@
 """Declarative sweep description.
 
-The old drivers had no parameter record — an experiment's grid lived inside
-its handler as a literal argv fragment, and anything that needed the grid
-(the dry-run cost estimator, the resume logic) had to re-parse the argv it
-had just built. A SweepSpec is that record: the engine iterates it, the
-daemon can estimate from it, and the events it produces describe it.
+A SweepSpec is the record of an experiment's grid: the engine iterates it,
+and the events it produces describe it, so nothing that needs the grid has to
+re-parse an argv.
 """
 
 import itertools

@@ -3,9 +3,8 @@
     kitchend serve                      run the daemon
     kitchend status                     ping a running daemon
     kitchend catalog PROJECT            list experiments and aggregates
-    kitchend submit PROJECT NAME...     queue experiments (native ones use
-                                        their cluster; fan-out prints one
-                                        line per job)
+    kitchend submit PROJECT NAME...     queue experiments, each on its own
+                                        cluster; prints one line per job
     kitchend submit-argv PROJECT JSON   queue one exact argv JSON array
     kitchend hold PROJECT CLUSTER DUR   keep a cluster up after its queue
     kitchend jobs [--state S] [-n N]    recent jobs

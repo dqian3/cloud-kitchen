@@ -132,7 +132,7 @@ def build_mcp(state) -> MCPServer:
             spec["after"] = after        # placement; spent at enqueue
         specs = submission.prepare_specs(project_cfg, spec)
         # One submission = one confirmation: the gate covers the sum over
-        # every job it fans out into (native aggregates are N sibling jobs).
+        # every job it fans out into (an aggregate is N sibling jobs).
         estimates = [_job_cost_estimate(state, project_cfg, s, est_hours)
                      for s in specs]
         total = (sum(e for e in estimates if e is not None)

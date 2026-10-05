@@ -10,8 +10,7 @@ above `dead_above` commit nothing — enough behaviour to exercise every
 branch of the rate search, resume, and retry without a cloud bill.
 
 Also runnable as a process (`python -m kitchen.run.toy --output-dir ...`),
-which is how the daemon gets a native, event-emitting executor to point its
-ingest at before the real projects migrate.
+which gives the daemon an event-emitting job to run with no cloud behind it.
 """
 
 import argparse

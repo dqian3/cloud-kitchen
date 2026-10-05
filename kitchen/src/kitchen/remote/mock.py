@@ -121,13 +121,3 @@ class MockRemote(Remote):
         self.calls.append(Call("vm_stop", "*", ",".join(vm_names)))
         for v in vm_names:
             self.vm_states[v] = "TERMINATED"
-
-    # --- assertions ---
-
-    def ssh_calls(self, pattern=None, host=None):
-        out = [c for c in self.calls if c.kind == "ssh"]
-        if host is not None:
-            out = [c for c in out if c.host == host]
-        if pattern is not None:
-            out = [c for c in out if re.search(pattern, c.detail)]
-        return out

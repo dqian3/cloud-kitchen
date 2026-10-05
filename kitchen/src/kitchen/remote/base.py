@@ -1,8 +1,4 @@
-"""Abstract Remote interface: run commands, move files, broadcast artifacts.
-
-Extracted from aspen-bft/scripts/benchmarks/remote.py; behaviour is preserved
-(the docstrings that explain hard-won behaviour moved with the code).
-"""
+"""Abstract Remote interface: run commands, move files, broadcast artifacts."""
 
 import contextlib
 import os

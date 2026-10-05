@@ -45,7 +45,6 @@ class SweepPoint:
     dims: dict
     rate: float | None
     trial: int
-    rel_dir: str
     dir: Path
 
 
@@ -392,7 +391,7 @@ class SweepEngine:
             point_dir.mkdir(parents=True, exist_ok=True)
             work_dir = point_dir
         point = SweepPoint(dims=dict(dims), rate=rate, trial=trial,
-                           rel_dir=rel, dir=work_dir)
+                           dir=work_dir)
 
         attempt = 0
         while True:

@@ -1,7 +1,6 @@
 """The keep-alive heartbeat: the single actor that re-arms the dead-man switch.
 
-Canonical semantics (formerly aspen's `bench.py vm-keep-alive`): every VM
-carries a `shutdown -h +60` timer; this loop cancels and re-arms it every
+Every VM carries a `shutdown -h +60` timer; this loop cancels and re-arms it every
 30 minutes. SIGINT and SIGTERM both stop the loop and (by default) stop the
 VMs; any harder death simply stops the re-arming, and the VMs power off
 within the dead-man window.

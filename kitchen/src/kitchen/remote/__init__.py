@@ -1,9 +1,9 @@
-"""Remote execution backends: gcloud, plain ssh, local processes, and a test fake.
+"""Remote execution backends: gcloud, plain ssh, docker, local processes, and
+a test mock.
 
-Extracted from aspen-bft/scripts/benchmarks/remote.py (of which the VSAC
-repos carried a drifted fork). Site defaults (GCP project, IAP, retry knobs)
-live in RemoteSettings rather than module constants; consumer repos install
-theirs with set_default_settings() or pass them to load_remote().
+Site defaults (GCP project, IAP, retry knobs) live in RemoteSettings;
+consumer repos install theirs with set_default_settings() or pass them to
+load_remote().
 """
 
 from .base import Remote

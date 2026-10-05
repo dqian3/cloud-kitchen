@@ -1,8 +1,7 @@
 """Cluster lifecycle: start/stop with the dead-man switch, clock sync,
 and a single-owner keep-alive heartbeat.
 
-The safety model, unchanged from the scripts this was extracted from: every
-running VM carries a GCE-side `shutdown -h +N` timer, re-armed periodically by
+The safety model: every running VM carries a GCE-side `shutdown -h +N` timer, re-armed periodically by
 exactly one keep-alive actor. If nothing re-arms — daemon dead, laptop asleep,
 process SIGKILLed — the VMs power themselves off within N minutes. The
 fail-safe lives on the VMs, not in any local process.

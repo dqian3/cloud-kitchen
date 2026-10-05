@@ -29,8 +29,8 @@ def create_app(config: Config, start_paused: bool = False) -> FastAPI:
     async def lifespan(app: FastAPI):
         app.state.hub.bind_loop(asyncio.get_running_loop())
         # Jobs that were running under a previous daemon and whose pid is
-        # gone become 'interrupted' (resumable); live ones keep running and
-        # will be re-noticed only as log files — M1 does not re-adopt them.
+        # gone go back to the queue. Live ones keep running, but the daemon
+        # does not re-adopt them: they are visible only as log files.
         jobs.recover_orphans(app.state.db, app.state.hub)
         if start_paused:
             app.state.scheduler.set_paused(True)

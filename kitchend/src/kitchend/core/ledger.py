@@ -154,8 +154,7 @@ def _upsert_point(db, run_id, dims, rate, trial, metrics, summary_path,
 
 def scan_project(db, project_cfg) -> dict:
     """Walk the project's runs roots for sweep dirs (anything holding a
-    sweep_results.json — both old-driver and SweepEngine output) and upsert
-    them. Cheap enough to re-run whole; existing rows are refreshed."""
+    sweep_results.json) and upsert them. Cheap enough to re-run whole; existing rows are refreshed."""
     project_id = jobs.ensure_project_row(db, project_cfg)
     added = updated = 0
     roots = project_cfg.runs_roots or ("runs",)
@@ -238,7 +237,7 @@ def _index_sweep_dir(db, project_id, sweep_dir: Path) -> bool | None:
         # parallel set.
         #
         # Position stays the identity only when an entry carries no dims at
-        # all -- an old-driver flat summary -- where two entries differing in
+        # all -- a flat summary -- where two entries differing in
         # a dim the ledger cannot name must not collapse into one.
         dims = {k: entry[k] for k in _DIM_KEYS if k in entry}
         _upsert_point(db, run_id, dims or {"i": i},
@@ -344,10 +343,11 @@ def get_run(db, run_id):
 
 
 def next_trial(db, run_id) -> int | None:
-    """The first unused trial number in a run, or None for legacy data.
+    """The first unused trial number in a run, or None if its points carry
+    no trial tag.
 
-    Native sweep points always carry a trial tag. Older scanned summaries may
-    not, and guessing an offset for those could overwrite data on disk.
+    SweepEngine points always carry one. A scanned summary may not, and
+    guessing an offset for those could overwrite data on disk.
     """
     row = db.query_one(
         "SELECT MAX(trial) AS last_trial, COUNT(*) AS n FROM run_points "

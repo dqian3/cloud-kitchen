@@ -208,10 +208,10 @@ class Scheduler:
     def _shares_cluster(self, a, b) -> bool:
         """Would the next job use the fleet this one is finishing with?
 
-        Same cluster, nothing subtler. Overlapping-but-different clusters
-        (main's VMs are a subset of n51's) used to count, from when several
-        holders could lease at once; now the next job brings up whichever
-        cluster it names, so keeping a different one up buys nothing.
+        Same cluster, nothing subtler. An overlapping but different cluster
+        (main's VMs are a subset of n51's) does not count: the next job
+        brings up whichever cluster it names, so keeping a different one up
+        buys nothing.
         """
         ca, cb = a["spec"].get("cluster"), b["spec"].get("cluster")
         return bool(ca) and ca == cb and a["project"] == b["project"]
