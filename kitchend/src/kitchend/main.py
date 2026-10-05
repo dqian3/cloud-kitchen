@@ -55,11 +55,26 @@ def _fmt_job_line(j):
         or " ".join(j["spec"].get("experiments") or []) or "job"
     queue = j["spec"].get("queue") or j["project"]
     managed = " ⚙" if j["spec"].get("cluster") else ""
-    state = j["outcome"] if j["state"] == "done" else j["state"]
+    state = j.get("display_state") or (
+        j["outcome"] if j["state"] == "done" else j["state"])
     if j.get("attempts", 0) > 1 and j["state"] != "done":
         state += f" #{j['attempts']}"
     return (f"#{j['id']:<5} {j['project']:<10} {state:<11} "
-            f"{queue}{managed}  {what}")
+            f"{queue}{managed}  {what}{_fmt_cluster_wait(j)}")
+
+
+def _fmt_cluster_wait(j):
+    """Why a job is between attempts: how many it has used, the time to the
+    next one, and the reason the last one failed."""
+    if j.get("display_state") != "retrying":
+        return ""
+    out = (f"\n       attempt {j.get('attempts', 0)} of "
+           f"{j.get('max_attempts', '?')} failed")
+    if j.get("retry_in_s"):
+        out += f", next try in {max(1, round(j['retry_in_s'] / 60))}m"
+    # A cloud provider's own reason follows the last " -- " in the error.
+    why = (j.get("last_error") or "").rpartition(" -- ")[2].rstrip("')")
+    return out + (f"\n       {why}" if why else "")
 
 
 def cmd_catalog(config, args):
@@ -361,8 +376,8 @@ def main(argv=None):
     p.add_argument("--tag", action="append", default=[], metavar="NAME",
                    help="tag every run this job produces (repeatable); group them later with `kitchend runs --tag`")
     p.add_argument("--priority", type=int, default=0)
-    p.add_argument("--attempts", type=int, default=20, dest="retries",
-                   help="driver invocations before giving up")
+    p.add_argument("--attempts", type=int, default=3, dest="retries",
+                   help="tries (cluster starts or runs) before giving up")
     p.add_argument("--after", type=int, default=None,
                    help="queue directly behind this job "
                         "(default: behind the last job on the same cluster)")
@@ -377,7 +392,7 @@ def main(argv=None):
     p.add_argument("--tag", action="append", default=[], metavar="NAME",
                    help="tag every run this job produces (repeatable); group them later with `kitchend runs --tag`")
     p.add_argument("--priority", type=int, default=0)
-    p.add_argument("--attempts", type=int, default=20, dest="retries")
+    p.add_argument("--attempts", type=int, default=3, dest="retries")
     p.add_argument("--after", type=int, default=None)
 
     p = sub.add_parser("hold", help="keep a cluster up for a while after the "

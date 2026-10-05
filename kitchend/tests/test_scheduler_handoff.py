@@ -95,6 +95,30 @@ def test_cluster_is_kept_between_retry_attempts(tmp_path):
     assert not any(call[0] == "down" for call in clusters.calls)
 
 
+def test_failed_cluster_start_uses_an_attempt_and_stops_at_the_limit(tmp_path):
+    scheduler, db, clusters, project_id = setup_scheduler(tmp_path, exit_code=0)
+
+    async def no_capacity(key, purpose="user", **kwargs):
+        raise RuntimeError("stockout")
+    clusters.up = no_capacity
+    job_id = submit(db, project_id)
+
+    asyncio.run(scheduler._run(jobs.get(db, job_id)))
+    job = jobs.get(db, job_id)
+    assert job["state"] == jobs.WAITING
+    assert job["attempts"] == 1
+    # No driver ran, so the next attempt must not resume.
+    assert job["will_resume"] is False
+
+    for _ in range(2):
+        asyncio.run(scheduler._run(jobs.get(db, job_id)))
+    job = jobs.get(db, job_id)
+    assert job["outcome"] == jobs.FAILED
+    assert job["attempts"] == 3
+    assert "out of attempts" in job["last_error"]
+    assert len(jobs.attempts(db, job_id)) == 3
+
+
 def test_canceled_acquisition_hands_cluster_to_next_job(tmp_path):
     scheduler, db, clusters, project_id = setup_scheduler(tmp_path, exit_code=0)
     first_id = submit(db, project_id)

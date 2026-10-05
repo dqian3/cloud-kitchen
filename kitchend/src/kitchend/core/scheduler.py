@@ -11,9 +11,9 @@ existing contract):
   * → another attempt, resuming into the same run_dir so completed points are
       skipped, until max_attempts
 
-A cluster that will not come up costs no attempt: nothing ran, so the job
-stays waiting with its next attempt due, and the cluster is held down for
-that delay so the rest of its queue does not probe it in turn.
+A cluster that will not come up costs an attempt too: the job goes back to
+waiting with its next attempt due, and the cluster is held down for that
+delay so the rest of its queue does not probe it in turn.
 
 Attempts stop early when two in a row die before finishing a point: that is a
 broken environment, not a flaky run.
@@ -238,9 +238,9 @@ class Scheduler:
                     jobs.default_run_dir(project_cfg, job_id))
                 self.db.execute("UPDATE jobs SET run_dir = ? WHERE id = ?",
                                 (spec["run_dir"], job_id))
-            if job["attempts"]:
-                # Every attempt after the first resumes: the points the last
-                # one finished are on disk and must not be run again.
+            if job["started_at"]:
+                # Every attempt after the first run resumes: the points the
+                # last one finished are on disk and must not be run again.
                 spec["resume"] = True
             argv, cwd = jobs.build_command(project_cfg, spec)
         except (KeyError, ValueError) as e:
@@ -277,7 +277,12 @@ class Scheduler:
                 # a spec verbatim, so a delay stored before the ten-minute
                 # change kept being inherited by descendants.
                 delay = self.config.cluster_retry_delay_secs
-                # No attempt is spent: nothing ran.
+                # A failed start is an attempt like any other.
+                n = jobs.fail_start(self.db, self.hub, job_id, error)
+                if n >= job["max_attempts"]:
+                    jobs.finish(self.db, self.hub, job_id, jobs.FAILED,
+                                last_error=f"{error}; out of attempts")
+                    return
                 self._wait_until[job_id] = time.monotonic() + delay
                 self.hub.emit("job.waiting", job_id=job_id, delay_secs=delay,
                               cluster=cluster_key)
@@ -375,7 +380,7 @@ class Scheduler:
         # answer. Exit 1 was retried, so a sweep that completed with one dead
         # point re-leased the fleet, replayed every point that had already
         # succeeded, reached the same dead point, and exited 1 again -- for
-        # all twenty attempts, since nothing about a failed point changes by
+        # every attempt it had, since nothing about a failed point changes by
         # running the rest of the sweep a second time.
         #
         # A driver that never reached the contract -- killed, crashed, exited

@@ -84,7 +84,8 @@ A job is one command line, run in `driver_cwd`. The daemon:
    later attempt);
 3. reads the exit code: **0** done, **2** finished but some points produced
    no data (kept, not retried), **anything else** retried into the same
-   directory, up to 20 attempts;
+   directory. A job gets 3 attempts in all, and a cluster that fails to
+   start uses one;
 4. hands the cluster to the next job queued on it, or stops it.
 
 Jobs on the same cluster run one at a time, in queue order. If the daemon

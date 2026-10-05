@@ -17,7 +17,7 @@ A job spec (stored verbatim as spec_json):
       "run_dir":     null,                     # assigned at first spawn
       "resume":      false,
       "priority":    0,
-      "max_attempts": 20,
+      "max_attempts": 3,
       "retry_delay_secs": 600     # after a failed RUN; see below
     }
 
@@ -34,10 +34,10 @@ into the same run dir, until max_attempts.
 import json
 from pathlib import Path
 
-# Attempts are cheap next to a lost measurement: a failed run resumes into its
-# directory rather than being given up on. The matching cooldown for a cluster
-# that would not come up lives in the daemon config, not here.
-DEFAULT_MAX_ATTEMPTS = 20
+# One limit for every way a job can fail to finish: a cluster that would not
+# start counts the same as a driver that died. The cooldown after a failed
+# cluster start lives in the daemon config, not here.
+DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECS = 600
 
 WAITING = "waiting"         # in the queue: waiting its turn, or for a cluster
@@ -147,7 +147,7 @@ def _to_dict(row):
     # submission spec remains unchanged.
     d["will_resume"] = bool(
         d.get("run_dir")
-        and (d["spec"].get("resume") or d.get("attempts", 0) > 0))
+        and (d["spec"].get("resume") or d.get("started_at")))
     return d
 
 
@@ -229,6 +229,18 @@ def start_attempt(db, hub, job_id) -> int:
     db.execute("UPDATE jobs SET attempts = ?, started_at = "
                "COALESCE(started_at, datetime('now')) WHERE id = ?", (n, job_id))
     db.insert("INSERT INTO job_attempts (job_id, n) VALUES (?, ?)", (job_id, n))
+    hub.emit("job.attempt", job_id=job_id, n=n)
+    return n
+
+
+def fail_start(db, hub, job_id, error) -> int:
+    """Record an attempt whose cluster never came up; returns its number.
+    The job's started_at is left alone, since no driver ran."""
+    n = db.query_one("SELECT attempts + 1 AS n FROM jobs WHERE id = ?",
+                     (job_id,))["n"]
+    db.execute("UPDATE jobs SET attempts = ? WHERE id = ?", (n, job_id))
+    db.insert("INSERT INTO job_attempts (job_id, n, finished_at, error) "
+              "VALUES (?, ?, datetime('now'), ?)", (job_id, n, error))
     hub.emit("job.attempt", job_id=job_id, n=n)
     return n
 
