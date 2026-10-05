@@ -494,6 +494,7 @@ class Scheduler:
         if job is None:
             raise KeyError(job_id)
         spec = dict(job["spec"])
+        jobs.canonical_argv(spec)
         spec["resume"] = bool(resume)
         if resume:
             if not job.get("run_dir"):

@@ -9,7 +9,7 @@ fail-safe lives on the VMs, not in any local process.
 """
 
 from .clocks import parse_chronyc_offset, sync_clocks
-from .keepalive import AlreadyRunning, KeepAlive
+from .keepalive import AlreadyRunning, ClusterState, KeepAlive
 from .lifecycle import (
     arm_shutdown,
     arm_shutdown_cmd,
@@ -18,7 +18,6 @@ from .lifecycle import (
     unarmed,
     wait_drained,
 )
-from .state import ClusterState
 
 __all__ = [
     "parse_chronyc_offset", "sync_clocks",

@@ -1,7 +1,6 @@
 __pycache__/
 *.pyc
 .venv/
-uv.lock
 ui/dist/
 ui/node_modules/
 .pytest_cache/

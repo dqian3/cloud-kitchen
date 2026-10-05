@@ -11,8 +11,8 @@ A job spec (stored verbatim as spec_json):
 
     {
       "project":     "aspen-bft",
-      "experiments": ["aspen", "flutter"],     # driver args, or
-      "command":     ["python3", "x.py"],      # canonical argv after submission
+      "experiments": ["aspen", "flutter"],     # catalog names it came from
+      "command":     ["python3", "x.py"],      # the argv dispatch runs
       "queue":       "main",                   # display grouping; default = project
       "run_dir":     null,                     # assigned at first spawn
       "resume":      false,
@@ -352,24 +352,8 @@ def place(db, hub, job_id: int, after: int | None = None) -> int | None:
 
 
 def build_command(project_cfg, spec: dict):
-    """(argv, cwd) for a job, with runtime-owned output/resume flags.
-
-    New submissions always carry one canonical `command`. The driver,
-    driver_args, and extra_flags branches remain for jobs queued by older
-    daemon versions so a restart does not invalidate existing work.
-    """
-    if spec.get("command"):
-        argv = list(spec["command"])
-    else:
-        if not project_cfg.driver:
-            raise ValueError(
-                f"project '{project_cfg.name}' has no driver configured and "
-                "the job spec has no explicit command")
-        # driver_args (resolved from the experiment catalog at submit time)
-        # wins over raw experiment names.
-        args = spec.get("driver_args") or spec.get("experiments", [])
-        argv = list(project_cfg.driver) + list(args)
-    argv += [str(f) for f in spec.get("extra_flags", [])]
+    """(argv, cwd) for a job, with runtime-owned output/resume flags."""
+    argv = canonical_argv(spec)
     if spec.get("run_dir"):
         argv += [project_cfg.output_dir_flag, str(spec["run_dir"])]
     if spec.get("resume"):
@@ -396,13 +380,22 @@ def build_command(project_cfg, spec: dict):
     return argv, cwd
 
 
+def canonical_argv(spec: dict) -> list:
+    """A stored job's argv. A spec that keeps part of its command outside
+    `command` is refused rather than run without that part."""
+    if not spec.get("command") or spec.get("extra_flags") \
+            or spec.get("driver_args"):
+        raise ValueError("job has no canonical command; submit it again")
+    return list(spec["command"])
+
+
 def canonicalize_command(project_cfg, spec: dict) -> None:
     """Collapse every command input into the sole executable argv in-place.
 
-    Catalog commands, classic driver arguments, and caller extra flags are
-    submission-time inputs. Keeping them separate in a queued job made its
-    displayed command differ from what dispatch actually ran. Runtime-owned
-    output-dir and resume flags deliberately remain separate.
+    Catalog commands and classic driver arguments are submission-time
+    inputs; the queue stores only the argv they resolve to, so the command
+    a job displays is the one dispatch runs. Runtime-owned output-dir and
+    resume flags deliberately remain separate.
     """
     if spec.get("command"):
         argv = list(spec["command"])
@@ -413,10 +406,8 @@ def canonicalize_command(project_cfg, spec: dict) -> None:
                 "the job spec has no explicit command")
         args = spec.get("driver_args") or spec.get("experiments", [])
         argv = list(project_cfg.driver) + list(args)
-    argv += [str(f) for f in spec.get("extra_flags", [])]
     spec["command"] = [str(a) for a in argv]
     spec.pop("driver_args", None)
-    spec.pop("extra_flags", None)
 
 
 def added_trials_spec(source: dict, run_dir: str, trials: int,
@@ -427,25 +418,8 @@ def added_trials_spec(source: dict, run_dir: str, trials: int,
     if trial_offset < 0:
         raise ValueError("trial offset must be >= 0")
     spec = dict(source)
-    if spec.get("command"):
-        # Include a legacy queued job's separate flags, then leave the new job
-        # in canonical form.
-        argv = list(spec["command"]) + list(spec.get("extra_flags") or ())
-        argv = _without_cli_option(argv, "--trials")
-        argv = _without_cli_option(argv, "--trial-offset")
-        argv = _set_cli_option(argv, "--trials", trials)
-        spec["command"] = _set_cli_option(argv, "--trial-offset", trial_offset)
-        spec.pop("driver_args", None)
-        spec.pop("extra_flags", None)
-    else:
-        # Compatibility for a classic driver job queued before commands were
-        # canonicalized at submission.
-        flags = _without_cli_option(list(spec.get("extra_flags") or ()),
-                                    "--trials")
-        flags = _without_cli_option(flags, "--trial-offset")
-        flags = _set_cli_option(flags, "--trials", trials)
-        spec["extra_flags"] = _set_cli_option(
-            flags, "--trial-offset", trial_offset)
+    argv = _set_cli_option(canonical_argv(spec), "--trials", trials)
+    spec["command"] = _set_cli_option(argv, "--trial-offset", trial_offset)
     spec["run_dir"] = str(run_dir)
     spec["resume"] = True
     spec.pop("after", None)
@@ -463,18 +437,11 @@ def retried_point_spec(source: dict, run_dir: str, point: dict) -> dict:
     target = {"dims": point.get("dims") or {}, "rate": point.get("rate"),
               "trial": int(trial)}
     spec = dict(source)
-    argv = list(spec.get("command") or ()) + list(spec.get("extra_flags") or ())
-    if not argv:
-        raise ValueError("source job has no canonical command")
-    for flag in ("--trials", "--trial-offset", "--retry-point"):
-        argv = _without_cli_option(argv, flag)
-    argv = _set_cli_option(argv, "--trials", 1)
+    argv = _set_cli_option(canonical_argv(spec), "--trials", 1)
     argv = _set_cli_option(argv, "--trial-offset", int(trial))
     spec["command"] = _set_cli_option(
         argv, "--retry-point", json.dumps(target, separators=(",", ":"),
                                            sort_keys=True))
-    spec.pop("driver_args", None)
-    spec.pop("extra_flags", None)
     spec.pop("after", None)
     spec["run_dir"] = str(run_dir)
     spec["resume"] = True

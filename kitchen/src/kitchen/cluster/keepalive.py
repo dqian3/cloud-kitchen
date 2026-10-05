@@ -15,12 +15,29 @@ import fcntl
 import os
 import signal
 import time
+from pathlib import Path
 
+from ..site import STATE_DIR
 from .lifecycle import arm_shutdown
 
 
 class AlreadyRunning(RuntimeError):
     """Another keep-alive holds this cluster's lock."""
+
+
+class ClusterState:
+    """A cluster's directory under the state dir, holding its keep-alive lock."""
+
+    def __init__(self, name: str, root: Path | None = None):
+        if not name or "/" in name:
+            raise ValueError(f"bad cluster name: {name!r}")
+        self.name = name
+        self.dir = (root or STATE_DIR) / "clusters" / name
+        self.dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def keepalive_lock_path(self) -> Path:
+        return self.dir / "keepalive.lock"
 
 
 def _interval_desc(interval_s):

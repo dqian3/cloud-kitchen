@@ -151,8 +151,8 @@ def test_add_trials_resumes_result_at_next_offset(tmp_path):
     sweep_dir.mkdir(parents=True)
     source = jobs.submit(db, project_id, {
         "project": "p", "name": "exp", "experiments": ["exp"],
-        "command": ["fake-driver", "--trials", "3"],
-        "extra_flags": ["--trial-offset=0"], "run_dir": str(job_dir),
+        "command": ["fake-driver", "--trials", "3", "--trial-offset=0"],
+        "run_dir": str(job_dir),
     })
     jobs.finish(db, scheduler.hub, source, jobs.OK)
     run_id = db.insert(
@@ -171,7 +171,6 @@ def test_add_trials_resumes_result_at_next_offset(tmp_path):
     assert result["trial_offset"] == 3
     assert added["run_dir"] == str(job_dir)
     assert added["will_resume"] is True
-    assert "extra_flags" not in added["spec"]
     assert argv.count("--trials") == 1
     assert argv[argv.index("--trials") + 1] == "2"
     assert argv.count("--trial-offset") == 1

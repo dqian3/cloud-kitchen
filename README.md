@@ -21,8 +21,16 @@ version:
 Consumer repos import the library through a small shim named `remote.py`
 (path-inserted; override the checkout location with `KITCHEN_PATH`):
 
-- `aspen-bft/scripts/benchmarks/remote.py` — site defaults from `ASPEN_*` env
-- `vsac/{lazylog-rpc,corfu-cplusplus}/vsac-scripts/remote.py` — `VSAC_*` env
+- `aspen-bft/benchmarks/remote.py` — site defaults from `ASPEN_*` env
+
+## Writing an adapter
+
+A project tells the daemon what it can run through a `kitchen_adapter.py`
+named by `adapter_path` in the daemon config. `kitchen/src/kitchen/adapter.py`
+defines the interface (`ProjectAdapter`). The toy project is the worked
+example and needs no cloud: `kitchen/src/kitchen/run/kitchen_adapter.py` is
+its adapter and `kitchen/src/kitchen/run/toy.py` the sweep it runs
+(`python -m kitchen.run.toy --output-dir DIR --rate-search`).
 
 ## Development
 
